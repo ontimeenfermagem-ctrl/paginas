@@ -1,0 +1,16 @@
+# dependências (só o playwright dos testes e2e)
+node_modules/
+
+# variáveis de ambiente: os valores de verdade moram no Railway, nunca no repositório
+.env*
+!.env.example
+
+# relatórios de teste
+test-results/
+playwright-report/
+
+# logs
+npm-debug.log*
+
+# sistema
+.DS_Store

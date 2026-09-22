@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f4ebdd">
+    <meta name="color-scheme" content="light">
+    <meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+    <meta name="referrer" content="no-referrer">
+    <title>Painel da pesquisa | Escola Enfermagem de Valor</title>
+    <link rel="icon" href="/img/favicon-32.png" sizes="32x32" type="image/png">
+    <link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+    <link rel="preload" href="/fonts/parkinsans-latin.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="/css/painel.css?v=2">
+    <!-- A ordem importa: o painel lê perguntas, alternativas e perfis de EVPesquisa. Nenhuma
+         lista de perguntas mora no painel — mudou no config, mudou aqui. -->
+    <script src="/js/pesquisa-config.js?v=2" defer></script>
+    <script src="/js/painel.js?v=2" defer></script>
+  </head>
+  <body>
+    <noscript>
+      <p class="noscript">O painel precisa de JavaScript ligado para funcionar.</p>
+    </noscript>
+
+    <main class="app" id="conteudo">
+      <!-- ============================================================ Login -->
+      <section class="login" data-login-view hidden aria-labelledby="login-titulo">
+        <form class="login-card" id="painel-login" novalidate>
+          <img class="login-logo" src="/img/ev-logo-color.png" alt="Escola Enfermagem de Valor" width="414" height="252">
+          <div class="gold-rule" aria-hidden="true"></div>
+          <h1 class="login-titulo" id="login-titulo">Painel da pesquisa</h1>
+          <p class="login-lead">Entre para ver quem respondeu a pesquisa de perfil da Escola e o que as respostas dizem.</p>
+
+          <div class="campo">
+            <label for="login-email">E-mail</label>
+            <input id="login-email" name="email" type="email" autocomplete="username" inputmode="email" autocapitalize="off" spellcheck="false" required>
+          </div>
+
+          <div class="campo">
+            <label for="login-senha">Senha</label>
+            <input id="login-senha" name="senha" type="password" autocomplete="current-password" required>
+          </div>
+
+          <button class="botao botao-principal" type="submit">Entrar</button>
+          <p class="login-status" data-login-status role="status" aria-live="polite"></p>
+        </form>
+      </section>
+
+      <!-- ============================================================ Painel -->
+      <div class="painel" data-panel-view hidden>
+        <header class="topo">
+          <div class="topo-marca">
+            <img src="/img/ev-logo-color.png" alt="Escola Enfermagem de Valor" width="414" height="252">
+            <div>
+              <p class="eyebrow">Painel da pesquisa</p>
+              <h1 class="topo-titulo" data-panel-title tabindex="-1">Pesquisa de ICP — Escola Enfermagem de Valor</h1>
+            </div>
+          </div>
+          <div class="topo-conta">
+            <span class="topo-email" data-conta-email></span>
+            <button class="botao-texto" type="button" data-sair>Sair</button>
+          </div>
+        </header>
+
+        <!-- Faixa de páginas do funil. O /painel não é só da pesquisa: cada página nova do funil
+             entra como uma aba, montada a partir do registro PAGINAS em js/painel.js (config +
+             render próprios). O atributo é data-pagina, como no /admin do quintino. -->
+        <nav class="paginas" role="tablist" aria-label="Página do funil" data-paginas></nav>
+
+        <div class="pagina-conteudo" id="pagina-pesquisa-icp-painel" role="tabpanel" aria-labelledby="pagina-pesquisa-icp" data-pagina-conteudo="pesquisa-icp">
+        <!-- Filtros: ficam presos no topo ao rolar. Tudo abaixo deles responde ao mesmo recorte. -->
+        <div class="filtros" data-filtros>
+          <div class="filtros-linha">
+            <div class="segmentado" role="group" aria-label="Período" data-periodos>
+              <button type="button" class="seg" data-periodo="hoje" aria-pressed="false">Hoje</button>
+              <button type="button" class="seg" data-periodo="7" aria-pressed="false">7 dias</button>
+              <button type="button" class="seg" data-periodo="30" aria-pressed="false">30 dias</button>
+              <button type="button" class="seg" data-periodo="tudo" aria-pressed="true">Tudo</button>
+              <button type="button" class="seg" data-periodo="personalizado" aria-pressed="false"><span class="so-largo">Personalizado</span><span class="so-estreito">Datas</span></button>
+            </div>
+            <div class="filtros-acoes">
+              <span class="atualizado" data-atualizado aria-live="off">—</span>
+              <label class="auto">
+                <input type="checkbox" data-auto checked aria-describedby="auto-dica">
+                <span>Auto</span>
+                <span class="visualmente-oculto" id="auto-dica">Atualiza sozinho a cada minuto enquanto esta aba estiver aberta</span>
+              </label>
+              <button type="button" class="botao botao-leve botao-pequeno" data-atualizar>
+                <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <span>Atualizar</span>
+              </button>
+            </div>
+          </div>
+
+          <form class="datas" data-datas hidden novalidate>
+            <label class="campo-inline">
+              <span>De</span>
+              <input type="date" data-data-de required>
+            </label>
+            <label class="campo-inline">
+              <span>Até</span>
+              <input type="date" data-data-ate required>
+            </label>
+            <button type="submit" class="botao botao-principal botao-pequeno">Aplicar</button>
+            <p class="datas-erro" data-datas-erro role="alert"></p>
+          </form>
+
+          <div class="perfis" role="tablist" aria-label="Perfil profissional" data-perfis></div>
+        </div>
+
+        <p class="status" data-panel-status role="status" aria-live="polite"></p>
+
+        <nav class="atalhos" aria-label="Seções do painel">
+          <a href="#sec-visao">Visão geral</a>
+          <a href="#sec-icp">ICP por perfil</a>
+          <a href="#sec-perguntas">Por pergunta</a>
+          <a href="#sec-cruzamento">Cruzamento</a>
+          <a href="#sec-abertas">Respostas abertas</a>
+          <a href="#sec-trafego">Tráfego</a>
+          <a href="#sec-pessoas">Pessoas</a>
+        </nav>
+
+        <div class="vazio-geral" data-vazio-geral hidden></div>
+
+        <!-- ================================================= Visão geral -->
+        <section class="secao" id="sec-visao" aria-labelledby="visao-titulo" data-agregado>
+          <div class="secao-cabeca">
+            <p class="eyebrow" data-periodo-rotulo>Desde o começo</p>
+            <h2 id="visao-titulo">Visão geral</h2>
+          </div>
+          <ul class="placar" data-placar aria-label="Números principais"></ul>
+
+          <div class="cartao" aria-labelledby="funil-titulo">
+            <div class="cartao-cabeca">
+              <h3 id="funil-titulo">Funil da pesquisa</h3>
+              <p class="cartao-sub" data-funil-sub>Cada pessoa conta no ponto mais distante que alcançou.</p>
+            </div>
+            <ol class="funil" data-funil></ol>
+            <p class="nota" data-funil-nota></p>
+          </div>
+
+          <div class="cartao" aria-labelledby="dia-titulo">
+            <div class="cartao-cabeca cartao-cabeca-acao">
+              <div>
+                <h3 id="dia-titulo">Por dia</h3>
+                <p class="cartao-sub">Visitantes pelo dia da primeira visita, identificados pelo dia em que deixaram o contato, concluídas pelo dia em que terminaram. Horário de Brasília.</p>
+              </div>
+              <button type="button" class="botao-texto" data-dia-tabela aria-expanded="false" data-foco="dia-tabela">Ver como tabela</button>
+            </div>
+            <div class="dia" data-dia></div>
+          </div>
+
+          <div class="cartao" aria-labelledby="param-titulo">
+            <div class="cartao-cabeca">
+              <h3 id="param-titulo">Onde as pessoas param</h3>
+              <p class="cartao-sub" data-param-sub>Quem se identificou e ainda não terminou: a pergunta que estava na tela quando parou.</p>
+            </div>
+            <div data-paradas></div>
+          </div>
+        </section>
+
+        <!-- ================================================= ICP -->
+        <section class="secao" id="sec-icp" aria-labelledby="icp-titulo" data-agregado>
+          <div class="secao-cabeca secao-cabeca-acao">
+            <div>
+              <p class="eyebrow">Perfil de cliente ideal</p>
+              <h2 id="icp-titulo">ICP por perfil</h2>
+              <p class="secao-sub">A resposta mais comum de cada variável, com o peso dela entre quem respondeu aquela pergunta naquele perfil.</p>
+            </div>
+            <button type="button" class="botao botao-leve" data-copiar-icp data-foco="copiar-icp">
+              <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16"><rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              <span>Copiar resumo</span>
+            </button>
+          </div>
+          <p class="copiado" data-copiado role="status" aria-live="polite"></p>
+          <div class="icp" data-icp></div>
+        </section>
+
+        <!-- ================================================= Por pergunta -->
+        <section class="secao" id="sec-perguntas" aria-labelledby="perguntas-titulo" data-agregado>
+          <div class="secao-cabeca">
+            <p class="eyebrow">Distribuições</p>
+            <h2 id="perguntas-titulo">Respostas por pergunta</h2>
+            <p class="secao-sub">Todas as alternativas, na ordem da pergunta. A porcentagem é sempre sobre quem respondeu aquela pergunta.</p>
+          </div>
+          <div class="etapas" data-perguntas></div>
+        </section>
+
+        <!-- ================================================= Cruzamento -->
+        <section class="secao" id="sec-cruzamento" aria-labelledby="cruz-titulo">
+          <div class="secao-cabeca">
+            <p class="eyebrow">Cruzamento</p>
+            <h2 id="cruz-titulo">Uma pergunta contra a outra</h2>
+            <p class="secao-sub">Escolha o que vai nas linhas e nas colunas. Só entra quem respondeu as duas.</p>
+          </div>
+          <div class="cartao">
+            <div class="cruz-controles">
+              <label class="campo-inline">
+                <span>Linhas</span>
+                <select data-cruz-linha data-foco="cruz-linha"></select>
+              </label>
+              <label class="campo-inline">
+                <span>Colunas</span>
+                <select data-cruz-coluna data-foco="cruz-coluna"></select>
+              </label>
+              <div class="segmentado segmentado-pequeno" role="group" aria-label="Mostrar como" data-cruz-modos>
+                <button type="button" class="seg" data-modo="linha" aria-pressed="true">% da linha</button>
+                <button type="button" class="seg" data-modo="coluna" aria-pressed="false">% da coluna</button>
+                <button type="button" class="seg" data-modo="numeros" aria-pressed="false">Números</button>
+              </div>
+            </div>
+            <div data-cruzamento></div>
+          </div>
+        </section>
+
+        <!-- ================================================= Abertas -->
+        <section class="secao" id="sec-abertas" aria-labelledby="abertas-titulo">
+          <div class="secao-cabeca">
+            <p class="eyebrow">Na voz delas</p>
+            <h2 id="abertas-titulo">Respostas abertas</h2>
+            <p class="secao-sub">O que as pessoas escreveram com as próprias palavras. Ouro para copy, criativo e conteúdo.</p>
+          </div>
+          <div class="cartao">
+            <div class="abas" role="tablist" aria-label="Pergunta aberta" data-abertas-abas>
+              <button type="button" class="aba" role="tab" id="aba-problema" aria-controls="abertas-painel" data-aberta="problema" aria-selected="true" tabindex="0">O único problema</button>
+              <button type="button" class="aba" role="tab" id="aba-sonho" aria-controls="abertas-painel" data-aberta="sonho" aria-selected="false" tabindex="-1">Maior sonho</button>
+              <button type="button" class="aba" role="tab" id="aba-frase" aria-controls="abertas-painel" data-aberta="frase" aria-selected="false" tabindex="-1">Complete a frase</button>
+            </div>
+            <div id="abertas-painel" role="tabpanel" aria-labelledby="aba-problema" data-abertas-painel>
+              <p class="aberta-pergunta" data-aberta-pergunta></p>
+              <label class="campo-inline campo-busca">
+                <span>Buscar no que já carregou</span>
+                <input type="search" data-abertas-busca autocomplete="off" placeholder="Ex.: medo, plantão, salário">
+              </label>
+              <div data-abertas></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================================================= Tráfego -->
+        <section class="secao" id="sec-trafego" aria-labelledby="trafego-titulo" data-agregado>
+          <div class="secao-cabeca">
+            <p class="eyebrow">Origem</p>
+            <h2 id="trafego-titulo">Tráfego</h2>
+            <p class="secao-sub">De onde veio quem acessou, quem se identificou e quem terminou. Primeiro toque: vale a origem da primeira visita.</p>
+          </div>
+          <div class="cartao">
+            <div class="segmentado segmentado-pequeno" role="group" aria-label="Agrupar por" data-trafego-campos>
+              <button type="button" class="seg" data-campo="utm_source" aria-pressed="true">Origem</button>
+              <button type="button" class="seg" data-campo="utm_campaign" aria-pressed="false">Campanha</button>
+              <button type="button" class="seg" data-campo="utm_medium" aria-pressed="false">Mídia</button>
+              <button type="button" class="seg" data-campo="utm_content" aria-pressed="false">Anúncio</button>
+              <button type="button" class="seg" data-campo="dispositivo" aria-pressed="false">Dispositivo</button>
+            </div>
+            <div data-trafego></div>
+          </div>
+        </section>
+
+        <!-- ================================================= Pessoas -->
+        <section class="secao" id="sec-pessoas" aria-labelledby="pessoas-titulo">
+          <div class="secao-cabeca">
+            <p class="eyebrow">Leads</p>
+            <h2 id="pessoas-titulo">Pessoas</h2>
+            <p class="secao-sub">Uma linha por pessoa (pelo WhatsApp), com a tentativa mais completa dela.</p>
+          </div>
+          <div class="pessoas-barra">
+            <label class="campo-inline campo-busca">
+              <span>Buscar</span>
+              <input type="search" data-busca autocomplete="off" placeholder="Nome, WhatsApp ou e-mail">
+            </label>
+            <label class="campo-inline">
+              <span>Situação</span>
+              <select data-status>
+                <option value="">Todas</option>
+                <option value="concluida">Responderam tudo</option>
+                <option value="em_andamento">Em andamento</option>
+              </select>
+            </label>
+            <div class="csv">
+              <a class="botao botao-leve" data-csv href="/api/painel/exportar.csv" download>
+                <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <span>Baixar CSV</span>
+              </a>
+              <label class="check">
+                <input type="checkbox" data-csv-tentativas>
+                <span>incluir tentativas repetidas</span>
+              </label>
+            </div>
+          </div>
+          <p class="contador" data-contador aria-live="polite"></p>
+          <div data-lista></div>
+        </section>
+        </div>
+
+        <footer class="rodape">
+          <img src="/img/ev-icone-color.png" alt="" width="155" height="155">
+          <p>Escola Enfermagem de Valor · painel interno. Os números contam o período inteiro no banco; a busca e a lista não mudam os números.</p>
+        </footer>
+      </div>
+    </main>
+
+    <div class="dica" data-dica hidden aria-hidden="true"></div>
+  </body>
+</html>

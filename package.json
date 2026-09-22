@@ -1,0 +1,18 @@
+{
+  "name": "pesquisa-escola-enfermagem-de-valor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:e2e": "node --test --test-concurrency=1 tests/e2e/*.e2e.mjs",
+    "painel:senha": "node scripts/gerar-senha-painel.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "playwright": "1.60.0"
+  }
+}

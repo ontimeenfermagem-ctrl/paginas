@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Pesquisa | Escola Enfermagem de Valor</title>
+    <meta
+      name="description"
+      content="Pesquisa da Escola Enfermagem de Valor: conte como está o seu momento na enfermagem e no cuidado e ajude a construir as próximas formações. Leva uns 7 minutos."
+    />
+    <meta name="robots" content="noindex, follow" />
+    <meta name="theme-color" content="#f4ebdd" />
+    <meta name="format-detection" content="telephone=no" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="pt_BR" />
+    <meta property="og:site_name" content="Escola Enfermagem de Valor" />
+    <meta property="og:title" content="Queremos construir as próximas formações com você" />
+    <meta
+      property="og:description"
+      content="São perguntas rápidas sobre o seu momento na enfermagem e no cuidado. Leva uns 7 minutos."
+    />
+    <meta property="og:image" content="/img/og-pesquisa.jpg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Pesquisa da Escola Enfermagem de Valor com a Iza Gonçalves" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Queremos construir as próximas formações com você" />
+    <meta
+      name="twitter:description"
+      content="São perguntas rápidas sobre o seu momento na enfermagem e no cuidado. Leva uns 7 minutos."
+    />
+    <meta name="twitter:image" content="/img/og-pesquisa.jpg" />
+
+    <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/img/apple-touch-icon.png" />
+    <link rel="preload" href="/fonts/parkinsans-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/img/iza-avatar.jpg" as="image" />
+    <link rel="stylesheet" href="/css/pesquisa.css" />
+    <!-- Sem JavaScript o botão "Começar" não faria nada: some tudo e fica só o aviso. -->
+    <noscript><style>.tela { display: none !important; }</style></noscript>
+
+    <script src="/js/lead-rules.js" defer></script>
+    <script src="/js/pesquisa-config.js" defer></script>
+    <script src="/js/pesquisa.js" defer></script>
+  </head>
+  <body class="grao">
+    <a class="pular-link" href="#conteudo">Pular para o conteúdo</a>
+
+    <!--
+      Cabeçalho das perguntas. Fica escondido nas boas-vindas e no fim; o js/pesquisa.js mostra e
+      preenche. É sticky (e não fixed) para nunca cobrir o título da pergunta.
+    -->
+    <header class="topo" id="topo" hidden>
+      <div class="topo-linha">
+        <button type="button" class="topo-voltar" id="botao-voltar" aria-label="Voltar">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+            <path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+        <div class="topo-info">
+          <div class="topo-texto">
+            <p class="topo-etapa" id="topo-etapa"></p>
+            <span class="topo-pct" id="topo-pct" aria-hidden="true">0%</span>
+          </div>
+          <div
+            class="barra"
+            id="barra"
+            role="progressbar"
+            aria-label="Progresso da pesquisa"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="0"
+          >
+            <span class="barra-preenchida" id="barra-preenchida"></span>
+          </div>
+        </div>
+      </div>
+      <p class="salvamento" id="salvamento" data-estado="ocioso">
+        <span class="salvamento-icone" aria-hidden="true"></span>
+        <span id="salvamento-texto"></span>
+      </p>
+    </header>
+
+    <main id="conteudo" class="palco">
+      <!-- ============================================================ 1. Boas-vindas -->
+      <section class="tela tela-boasvindas" id="tela-boasvindas" data-tela="boasvindas" aria-labelledby="bv-titulo">
+        <img class="bv-logo" src="/img/ev-logo-color.png" alt="Escola Enfermagem de Valor" width="414" height="252" />
+
+        <figure class="bv-foto">
+          <img src="/img/iza-avatar.jpg" alt="Foto da Iza Gonçalves" width="320" height="320" />
+          <figcaption class="bv-selo-nome">Iza Gonçalves</figcaption>
+        </figure>
+
+        <p class="eyebrow" id="bv-eyebrow">Pesquisa da Escola Enfermagem de Valor</p>
+        <h1 class="bv-titulo" id="bv-titulo" tabindex="-1">Queremos construir as próximas formações com você</h1>
+        <p class="bv-texto" id="bv-texto">
+          São perguntas rápidas sobre o seu momento na enfermagem e no cuidado. Leva uns 7 minutos, e cada resposta é
+          lida com carinho pela nossa equipe.
+        </p>
+
+        <ul class="selos" aria-label="Como funciona">
+          <li>
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <circle cx="12" cy="12" r="8.5" />
+              <path d="M12 7.5V12l3 2" />
+            </svg>
+            <span>Cerca de 7&nbsp;minutos</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <rect x="5.5" y="10.5" width="13" height="9.5" rx="2.5" />
+              <path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" />
+              <path d="M12 14.2v2.3" />
+            </svg>
+            <span>Respostas confidenciais</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M5 6.5h14M5 12h9M5 17.5h5" />
+              <circle cx="18" cy="16.5" r="2.6" />
+            </svg>
+            <span>Uma pergunta por vez</span>
+          </li>
+        </ul>
+
+        <div class="bv-acoes">
+          <button type="button" class="botao botao-principal" id="botao-comecar">
+            <span id="botao-comecar-texto">Começar</span>
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+              <path d="M5 12h13M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <button type="button" class="botao botao-secundario" id="botao-do-zero" hidden>Começar do zero</button>
+        </div>
+      </section>
+
+      <!-- ============================================================ 2. Contato -->
+      <section class="tela tela-contato" id="tela-contato" data-tela="contato" aria-labelledby="contato-titulo" hidden>
+        <div class="fala">
+          <img class="fala-avatar" src="/img/ev-icone-color.png" alt="" width="155" height="155" />
+          <div class="fala-balao">
+            <p class="fala-quem">Escola Enfermagem de Valor</p>
+            <p class="fala-texto">Antes de começar, conta pra gente quem é você.</p>
+          </div>
+        </div>
+
+        <h1 class="pergunta-titulo" id="contato-titulo" tabindex="-1">Seus dados de contato</h1>
+
+        <form class="form-contato" id="form-contato" novalidate>
+          <div class="campo" data-campo="nome">
+            <label for="campo-nome">Nome completo</label>
+            <input
+              id="campo-nome"
+              name="nome"
+              type="text"
+              autocomplete="name"
+              autocapitalize="words"
+              enterkeyhint="next"
+              maxlength="120"
+              aria-describedby="erro-nome"
+              placeholder="Como você se chama?"
+            />
+            <p class="campo-erro" id="erro-nome" hidden></p>
+          </div>
+
+          <div class="campo" data-campo="whatsapp">
+            <label for="campo-whatsapp">WhatsApp com DDD</label>
+            <input
+              id="campo-whatsapp"
+              name="whatsapp"
+              type="tel"
+              inputmode="numeric"
+              autocomplete="tel-national"
+              enterkeyhint="next"
+              maxlength="15"
+              aria-describedby="erro-whatsapp"
+              placeholder="(00) 00000-0000"
+            />
+            <p class="campo-erro" id="erro-whatsapp" hidden></p>
+          </div>
+
+          <div class="campo" data-campo="email">
+            <label for="campo-email">E-mail</label>
+            <input
+              id="campo-email"
+              name="email"
+              type="email"
+              inputmode="email"
+              autocomplete="email"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              enterkeyhint="go"
+              maxlength="254"
+              aria-describedby="erro-email"
+              placeholder="seuemail@exemplo.com"
+            />
+            <p class="campo-erro" id="erro-email" hidden></p>
+            <div class="sugestao" id="sugestao-email" role="group" aria-labelledby="sugestao-texto" hidden>
+              <p id="sugestao-texto">Você quis dizer <strong id="sugestao-valor"></strong>?</p>
+              <div class="sugestao-botoes">
+                <button type="button" class="sugestao-sim" id="sugestao-sim">Sim, corrigir</button>
+                <button type="button" class="sugestao-nao" id="sugestao-nao">Não, meu e-mail está certo</button>
+              </div>
+            </div>
+          </div>
+
+          <p class="form-status" id="contato-status" role="alert"></p>
+
+          <p class="lgpd">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+              <path d="M12 3.5l7 2.8v5.2c0 4.3-2.9 7.6-7 9-4.1-1.4-7-4.7-7-9V6.3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+              <path d="M9 12l2.2 2.2L15.2 10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            <span>
+              Seus dados ficam protegidos e são usados só pela Escola Enfermagem de Valor, conforme a
+              <a href="https://lp.escolaenfermagemdevalor.com.br/privacidade" target="_blank" rel="noopener">Política de Privacidade</a>.
+            </span>
+          </p>
+
+          <div class="rodape-acao">
+            <button type="submit" class="botao botao-principal" id="botao-contato">
+              <span class="botao-rotulo" id="botao-contato-texto">Começar a pesquisa</span>
+              <span class="botao-carregando" aria-hidden="true"></span>
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <!-- ============================================================ 3. Perguntas (o JS monta) -->
+      <section class="tela tela-pergunta" id="tela-pergunta" data-tela="pergunta" hidden></section>
+
+      <!-- ============================================================ 4. Fim -->
+      <section class="tela tela-fim" id="tela-fim" data-tela="fim" aria-labelledby="fim-titulo" hidden>
+        <div class="fim-selo" aria-hidden="true">
+          <svg viewBox="0 0 64 64" width="64" height="64" focusable="false">
+            <path d="M19 33.5l8.5 8.5L45 24" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </div>
+        <h1 class="fim-titulo" id="fim-titulo" tabindex="-1">
+          <span id="fim-saudacao">Muito obrigada!</span>
+          <svg class="fim-coracao" viewBox="0 0 24 24" width="30" height="30" aria-hidden="true" focusable="false">
+            <path d="M12 20.3s-7.6-4.6-9.2-9.4C1.7 7.5 3.8 4.2 7.2 4.2c2 0 3.6 1.1 4.8 2.8 1.2-1.7 2.8-2.8 4.8-2.8 3.4 0 5.5 3.3 4.4 6.7-1.6 4.8-9.2 9.4-9.2 9.4z" />
+          </svg>
+        </h1>
+        <p class="fim-texto">
+          Suas respostas já chegaram pra gente. Elas vão ajudar a Escola a criar formações que fazem sentido de verdade
+          pra sua realidade.
+        </p>
+        <div class="filete" aria-hidden="true"></div>
+        <p class="fim-fechar">Você já pode fechar esta página.</p>
+        <img class="fim-logo" src="/img/ev-logo-color.png" alt="Escola Enfermagem de Valor" width="414" height="252" loading="lazy" />
+        <button type="button" class="link-discreto" id="botao-outra-pessoa">Responder como outra pessoa</button>
+      </section>
+
+      <noscript>
+        <div class="sem-js">
+          <img src="/img/ev-logo-color.png" alt="Escola Enfermagem de Valor" width="207" height="126" />
+          <h1>Precisamos do JavaScript ligado</h1>
+          <p>
+            Esta pesquisa funciona uma pergunta por vez e precisa do JavaScript do navegador. Se você abriu pelo Instagram
+            ou WhatsApp, toque nos três pontinhos e escolha “Abrir no navegador”.
+          </p>
+        </div>
+      </noscript>
+    </main>
+
+    <!--
+      Rodapé fixo das perguntas (Continuar / Pular). Mora fora da <main> para ficar preso à tela;
+      a tela da pergunta reserva espaço embaixo do tamanho dele.
+    -->
+    <div class="rodape" id="rodape" hidden>
+      <!-- O erro mora junto do botão: é para onde a pessoa está olhando quando toca em Continuar,
+           e o rodapé fixo nunca o cobre. -->
+      <p class="pergunta-erro" id="erro-pergunta" role="alert"></p>
+      <div class="rodape-interno">
+        <button type="button" class="botao botao-secundario" id="botao-pular" hidden>Pular</button>
+        <button type="button" class="botao botao-principal" id="botao-continuar">
+          <span>Continuar</span>
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+            <path d="M5 12h13M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Avisos para leitor de tela (trocas de tela, sem internet). -->
+    <div class="sr-only" id="aviso" aria-live="polite"></div>
+  </body>
+</html>

@@ -1,0 +1,2470 @@
+/*
+ * painel.js — o /painel da pesquisa de ICP da Escola Enfermagem de Valor.
+ *
+ * Mesmo molde do /admin do quintino-landing: login → painel, api() que nunca lança, número de
+ * sequência para resposta antiga não sobrescrever a nova, status aria-live, foco devolvido
+ * depois de redesenhar, "Ver tudo" sem ir à rede.
+ *
+ * Duas regras que valem para o arquivo inteiro:
+ *
+ *   1. Nenhum número agregado sai das linhas carregadas na tela. Placar, funil, quadros, ICP e
+ *      tráfego vêm de /api/painel/resumo (SQL sobre o período inteiro); a tabela cruzada vem de
+ *      /api/painel/cruzamento. A lista de pessoas é paginada e buscável — contar em cima dela
+ *      mentiria assim que alguém digitasse na busca.
+ *   2. O painel não tem lista própria de perguntas. Rótulos, ordem, alternativas, perfis e
+ *      condicionais vêm de EVPesquisa (js/pesquisa-config.js), o mesmo arquivo que a pesquisa
+ *      e o servidor usam. Mudou lá, mudou aqui.
+ *
+ * Tudo o que vem do banco passa por escapeHtml antes de virar HTML. Nada de dado pessoal no
+ * console.
+ */
+(() => {
+  "use strict";
+
+  const EV = window.EVPesquisa;
+  const FUSO = "America/Sao_Paulo";
+  const LIMITE_LISTA = 50;
+  const LIMITE_ABERTAS = 30;
+  const LIMITE_OUTRO = 20;
+  const AUTO_MS = 60 * 1000;
+
+  const loginView = document.querySelector("[data-login-view]");
+  const panelView = document.querySelector("[data-panel-view]");
+  const loginForm = document.getElementById("painel-login");
+  const loginStatus = document.querySelector("[data-login-status]");
+  const panelStatus = document.querySelector("[data-panel-status]");
+
+  // Sem o config não há rótulo nem alternativa: melhor dizer isso do que desenhar um painel
+  // com perguntas inventadas.
+  if (!EV) {
+    if (loginView) {
+      loginView.hidden = false;
+      loginStatus.textContent = "Não foi possível carregar a configuração da pesquisa. Recarregue a página.";
+    }
+    return;
+  }
+
+  const $ = (seletor, raiz = document) => raiz.querySelector(seletor);
+  const $$ = (seletor, raiz = document) => Array.from(raiz.querySelectorAll(seletor));
+
+  /* ================================================================== */
+  /* Páginas do funil                                                     */
+  /* ================================================================== */
+
+  /**
+   * O /painel vai englobar as próximas páginas do funil. Cada uma é UMA entrada aqui: id (o
+   * mesmo do atributo data-pagina-conteudo no painel.html, onde mora o HTML dela), nome, rota
+   * pública e as funções dela — `entrar` (monta e carrega na primeira vez; atualiza nas outras),
+   * `atualizar` e `sair` (limpa dado pessoal da memória no logout). No banco, a coluna
+   * `pesquisa` já separa os dados de cada formulário. Página nova = entrada nova + o bloco dela no
+   * HTML + as rotas /api/painel/<id>/... dela; a da pesquisa não precisa ser reescrita.
+   * As funções da pesquisa são ligadas mais abaixo, quando existem.
+   */
+  const PAGINAS = [
+    { id: "pesquisa-icp", nome: "Pesquisa ICP", rota: "/pesquisa-icp", entrar: null, atualizar: null, sair: null }
+  ];
+  let paginaAtual = PAGINAS[0];
+
+  function pintarPaginas() {
+    const faixa = $("[data-paginas]");
+    if (!faixa) return;
+    faixa.innerHTML = PAGINAS.map((pagina) => {
+      const ativa = pagina === paginaAtual;
+      return `<button type="button" class="pagina" role="tab" id="pagina-${escapeHtml(pagina.id)}" aria-controls="pagina-${escapeHtml(
+        pagina.id
+      )}-painel" aria-selected="${ativa}" tabindex="${ativa ? 0 : -1}" data-pagina="${escapeHtml(pagina.id)}"><span class="pagina-nome">${escapeHtml(
+        pagina.nome
+      )}</span><span class="pagina-rota">rota ${escapeHtml(pagina.rota)}</span></button>`;
+    }).join("");
+    $$("[data-pagina-conteudo]").forEach((bloco) => {
+      bloco.hidden = bloco.dataset.paginaConteudo !== paginaAtual.id;
+    });
+  }
+
+  function trocarPagina(id) {
+    const pagina = PAGINAS.find((item) => item.id === id);
+    if (!pagina || pagina === paginaAtual) return;
+    paginaAtual = pagina;
+    pintarPaginas();
+    if (typeof pagina.entrar === "function") pagina.entrar();
+  }
+
+  /* ================================================================== */
+  /* Vocabulário vindo do config                                          */
+  /* ================================================================== */
+
+  // Chave curta do perfil (tecnico, cuidador...) é o que vai na URL: link compartilhável e
+  // legível. A API recebe o valor completo, que é o que está gravado no banco.
+  const PERFIS = Object.entries(EV.PERFIL).map(([chave, valor]) => ({
+    chave,
+    valor,
+    curto: EV.PERFIL_CURTO[valor] || valor
+  }));
+  const PERFIL_POR_CHAVE = new Map(PERFIS.map((perfil) => [perfil.chave, perfil]));
+  const PERFIL_POR_VALOR = new Map(PERFIS.map((perfil) => [perfil.valor, perfil]));
+  const ANALISAVEIS = EV.perguntasAnalisaveis();
+  const INDICE_PERGUNTA = new Map(EV.PERGUNTAS.map((pergunta, indice) => [pergunta.id, indice]));
+
+  function perfilCurto(valor) {
+    if (!valor) return "Sem perfil";
+    return EV.PERFIL_CURTO[valor] || valor;
+  }
+
+  /** "Pergunta 9" / "Pergunta B1" — como o documento da pesquisa numera. */
+  function numeroDa(pergunta) {
+    return pergunta ? pergunta.numero : "?";
+  }
+
+  const PERIODOS = {
+    hoje: "Hoje",
+    7: "Últimos 7 dias",
+    30: "Últimos 30 dias",
+    tudo: "Desde o começo",
+    personalizado: "Período personalizado"
+  };
+
+  /* ================================================================== */
+  /* Estado                                                               */
+  /* ================================================================== */
+
+  const state = {
+    email: "",
+    periodo: "tudo",
+    de: "",
+    ate: "",
+    perfil: "", // chave curta ("tecnico"), "" = todos
+    // Resumo sem filtro de perfil (contagem das abas, acesso/começo, cartões de ICP) e o do
+    // perfil escolhido. Sem perfil escolhido os dois são o mesmo objeto.
+    geral: null,
+    resumo: null,
+    geradoEm: "",
+    erroResumo: 0,
+    carregouUmaVez: false,
+    lista: { itens: [], total: 0, carregando: false, erro: 0, pronto: false },
+    busca: "",
+    status: "",
+    abertos: new Set(),
+    cruz: { linha: "perfil", coluna: "renda_atual", modo: "linha", dados: null, erro: 0, carregando: false },
+    aberta: "problema",
+    abertas: { itens: [], total: 0, erro: 0, carregando: false, pronto: false },
+    abertasBusca: "",
+    outros: new Map(), // id da pergunta → { itens, total, carregando, erro }
+    etapasAbertas: new Set([1]),
+    // Cartões de ICP abertos/fechados pela pessoa (chave do perfil → aberto?). Sem escolha:
+    // todos abertos no computador, só o primeiro no celular (cinco cartões de 18 linhas empilhados
+    // viram uma rolagem sem fim).
+    icpEscolhas: new Map(),
+    diaTabela: false,
+    trafegoCampo: "utm_source",
+    focoDepois: ""
+  };
+
+  const ABERTAS = {
+    problema: { chaves: ["problema_unico"], pergunta: "problema_unico" },
+    sonho: { chaves: ["sonho"], pergunta: "sonho" },
+    frase: { chaves: ["frase_desejo", "frase_bloqueio"], pergunta: "frase" }
+  };
+
+  /* ================================================================== */
+  /* Utilidades                                                           */
+  /* ================================================================== */
+
+  function escapeHtml(valor) {
+    return String(valor == null ? "" : valor).replace(/[&<>"']/g, (caractere) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    })[caractere]);
+  }
+
+  const NUM = new Intl.NumberFormat("pt-BR");
+  const DEC = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+  function n(valor) {
+    return NUM.format(Number(valor) || 0);
+  }
+
+  function num(valor) {
+    const numero = Number(valor);
+    return Number.isFinite(numero) ? numero : 0;
+  }
+
+  /** Porcentagem inteira; "<1%" quando existe mas arredonda para zero (zero mentiria). */
+  function pct(parte, base) {
+    const p = num(parte);
+    const b = num(base);
+    if (!b) return "—";
+    const valor = (p / b) * 100;
+    if (p > 0 && valor < 0.5) return "<1%";
+    return `${Math.round(valor)}%`;
+  }
+
+  function plural(quantidade, um, muitos) {
+    return `${n(quantidade)} ${num(quantidade) === 1 ? um : muitos}`;
+  }
+
+  const FMT_DATA_HORA = new Intl.DateTimeFormat("pt-BR", {
+    timeZone: FUSO,
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+  const FMT_HORA = new Intl.DateTimeFormat("pt-BR", { timeZone: FUSO, hour: "2-digit", minute: "2-digit" });
+  const FMT_YMD = new Intl.DateTimeFormat("en-CA", { timeZone: FUSO, year: "numeric", month: "2-digit", day: "2-digit" });
+
+  function dataHora(valor) {
+    if (!valor) return "—";
+    const data = new Date(valor);
+    return Number.isNaN(data.getTime()) ? "—" : FMT_DATA_HORA.format(data).replace(",", "");
+  }
+
+  function hora(valor) {
+    const data = valor ? new Date(valor) : new Date();
+    return Number.isNaN(data.getTime()) ? "—" : FMT_HORA.format(data);
+  }
+
+  /** "12 s", "7 min 32 s", "1 h 05 min". */
+  function duracao(segundos) {
+    if (segundos == null || segundos === "") return "—";
+    const total = Math.max(0, Math.round(num(segundos)));
+    if (total < 60) return `${total} s`;
+    const horas = Math.floor(total / 3600);
+    const minutos = Math.floor((total % 3600) / 60);
+    const resto = total % 60;
+    if (horas) return `${horas} h ${String(minutos).padStart(2, "0")} min`;
+    return resto ? `${minutos} min ${String(resto).padStart(2, "0")} s` : `${minutos} min`;
+  }
+
+  function whatsappLink(digitos) {
+    const so = String(digitos || "").replace(/\D/g, "");
+    return so ? `https://wa.me/55${so}` : "";
+  }
+
+  function origemTexto(item) {
+    const partes = [item.utm_source, item.utm_campaign].filter(Boolean);
+    return partes.length ? partes.join(" · ") : "direto";
+  }
+
+  /* ------------------------------------------------------------ Datas no fuso de Brasília */
+
+  function hojeSP() {
+    return FMT_YMD.format(new Date());
+  }
+
+  function ymdDe(valor) {
+    const data = new Date(valor);
+    return Number.isNaN(data.getTime()) ? "" : FMT_YMD.format(data);
+  }
+
+  function somarDias(ymd, dias) {
+    const [ano, mes, dia] = ymd.split("-").map(Number);
+    const data = new Date(Date.UTC(ano, mes - 1, dia + dias));
+    return data.toISOString().slice(0, 10);
+  }
+
+  function ymdValido(ymd) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(ymd || ""))) return false;
+    return somarDias(ymd, 0) === ymd;
+  }
+
+  /**
+   * Meia-noite de Brasília daquele dia, em ISO (UTC). O deslocamento é lido do próprio
+   * navegador via Intl ("GMT-3"), e não fixado: se o horário de verão voltar, o painel não
+   * passa a cortar o dia uma hora antes. Navegador sem shortOffset cai no -03:00 de hoje.
+   */
+  function inicioDoDia(ymd) {
+    let deslocamento = "-03:00";
+    try {
+      const partes = new Intl.DateTimeFormat("en-US", { timeZone: FUSO, timeZoneName: "shortOffset" })
+        .formatToParts(new Date(`${ymd}T12:00:00Z`));
+      const nome = (partes.find((parte) => parte.type === "timeZoneName") || {}).value || "";
+      const achou = nome.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/);
+      if (achou) deslocamento = `${achou[1]}${achou[2].padStart(2, "0")}:${achou[3] || "00"}`;
+    } catch {
+      /* fica o padrão */
+    }
+    return new Date(`${ymd}T00:00:00${deslocamento}`).toISOString();
+  }
+
+  /** Recorte de tempo atual: { desde, ate } em ISO e o primeiro/último dia (inclusivo). */
+  function intervalo() {
+    const hoje = hojeSP();
+    switch (state.periodo) {
+      case "hoje":
+        return { desde: inicioDoDia(hoje), ate: "", primeiro: hoje, ultimo: hoje };
+      case "7":
+      case "30": {
+        const primeiro = somarDias(hoje, -(Number(state.periodo) - 1));
+        return { desde: inicioDoDia(primeiro), ate: "", primeiro, ultimo: hoje };
+      }
+      case "personalizado":
+        if (ymdValido(state.de) && ymdValido(state.ate)) {
+          return {
+            desde: inicioDoDia(state.de),
+            // [desde, ate): o "até" do formulário é inclusivo, então o corte é a meia-noite
+            // do dia seguinte.
+            ate: inicioDoDia(somarDias(state.ate, 1)),
+            primeiro: state.de,
+            ultimo: state.ate
+          };
+        }
+        return { desde: "", ate: "", primeiro: "", ultimo: "" };
+      default:
+        return { desde: "", ate: "", primeiro: "", ultimo: hoje };
+    }
+  }
+
+  function rotuloPeriodo() {
+    if (state.periodo === "personalizado" && ymdValido(state.de) && ymdValido(state.ate)) {
+      return `De ${dataCurta(state.de, true)} a ${dataCurta(state.ate, true)}`;
+    }
+    return PERIODOS[state.periodo] || "Período selecionado";
+  }
+
+  function dataCurta(ymd, comAno) {
+    const [ano, mes, dia] = String(ymd).split("-");
+    return comAno ? `${dia}/${mes}/${ano}` : `${dia}/${mes}`;
+  }
+
+  const DIAS_SEMANA = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
+
+  function diaSemana(ymd) {
+    const [ano, mes, dia] = ymd.split("-").map(Number);
+    return DIAS_SEMANA[new Date(Date.UTC(ano, mes - 1, dia)).getUTCDay()];
+  }
+
+  /* ------------------------------------------------------------ Rede */
+
+  // Nunca lança: sem rede, devolve status 0 para a tela continuar utilizável.
+  async function api(caminho, opcoes = {}) {
+    try {
+      const resposta = await fetch(caminho, {
+        credentials: "same-origin",
+        headers: { Accept: "application/json", ...(opcoes.body ? { "Content-Type": "application/json" } : {}) },
+        ...opcoes
+      });
+      let corpo = {};
+      try {
+        corpo = await resposta.json();
+      } catch {
+        corpo = {};
+      }
+      if (!corpo || typeof corpo !== "object") corpo = {};
+      return { status: resposta.status, ok: resposta.ok && corpo.ok !== false, body: corpo };
+    } catch {
+      return { status: 0, ok: false, body: {} };
+    }
+  }
+
+  function mensagemErro(status) {
+    if (status === 0) return "Sem conexão com o servidor. Verifique a internet e tente de novo.";
+    if (status === 503) return "O banco de dados ainda não está configurado no servidor.";
+    if (status === 429) return "Muitas requisições seguidas. Espere um instante e tente de novo.";
+    if (status === 422) return "O filtro escolhido não é válido. Confira as datas e tente de novo.";
+    return "Não foi possível carregar os dados agora. Tente de novo em instantes.";
+  }
+
+  /** Filtros comuns (período e perfil) como query string. */
+  function parametros({ comPerfil = true } = {}) {
+    const params = new URLSearchParams();
+    const { desde, ate } = intervalo();
+    if (desde) params.set("desde", desde);
+    if (ate) params.set("ate", ate);
+    const perfil = PERFIL_POR_CHAVE.get(state.perfil);
+    if (comPerfil && perfil) params.set("perfil", perfil.valor);
+    return params;
+  }
+
+  /* ------------------------------------------------------------ Foco */
+
+  /**
+   * Redesenha um bloco inteiro sem perder o foco do teclado. Todo controle que pode ser
+   * recriado tem um data-foco estável; depois do innerHTML, o foco volta para o de mesma chave.
+   */
+  function redesenhar(alvo, html) {
+    if (!alvo) return;
+    const ativo = document.activeElement;
+    const chave = ativo && alvo.contains(ativo) && ativo.closest("[data-foco]")
+      ? ativo.closest("[data-foco]").getAttribute("data-foco")
+      : "";
+    alvo.innerHTML = html;
+    const pedido = state.focoDepois;
+    const procurar = pedido || chave;
+    if (procurar) {
+      const novo = alvo.querySelector(`[data-foco="${CSS.escape(procurar)}"]`);
+      if (novo) {
+        novo.focus({ preventScroll: true });
+        if (pedido) state.focoDepois = "";
+      }
+    }
+  }
+
+  function esqueleto(linhas = 5) {
+    return `<div class="esqueleto" aria-hidden="true">${"<span></span>".repeat(linhas)}</div>`;
+  }
+
+  function vazioHtml(titulo, texto) {
+    return `<div class="vazio"><strong>${escapeHtml(titulo)}</strong>${texto ? `<span>${escapeHtml(texto)}</span>` : ""}</div>`;
+  }
+
+  function erroHtml(status, acao, chaveFoco) {
+    return `<div class="erro" role="alert"><strong>Não deu para carregar esta parte.</strong><span>${escapeHtml(
+      mensagemErro(status)
+    )}</span><button type="button" class="botao botao-leve botao-pequeno" data-repetir="${escapeHtml(acao)}" data-foco="${escapeHtml(
+      chaveFoco || `repetir-${acao}`
+    )}">Tentar de novo</button></div>`;
+  }
+
+  /* ================================================================== */
+  /* Login e sessão                                                       */
+  /* ================================================================== */
+
+  function mostrarLogin(mensagem) {
+    pararAuto();
+    loginView.hidden = false;
+    panelView.hidden = true;
+    loginStatus.textContent = mensagem || "";
+    const email = document.getElementById("login-email");
+    if (email) email.focus();
+  }
+
+  function mostrarPainel() {
+    loginView.hidden = true;
+    panelView.hidden = false;
+    $("[data-conta-email]").textContent = state.email;
+    const titulo = $("[data-panel-title]");
+    if (titulo) titulo.focus({ preventScroll: true });
+    iniciarAuto();
+  }
+
+  /** Troca de sessão: TODAS as páginas do funil soltam o que têm de dado pessoal na memória. */
+  function limparTodas() {
+    for (const pagina of PAGINAS) if (typeof pagina.sair === "function") pagina.sair();
+  }
+
+  function sessaoExpirou() {
+    limparTodas();
+    mostrarLogin("Sua sessão expirou. Entre de novo.");
+  }
+
+  function limparDados() {
+    // Troca de sessão não pode deixar dado pessoal da anterior na memória da página.
+    state.geral = null;
+    state.resumo = null;
+    state.carregouUmaVez = false;
+    state.lista = { itens: [], total: 0, carregando: false, erro: 0, pronto: false };
+    state.abertas = { itens: [], total: 0, erro: 0, carregando: false, pronto: false };
+    state.cruz.dados = null;
+    state.outros.clear();
+    state.abertos.clear();
+    // Invalida tudo que ainda estiver em voo.
+    seq.resumo++;
+    seq.lista++;
+    seq.cruz++;
+    seq.abertas++;
+  }
+
+  loginForm.addEventListener("submit", async (evento) => {
+    evento.preventDefault();
+    const botao = loginForm.querySelector('button[type="submit"]');
+    const email = document.getElementById("login-email").value.trim();
+    const senha = document.getElementById("login-senha").value;
+
+    if (!email || !senha) {
+      loginStatus.textContent = "Preencha e-mail e senha.";
+      (email ? document.getElementById("login-senha") : document.getElementById("login-email")).focus();
+      return;
+    }
+
+    botao.disabled = true;
+    loginStatus.textContent = "Entrando...";
+    const { status, ok, body } = await api("/api/painel/login", {
+      method: "POST",
+      body: JSON.stringify({ email, senha })
+    });
+    botao.disabled = false;
+
+    if (ok) {
+      state.email = body.email || email;
+      document.getElementById("login-senha").value = "";
+      loginStatus.textContent = "";
+      mostrarPainel();
+      paginaAtual.entrar();
+      return;
+    }
+
+    loginStatus.textContent =
+      status === 0
+        ? "Sem conexão com o servidor. Verifique a internet e tente de novo."
+        : status === 429
+          ? "Muitas tentativas. Espere alguns minutos e tente de novo."
+          : status === 503
+            ? "O painel ainda não está configurado no servidor."
+            : status === 401
+              ? "E-mail ou senha incorretos."
+              : "Não foi possível entrar agora. Tente de novo em instantes.";
+    document.getElementById("login-senha").focus();
+  });
+
+  $("[data-sair]").addEventListener("click", async () => {
+    await api("/api/painel/logout", { method: "POST", body: JSON.stringify({}) });
+    state.email = "";
+    limparTodas();
+    mostrarLogin("Você saiu do painel.");
+  });
+
+  /* ================================================================== */
+  /* URL ⇄ filtros                                                        */
+  /* ================================================================== */
+
+  function lerUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const periodo = params.get("periodo");
+    if (periodo && Object.prototype.hasOwnProperty.call(PERIODOS, periodo)) state.periodo = periodo;
+    if (state.periodo === "personalizado") {
+      const de = params.get("de") || "";
+      const ate = params.get("ate") || "";
+      if (ymdValido(de) && ymdValido(ate) && de <= ate) {
+        state.de = de;
+        state.ate = ate;
+      } else {
+        state.periodo = "tudo";
+      }
+    }
+    const perfil = params.get("perfil") || "";
+    state.perfil = PERFIL_POR_CHAVE.has(perfil) ? perfil : "";
+  }
+
+  /** Filtro vira query string: o link pode ser mandado para outra pessoa e recarregado. */
+  function escreverUrl() {
+    const params = new URLSearchParams();
+    if (state.periodo !== "tudo") params.set("periodo", state.periodo);
+    if (state.periodo === "personalizado") {
+      params.set("de", state.de);
+      params.set("ate", state.ate);
+    }
+    if (state.perfil) params.set("perfil", state.perfil);
+    const texto = params.toString();
+    const url = `${window.location.pathname}${texto ? `?${texto}` : ""}${window.location.hash}`;
+    try {
+      window.history.replaceState(null, "", url);
+    } catch {
+      /* webview sem history: o filtro só não fica no link */
+    }
+  }
+
+  /* ================================================================== */
+  /* Carregamento                                                         */
+  /* ================================================================== */
+
+  // Sequências separadas por bloco: a resposta antiga de um bloco nunca sobrescreve a nova.
+  const seq = { resumo: 0, lista: 0, cruz: 0, abertas: 0 };
+  let emVoo = 0;
+
+  function ocupado(delta) {
+    emVoo = Math.max(0, emVoo + delta);
+    $("[data-atualizar]").disabled = emVoo > 0;
+  }
+
+  function carregarTudo() {
+    // Detalhes de "Outro" pertencem ao recorte anterior: fecham junto com ele.
+    state.outros.clear();
+    atualizarCsv();
+    pintarFiltros();
+    carregarResumo();
+    carregarLista({ reiniciar: true });
+    carregarCruzamento();
+    carregarAbertas({ reiniciar: true });
+  }
+
+  /** Atualizar (botão ou automático): mesmos filtros, sem desmontar o que a pessoa abriu. */
+  function atualizar({ automatico = false } = {}) {
+    carregarResumo();
+    carregarCruzamento();
+    // A lista só recarrega se a pessoa não foi além da primeira página: não dá para arrancar
+    // de baixo dela as linhas que ela está lendo. Os "Ver tudo" abertos sobrevivem (são por id).
+    if (!automatico || state.lista.itens.length <= LIMITE_LISTA) carregarLista({ reiniciar: true });
+    if (!automatico) carregarAbertas({ reiniciar: true });
+    recarregarOutros();
+  }
+
+  async function carregarResumo() {
+    const minha = ++seq.resumo;
+    const secoes = $$("[data-agregado]");
+    secoes.forEach((secao) => secao.setAttribute("aria-busy", "true"));
+    if (!state.carregouUmaVez) pintarEsqueletos();
+    panelStatus.textContent = "Carregando...";
+    delete panelStatus.dataset.estado;
+    ocupado(1);
+
+    const comPerfil = Boolean(state.perfil);
+    const pedidos = [api(`/api/painel/resumo?${parametros({ comPerfil: false })}`)];
+    if (comPerfil) pedidos.push(api(`/api/painel/resumo?${parametros()}`));
+    const [geral, doPerfil] = await Promise.all(pedidos);
+    ocupado(-1);
+
+    if (minha !== seq.resumo) return;
+    secoes.forEach((secao) => secao.removeAttribute("aria-busy"));
+
+    if (geral.status === 401 || (doPerfil && doPerfil.status === 401)) {
+      sessaoExpirou();
+      return;
+    }
+
+    const falhou = !geral.ok || !geral.body.resumo || (comPerfil && (!doPerfil.ok || !doPerfil.body.resumo));
+    if (falhou) {
+      const status = !geral.ok ? geral.status : doPerfil ? doPerfil.status : 502;
+      state.erroResumo = status || 0;
+      panelStatus.dataset.estado = "erro";
+      panelStatus.textContent = mensagemErro(status);
+      // Sem dado bom, os números anteriores (de outro recorte) não podem ficar na tela.
+      state.geral = null;
+      state.resumo = null;
+      pintarAgregados();
+      return;
+    }
+
+    state.erroResumo = 0;
+    state.geral = normalizarResumo(geral.body.resumo);
+    state.resumo = comPerfil ? normalizarResumo(doPerfil.body.resumo) : state.geral;
+    state.geradoEm = (comPerfil ? doPerfil.body.gerado_em : geral.body.gerado_em) || new Date().toISOString();
+    state.carregouUmaVez = true;
+    panelStatus.textContent = "";
+    pintarAgregados();
+  }
+
+  /** Garante as listas (o contrato diz [] e nunca null, mas o painel não aposta nisso). */
+  function normalizarResumo(bruto) {
+    const r = bruto && typeof bruto === "object" ? bruto : {};
+    const listas = ["por_etapa", "pararam_em", "perfis", "distribuicoes", "responderam", "escalas", "por_dia", "trafego"];
+    const saida = { ...r };
+    for (const chave of listas) saida[chave] = Array.isArray(r[chave]) ? r[chave] : [];
+    return saida;
+  }
+
+  /* ================================================================== */
+  /* Pintura dos agregados                                                */
+  /* ================================================================== */
+
+  function pintarEsqueletos() {
+    $("[data-placar]").innerHTML = Array.from({ length: 6 }, () => `<li>${esqueleto(3)}</li>`).join("");
+    for (const seletor of ["[data-funil]", "[data-dia]", "[data-paradas]", "[data-icp]", "[data-perguntas]", "[data-trafego]"]) {
+      $(seletor).innerHTML = esqueleto(6);
+    }
+  }
+
+  function pintarAgregados() {
+    pintarFiltros();
+    pintarAtualizado();
+    const vazioGeral = $("[data-vazio-geral]");
+    const r = state.resumo;
+
+    if (!r) {
+      vazioGeral.hidden = true;
+      $$(".secao").forEach((secao) => {
+        secao.hidden = false;
+      });
+      $(".atalhos").hidden = false;
+      const html = erroHtml(state.erroResumo, "resumo", "repetir-resumo");
+      $("[data-placar]").innerHTML = "";
+      for (const seletor of ["[data-funil]", "[data-dia]", "[data-paradas]", "[data-icp]", "[data-perguntas]", "[data-trafego]"]) {
+        redesenhar($(seletor), seletor === "[data-funil]" ? `<li>${html}</li>` : html);
+      }
+      $("[data-funil-nota]").textContent = "";
+      $("[data-copiar-icp]").disabled = true;
+      return;
+    }
+
+    const semNada = num(state.geral.visitantes) === 0 && num(state.geral.pessoas) === 0;
+    vazioGeral.hidden = !semNada;
+    // Recorte sem ninguém: uma mensagem só, em vez de nove seções cheias de zero.
+    $$(".secao").forEach((secao) => {
+      secao.hidden = semNada;
+    });
+    $(".atalhos").hidden = semNada;
+    if (semNada) {
+      vazioGeral.innerHTML = `
+        <img src="/img/ev-icone-color.png" alt="" width="64" height="64">
+        <h2>Nenhuma resposta ${state.periodo === "tudo" ? "ainda" : "neste período"}</h2>
+        <p>${
+          state.periodo === "tudo"
+            ? "Assim que alguém abrir a pesquisa, os números aparecem aqui. O link da pesquisa é /pesquisa-icp."
+            : "Ninguém acessou a pesquisa no período escolhido. Tente um período maior, ou “Tudo”."
+        }</p>`;
+    }
+
+    $("[data-periodo-rotulo]").textContent = `${rotuloPeriodo()} · atualizado às ${hora(state.geradoEm)}`;
+    pintarPlacar();
+    pintarFunil();
+    pintarDia();
+    pintarParadas();
+    pintarIcp();
+    pintarPerguntas();
+    pintarTrafego();
+  }
+
+  function pintarAtualizado() {
+    const alvo = $("[data-atualizado]");
+    alvo.textContent = state.geradoEm ? `Atualizado às ${hora(state.geradoEm)}` : "—";
+  }
+
+  /* ------------------------------------------------------------ Filtros */
+
+  function pintarFiltros() {
+    $$("[data-periodo]").forEach((botao) => {
+      botao.setAttribute("aria-pressed", String(botao.dataset.periodo === state.periodo));
+    });
+    const datas = $("[data-datas]");
+    datas.hidden = state.periodo !== "personalizado";
+    if (!datas.hidden) {
+      const hoje = hojeSP();
+      $("[data-data-de]").max = hoje;
+      $("[data-data-ate]").max = hoje;
+      if (state.de && !$("[data-data-de]").value) $("[data-data-de]").value = state.de;
+      if (state.ate && !$("[data-data-ate]").value) $("[data-data-ate]").value = state.ate;
+    }
+
+    // A contagem das abas vem sempre do resumo SEM perfil: com "Técnicos" escolhido, as outras
+    // abas continuam dizendo quantas pessoas têm.
+    const contagem = new Map();
+    let totalGeral = null;
+    if (state.geral) {
+      totalGeral = num(state.geral.pessoas);
+      for (const linha of state.geral.perfis) contagem.set(linha.perfil, num(linha.total));
+    }
+    const abas = [{ chave: "", curto: "Todos", total: totalGeral }].concat(
+      PERFIS.map((perfil) => ({ chave: perfil.chave, curto: perfil.curto, total: state.geral ? contagem.get(perfil.valor) || 0 : null }))
+    );
+    const container = $("[data-perfis]");
+    redesenhar(
+      container,
+      abas
+        .map((aba) => {
+          const ativo = aba.chave === state.perfil;
+          return `<button type="button" class="perfil-aba" role="tab" aria-selected="${ativo}" tabindex="${ativo ? 0 : -1}" data-perfil="${escapeHtml(
+            aba.chave
+          )}" data-foco="perfil-${escapeHtml(aba.chave || "todos")}">${escapeHtml(aba.curto)}${
+            aba.total == null ? "" : `<span class="n" aria-label="${escapeHtml(plural(aba.total, "pessoa", "pessoas"))}">${n(aba.total)}</span>`
+          }</button>`;
+        })
+        .join("")
+    );
+  }
+
+  /* ------------------------------------------------------------ Placar */
+
+  function pintarPlacar() {
+    const g = state.geral;
+    const r = state.resumo;
+    const comPerfil = Boolean(state.perfil);
+    const perfil = PERFIL_POR_CHAVE.get(state.perfil);
+    const todos = comPerfil ? '<span class="selo-todos">todos os perfis</span>' : "";
+
+    const visitantes = num(g.visitantes);
+    const comecaram = num(g.comecaram);
+    const pessoasGeral = num(g.pessoas);
+    const pessoas = num(r.pessoas);
+    const concluidas = num(r.concluidas);
+    const repetidas = Math.max(0, num(r.tentativas) - pessoas);
+
+    const itens = [
+      {
+        rotulo: "Acessaram",
+        valor: n(visitantes),
+        detalhe: `${plural(g.visitas, "visita", "visitas")} no total · visitantes únicos`,
+        extra: todos
+      },
+      {
+        rotulo: "Começaram",
+        valor: n(comecaram),
+        detalhe: `<strong>${pct(comecaram, visitantes)}</strong> de quem acessou`,
+        extra: todos
+      },
+      comPerfil
+        ? {
+            rotulo: "Se identificaram",
+            valor: n(pessoas),
+            detalhe: `<strong>${pct(pessoas, pessoasGeral)}</strong> de todos que se identificaram (${n(pessoasGeral)})`,
+            extra: `<span class="selo-todos">${escapeHtml(perfil.curto)}</span>`
+          }
+        : {
+            rotulo: "Se identificaram",
+            valor: n(pessoas),
+            detalhe: `<strong>${pct(pessoas, comecaram)}</strong> de quem começou`
+          },
+      {
+        rotulo: "Responderam tudo",
+        valor: n(concluidas),
+        detalhe: `<strong>${pct(concluidas, pessoas)}</strong> de quem se identificou`,
+        destaque: true
+      },
+      {
+        rotulo: "Tempo mediano",
+        valor: r.tempo_mediano_segundos == null ? "—" : duracao(r.tempo_mediano_segundos),
+        texto: true,
+        detalhe: r.tempo_mediano_segundos == null ? "ninguém concluiu ainda" : "do contato até a última resposta, entre quem concluiu"
+      },
+      {
+        rotulo: "Tentativas repetidas",
+        valor: n(repetidas),
+        detalhe: repetidas
+          ? `${plural(r.tentativas, "tentativa", "tentativas")} para ${plural(pessoas, "pessoa", "pessoas")} · a lista mostra a mais completa`
+          : "ninguém começou de novo com o mesmo WhatsApp"
+      }
+    ];
+
+    $("[data-placar]").innerHTML = itens
+      .map(
+        (item) => `<li${item.destaque ? ' class="destaque"' : ""}>
+          <span class="rotulo">${escapeHtml(item.rotulo)}</span>
+          <span class="valor${item.texto ? " valor-texto" : ""}">${escapeHtml(item.valor)}</span>
+          <span class="detalhe">${item.detalhe}</span>${item.extra || ""}
+        </li>`
+      )
+      .join("");
+  }
+
+  /* ------------------------------------------------------------ Funil */
+
+  function pintarFunil() {
+    const g = state.geral;
+    const r = state.resumo;
+    const comPerfil = Boolean(state.perfil);
+    const porEtapa = new Map(r.por_etapa.map((linha) => [num(linha.etapa), num(linha.chegaram)]));
+
+    const degraus = [];
+    // Acesso e começo não têm perfil (a pergunta 1 vem depois): com perfil escolhido, o funil
+    // começa em quem se identificou, para não comparar um perfil com o tráfego de todos.
+    if (!comPerfil) {
+      degraus.push({ rotulo: "Acessaram a pesquisa", valor: num(g.visitantes) });
+      degraus.push({ rotulo: "Clicaram em Começar", valor: num(g.comecaram) });
+    }
+    degraus.push({ rotulo: "Se identificaram", sub: "nome, WhatsApp e e-mail", valor: num(r.pessoas) });
+    for (let etapa = 2; etapa <= 9; etapa++) {
+      const info = EV.etapaPorNumero(etapa);
+      degraus.push({
+        rotulo: `Chegaram à etapa ${etapa}`,
+        sub: etapa === 9 ? `${info ? info.titulo : ""} · só quem tem bloco próprio; concluídas contam` : info ? info.titulo : "",
+        valor: porEtapa.get(etapa) || 0
+      });
+    }
+    degraus.push({ rotulo: "Responderam tudo", valor: num(r.concluidas), fim: true });
+
+    const base = degraus[0].valor;
+    let maior = null;
+    degraus.forEach((degrau, indice) => {
+      if (!indice) return;
+      const anterior = degraus[indice - 1];
+      const queda = anterior.valor - degrau.valor;
+      if (queda > 0 && (!maior || queda > maior.queda)) {
+        maior = { indice, queda, taxa: anterior.valor ? queda / anterior.valor : 0, de: anterior.rotulo, para: degrau.rotulo };
+      }
+    });
+
+    const baseRotulo = comPerfil ? "de quem se identificou" : "de quem acessou";
+    const html = degraus
+      .map((degrau, indice) => {
+        const largura = base ? Math.min(100, (degrau.valor / base) * 100) : 0;
+        const etiqueta =
+          maior && maior.indice === indice
+            ? `<span class="queda"><svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24"><path d="M12 5v14m0 0-6-6m6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>maior queda: −${n(
+                maior.queda
+              )} (${Math.round(maior.taxa * 100)}% de quem estava no passo anterior)</span>`
+            : "";
+        return `<li class="linha-barra${degrau.fim ? " fim" : ""}">
+          <span class="rotulo">${escapeHtml(degrau.rotulo)}${degrau.sub ? `<small>${escapeHtml(degrau.sub)}</small>` : ""}</span>
+          <span class="trilho" role="img" aria-label="${escapeHtml(`${degrau.rotulo}: ${n(degrau.valor)}, ${pct(degrau.valor, base)} ${baseRotulo}`)}"><span style="width:${largura.toFixed(
+          2
+        )}%"></span></span>
+          <span class="num"><strong>${n(degrau.valor)}</strong><span>${indice ? pct(degrau.valor, base) : "100%"}</span></span>
+          ${etiqueta}
+        </li>`;
+      })
+      .join("");
+    redesenhar($("[data-funil]"), html);
+
+    $("[data-funil-sub]").textContent = comPerfil
+      ? `Só ${PERFIL_POR_CHAVE.get(state.perfil).curto.toLowerCase()}. Barras proporcionais a quem se identificou; cada pessoa conta no ponto mais distante que alcançou.`
+      : "Barras proporcionais a quem acessou. Cada pessoa conta no ponto mais distante que alcançou.";
+
+    const nota = $("[data-funil-nota]");
+    if (!base) {
+      nota.textContent = "Sem ninguém no primeiro passo deste recorte, ainda não há funil para mostrar.";
+    } else if (maior) {
+      nota.innerHTML = `A maior perda está entre <strong>${escapeHtml(maior.de.toLowerCase())}</strong> e <strong>${escapeHtml(
+        maior.para.toLowerCase()
+      )}</strong>: ${escapeHtml(plural(maior.queda, "pessoa", "pessoas"))}. ${
+        comPerfil
+          ? "Acesso e clique em Começar não entram aqui: o perfil só é conhecido depois da primeira pergunta."
+          : "As porcentagens são sobre quem acessou; a etiqueta compara com o passo anterior."
+      }`;
+    } else {
+      nota.textContent = "Ninguém se perdeu entre um passo e outro neste recorte.";
+    }
+  }
+
+  /* ------------------------------------------------------------ Por dia */
+
+  function eixoLimpo(maximo) {
+    if (maximo <= 4) return { topo: Math.max(maximo, 1), passo: 1 };
+    const bruto = maximo / 4;
+    const potencia = 10 ** Math.floor(Math.log10(bruto));
+    const passo = [1, 2, 2.5, 5, 10].map((m) => m * potencia).find((p) => p >= bruto);
+    return { topo: Math.ceil(maximo / passo) * passo, passo };
+  }
+
+  const SERIES_DIA = [
+    { chave: "visitantes", rotulo: "Visitantes", classe: "s1" },
+    { chave: "pessoas", rotulo: "Se identificaram", classe: "s2" },
+    { chave: "concluidas", rotulo: "Responderam tudo", classe: "s3" }
+  ];
+
+  let diasDoGrafico = [];
+
+  function pintarDia() {
+    const r = state.resumo;
+    const porDia = new Map(r.por_dia.map((linha) => [String(linha.dia).slice(0, 10), linha]));
+    const { primeiro, ultimo } = intervalo();
+    const diasComDado = Array.from(porDia.keys()).sort();
+    const inicio = primeiro || diasComDado[0] || ultimo;
+    const fim = ultimo && (!diasComDado.length || ultimo >= diasComDado[diasComDado.length - 1]) ? ultimo : diasComDado[diasComDado.length - 1] || ultimo;
+    const alvo = $("[data-dia]");
+
+    // Dia sem ninguém entra como zero: um buraco no eixo esconderia justamente o dia parado.
+    const dias = [];
+    if (inicio && fim) {
+      let dia = inicio;
+      let guarda = 0;
+      while (dia <= fim && guarda < 800) {
+        const linha = porDia.get(dia) || {};
+        dias.push({ dia, visitantes: num(linha.visitantes), pessoas: num(linha.pessoas), concluidas: num(linha.concluidas) });
+        dia = somarDias(dia, 1);
+        guarda++;
+      }
+    }
+    diasDoGrafico = dias;
+
+    const totais = SERIES_DIA.map((serie) => dias.reduce((soma, dia) => soma + dia[serie.chave], 0));
+    const maximo = Math.max(0, ...dias.map((dia) => Math.max(dia.visitantes, dia.pessoas, dia.concluidas)));
+
+    if (!dias.length || !maximo) {
+      redesenhar(alvo, vazioHtml("Nenhum movimento no período.", "Quando alguém acessar a pesquisa, o dia aparece aqui."));
+      return;
+    }
+
+    const legenda = `<ul class="dia-legenda" aria-label="Legenda">${SERIES_DIA.map(
+      (serie, indice) => `<li><i class="amostra ${serie.classe}" aria-hidden="true"></i>${escapeHtml(serie.rotulo)} <strong>${n(totais[indice])}</strong></li>`
+    ).join("")}</ul>`;
+
+    const tabela = `<div class="tabela-rolagem"><table>
+      <caption>Por dia, horário de Brasília</caption>
+      <thead><tr><th scope="col">Dia</th>${SERIES_DIA.map((serie) => `<th scope="col" class="n">${escapeHtml(serie.rotulo)}</th>`).join("")}</tr></thead>
+      <tbody>${dias
+        .slice()
+        .reverse()
+        .map(
+          (dia) =>
+            `<tr><th scope="row">${escapeHtml(`${dataCurta(dia.dia, true)} · ${diaSemana(dia.dia)}`)}</th>${SERIES_DIA.map(
+              (serie) => `<td class="n">${n(dia[serie.chave])}</td>`
+            ).join("")}</tr>`
+        )
+        .join("")}</tbody>
+      <tfoot><tr><th scope="row">Total</th>${totais.map((total) => `<td class="n">${n(total)}</td>`).join("")}</tr></tfoot>
+    </table></div>`;
+
+    const botao = $("[data-dia-tabela]");
+    botao.setAttribute("aria-expanded", String(state.diaTabela));
+    botao.textContent = state.diaTabela ? "Ver como gráfico" : "Ver como tabela";
+
+    if (state.diaTabela) {
+      redesenhar(alvo, legenda + tabela);
+      return;
+    }
+
+    const { topo, passo } = eixoLimpo(maximo);
+    const ticks = [];
+    for (let valor = 0; valor <= topo + 1e-9; valor += passo) ticks.push(valor);
+    const altura = (valor) => `${((valor / topo) * 100).toFixed(2)}%`;
+
+    // Rótulos do eixo X: no máximo ~7, sempre com o primeiro e o último dia.
+    // Um rótulo a cada ~64px de largura (7 no computador, 5 no celular).
+    const cabem = Math.max(3, Math.min(7, Math.floor((alvo.clientWidth || 600) / 64)));
+    const saltos = Math.max(1, Math.ceil(dias.length / cabem));
+    const rotulosX = dias
+      .map((dia, indice) => ({ dia, indice }))
+      .filter(({ indice }) => indice === 0 || indice === dias.length - 1 || (indice % saltos === 0 && dias.length - 1 - indice >= saltos * 0.8))
+      .map(({ dia, indice }) => {
+        const posicao = ((indice + 0.5) / dias.length) * 100;
+        const classe = dias.length > 1 && indice === 0 ? "inicio" : dias.length > 1 && indice === dias.length - 1 ? "fim" : "";
+        const esquerda = classe === "inicio" ? 0 : classe === "fim" ? 100 : posicao;
+        return `<span class="${classe}" style="left:${esquerda.toFixed(2)}%">${escapeHtml(dataCurta(dia.dia))}</span>`;
+      })
+      .join("");
+
+    const colunas = dias
+      .map(
+        (dia, indice) =>
+          `<div class="coluna" data-dia-i="${indice}">${SERIES_DIA.map(
+            (serie) =>
+              dia[serie.chave]
+                ? `<i class="${serie.classe}${dia[serie.chave] / topo < 0.03 ? " baixa" : ""}" style="height:${altura(dia[serie.chave])}"></i>`
+                : ""
+          ).join("")}</div>`
+      )
+      .join("");
+
+    const resumoAria = `Gráfico de colunas por dia, de ${dataCurta(dias[0].dia, true)} a ${dataCurta(
+      dias[dias.length - 1].dia,
+      true
+    )}. Total: ${SERIES_DIA.map((serie, indice) => `${serie.rotulo.toLowerCase()} ${n(totais[indice])}`).join(", ")}. Use “Ver como tabela” para os números de cada dia.`;
+
+    redesenhar(
+      alvo,
+      `${legenda}
+      <div class="grafico-dia" role="img" aria-label="${escapeHtml(resumoAria)}">
+        <div class="eixo-y" aria-hidden="true">${ticks.map((valor) => `<span style="bottom:${altura(valor)}">${n(valor)}</span>`).join("")}</div>
+        <div class="plot" data-plot-dia>
+          ${ticks.slice(1).map((valor) => `<div class="grade" style="bottom:${altura(valor)}"></div>`).join("")}
+          <div class="colunas">${colunas}</div>
+        </div>
+        <div class="eixo-x" aria-hidden="true">${rotulosX}</div>
+      </div>`
+    );
+  }
+
+  /* ------------------------------------------------------------ Tooltip do gráfico por dia */
+
+  const dica = $("[data-dica]");
+
+  function mostrarDica(html, x, y) {
+    dica.innerHTML = html;
+    dica.hidden = false;
+    const largura = dica.offsetWidth;
+    const alturaDica = dica.offsetHeight;
+    const esquerda = Math.min(window.innerWidth - largura - 8, Math.max(8, x + 14));
+    const topo = y - alturaDica - 12 < 8 ? y + 16 : y - alturaDica - 12;
+    dica.style.left = `${esquerda}px`;
+    dica.style.top = `${topo}px`;
+  }
+
+  function esconderDica() {
+    dica.hidden = true;
+    $$(".coluna.ativa").forEach((coluna) => coluna.classList.remove("ativa"));
+  }
+
+  const CORES_SERIE = ["var(--serie-1)", "var(--serie-2)", "var(--serie-3)"];
+
+  $("[data-dia]").addEventListener("pointermove", (evento) => {
+    const coluna = evento.target instanceof Element ? evento.target.closest("[data-dia-i]") : null;
+    if (!coluna) {
+      esconderDica();
+      return;
+    }
+    const dia = diasDoGrafico[Number(coluna.dataset.diaI)];
+    if (!dia) return;
+    $$(".coluna.ativa").forEach((item) => item !== coluna && item.classList.remove("ativa"));
+    coluna.classList.add("ativa");
+    // Valor na frente, rótulo atrás (o leitor já sabe a série e quer o número).
+    const linhas = SERIES_DIA.map(
+      (serie, indice) =>
+        `<div class="dica-linha"><span><i class="traco" style="background:${CORES_SERIE[indice]}"></i>${escapeHtml(serie.rotulo)}</span><strong>${n(
+          dia[serie.chave]
+        )}</strong></div>`
+    ).join("");
+    mostrarDica(`<div class="dica-titulo">${escapeHtml(`${diaSemana(dia.dia)}, ${dataCurta(dia.dia, true)}`)}</div>${linhas}`, evento.clientX, evento.clientY);
+  });
+  $("[data-dia]").addEventListener("pointerleave", esconderDica);
+  window.addEventListener("scroll", esconderDica, { passive: true });
+
+  $("[data-dia-tabela]").addEventListener("click", () => {
+    state.diaTabela = !state.diaTabela;
+    if (state.resumo) pintarDia();
+  });
+
+  /* ------------------------------------------------------------ Onde param */
+
+  function pintarParadas() {
+    const r = state.resumo;
+    const alvo = $("[data-paradas]");
+    const emAndamento = r.pararam_em.reduce((soma, linha) => soma + num(linha.total), 0);
+    const linhas = r.pararam_em
+      .filter((linha) => num(linha.total) > 0)
+      .map((linha) => {
+        const pergunta = EV.perguntaPorId(linha.pergunta);
+        return {
+          id: linha.pergunta,
+          pergunta,
+          total: num(linha.total),
+          ordem: linha.pergunta === "fim" ? 9999 : INDICE_PERGUNTA.has(linha.pergunta) ? INDICE_PERGUNTA.get(linha.pergunta) : 9000
+        };
+      })
+      .sort((a, b) => a.ordem - b.ordem);
+
+    $("[data-param-sub]").textContent = emAndamento
+      ? `${plural(emAndamento, "pessoa se identificou e ainda não terminou", "pessoas se identificaram e ainda não terminaram")}. Cada uma aparece na pergunta que estava na tela quando parou. As 3 perguntas com mais gente parada estão em destaque.`
+      : "Quem se identificou e ainda não terminou: a pergunta que estava na tela quando parou.";
+
+    if (!linhas.length) {
+      redesenhar(alvo, vazioHtml("Ninguém parado no meio.", num(r.pessoas) ? "Todo mundo que se identificou neste recorte terminou." : "Ainda ninguém se identificou neste recorte."));
+      return;
+    }
+
+    const top3 = new Set(
+      linhas
+        .slice()
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 3)
+        .map((linha) => linha.id)
+    );
+    const maior = Math.max(...linhas.map((linha) => linha.total));
+    const html = `<ol class="barras">${linhas
+      .map((linha) => {
+        const titulo = linha.pergunta
+          ? `Pergunta ${numeroDa(linha.pergunta)} · ${linha.pergunta.analise}`
+          : linha.id === "fim"
+            ? "Tela final"
+            : `Pergunta “${linha.id}” (versão anterior)`;
+        const etapa = linha.pergunta ? EV.etapaPorNumero(linha.pergunta.etapa) : null;
+        const destaque = top3.has(linha.id);
+        return `<li class="linha-barra${destaque ? " lider" : " fora"}">
+          <span class="rotulo">${escapeHtml(titulo)}${etapa ? `<small>Etapa ${etapa.n} · ${escapeHtml(etapa.titulo)}</small>` : ""}</span>
+          <span class="trilho" role="img" aria-label="${escapeHtml(`${titulo}: ${plural(linha.total, "pessoa parada", "pessoas paradas")}, ${pct(linha.total, emAndamento)} de quem está em andamento`)}"><span style="width:${(
+          (linha.total / maior) *
+          100
+        ).toFixed(2)}%"></span></span>
+          <span class="num"><strong>${n(linha.total)}</strong><span>${pct(linha.total, emAndamento)}</span></span>
+        </li>`;
+      })
+      .join("")}</ol>
+      <p class="nota">Porcentagem sobre as ${escapeHtml(plural(emAndamento, "pessoa em andamento", "pessoas em andamento"))}. Em destaque (mais escuras), as 3 perguntas onde mais gente parou.</p>`;
+    redesenhar(alvo, html);
+  }
+
+  /* ------------------------------------------------------------ Índices das distribuições */
+
+  /**
+   * Organiza as linhas do resumo por chave. `perfil` = null soma todos os perfis (os perfis
+   * são disjuntos — cada pessoa tem um só — então a soma das contagens distintas é exata).
+   */
+  function indexar(resumo, perfil) {
+    const filtra = (linha) => perfil === undefined || linha.perfil === perfil;
+    const dist = new Map();
+    for (const linha of resumo.distribuicoes) {
+      if (!filtra(linha)) continue;
+      const porValor = dist.get(linha.chave) || new Map();
+      const valor = String(linha.valor);
+      porValor.set(valor, (porValor.get(valor) || 0) + num(linha.total));
+      dist.set(linha.chave, porValor);
+    }
+    const responderam = new Map();
+    for (const linha of resumo.responderam) {
+      if (!filtra(linha)) continue;
+      responderam.set(linha.chave, (responderam.get(linha.chave) || 0) + num(linha.total));
+    }
+    const escalas = new Map();
+    for (const linha of resumo.escalas) {
+      if (!filtra(linha)) continue;
+      const atual = escalas.get(linha.chave) || { soma: 0, total: 0 };
+      atual.soma += num(linha.media) * num(linha.total);
+      atual.total += num(linha.total);
+      escalas.set(linha.chave, atual);
+    }
+    return { dist, responderam, escalas };
+  }
+
+  /** Média da escala: exata pelo histograma; cai na média do banco se o histograma faltar. */
+  function mediaEscala(indice, pergunta) {
+    const porValor = indice.dist.get(pergunta.id);
+    if (porValor && porValor.size) {
+      let soma = 0;
+      let total = 0;
+      for (const [valor, quantidade] of porValor) {
+        const numero = Number(valor);
+        if (!Number.isFinite(numero)) continue;
+        soma += numero * quantidade;
+        total += quantidade;
+      }
+      if (total) return { media: soma / total, total };
+    }
+    const escala = indice.escalas.get(pergunta.id);
+    return escala && escala.total ? { media: escala.soma / escala.total, total: escala.total } : null;
+  }
+
+  function ordenadoPorTotal(porValor) {
+    return Array.from(porValor || [])
+      .map(([valor, total]) => ({ valor, total }))
+      .sort((a, b) => b.total - a.total || a.valor.localeCompare(b.valor, "pt-BR"));
+  }
+
+  function regioesDe(porValor) {
+    const regioes = new Map(EV.REGIOES.map((regiao) => [regiao, 0]));
+    for (const [estado, total] of porValor || []) {
+      const regiao = EV.regiaoDoEstado(estado);
+      if (regiao) regioes.set(regiao, regioes.get(regiao) + total);
+    }
+    return regioes;
+  }
+
+  /* ------------------------------------------------------------ ICP por perfil */
+
+  /** Resumo de uma variável do ICP num perfil: { texto, pc } ou null (ninguém respondeu). */
+  function linhaIcp(indice, pergunta) {
+    const base = indice.responderam.get(pergunta.id) || 0;
+    if (pergunta.tipo === "escala") {
+      const media = mediaEscala(indice, pergunta);
+      if (!media) return null;
+      return { texto: `${DEC.format(media.media)}/10`, pc: `média de ${plural(media.total, "resposta", "respostas")}` };
+    }
+    const ordenado = ordenadoPorTotal(indice.dist.get(pergunta.id));
+    if (!ordenado.length || !base) return null;
+    const baseTexto = `de quem respondeu (${n(base)})`;
+    if (pergunta.tipo === "multipla") {
+      const dois = ordenado.slice(0, 2);
+      return {
+        texto: dois.map((item) => `${item.valor} (${pct(item.total, base)})`).join(" + "),
+        pc: `as 2 mais marcadas, % ${baseTexto}`
+      };
+    }
+    const lider = ordenado[0];
+    const linha = { texto: lider.valor, pc: `${pct(lider.total, base)} ${baseTexto}` };
+    if (pergunta.id === "estado") {
+      const regioes = Array.from(regioesDe(indice.dist.get("estado"))).sort((a, b) => b[1] - a[1]);
+      if (regioes.length && regioes[0][1]) {
+        linha.regiao = { texto: `Região ${regioes[0][0]}`, pc: `${pct(regioes[0][1], base)} ${baseTexto}` };
+      }
+    }
+    return linha;
+  }
+
+  function dadosIcp() {
+    const g = state.geral;
+    const r = state.resumo;
+    const perfis = state.perfil ? [PERFIL_POR_CHAVE.get(state.perfil)] : PERFIS;
+    const fonte = state.perfil ? r : g;
+    const totais = new Map(fonte.perfis.map((linha) => [linha.perfil, linha]));
+    return perfis
+      .map((perfil) => {
+        const linhaPerfil = totais.get(perfil.valor);
+        const total = linhaPerfil ? num(linhaPerfil.total) : 0;
+        if (!total) return null;
+        const indice = indexar(fonte, perfil.valor);
+        const variaveis = EV.ICP_VARIAVEIS.map((id) => EV.perguntaPorId(id))
+          .filter(Boolean)
+          .map((pergunta) => ({ pergunta, linha: linhaIcp(indice, pergunta) }));
+        return { perfil, total, concluidas: num(linhaPerfil.concluidas), variaveis };
+      })
+      .filter(Boolean);
+  }
+
+  function pintarIcp() {
+    const alvo = $("[data-icp]");
+    const cartoes = dadosIcp();
+    alvo.classList.toggle("unico", Boolean(state.perfil));
+    $("[data-copiar-icp]").disabled = !cartoes.length;
+
+    if (!cartoes.length) {
+      redesenhar(alvo, vazioHtml("Ainda sem perfis para resumir.", "O cartão de cada perfil aparece quando a primeira pessoa daquele perfil responder a pergunta 1."));
+      return;
+    }
+
+    const largo = window.matchMedia("(min-width: 720px)").matches;
+    const html = cartoes
+      .map(({ perfil, total, concluidas, variaveis }, indice) => {
+        const itens = variaveis
+          .map(({ pergunta, linha }) => {
+            if (!linha) return `<div><dt>${escapeHtml(pergunta.analise)}</dt><dd class="sem">ninguém respondeu ainda</dd></div>`;
+            const regiao = linha.regiao
+              ? `<div><dt>Região</dt><dd>${escapeHtml(linha.regiao.texto)} <span class="pc">· ${escapeHtml(linha.regiao.pc)}</span></dd></div>`
+              : "";
+            return `<div><dt>${escapeHtml(pergunta.analise)}</dt><dd>${escapeHtml(linha.texto)} <span class="pc">· ${escapeHtml(linha.pc)}</span></dd></div>${regiao}`;
+          })
+          .join("");
+        const aberto = state.icpEscolhas.has(perfil.chave) ? state.icpEscolhas.get(perfil.chave) : largo || indice === 0 || Boolean(state.perfil);
+        return `<details class="icp-cartao" data-icp-perfil="${escapeHtml(perfil.chave)}"${aberto ? " open" : ""}>
+          <summary class="icp-cabeca" data-foco="icp-${escapeHtml(perfil.chave)}">
+            <h3>${escapeHtml(perfil.curto)}</h3>
+            <p><strong>${escapeHtml(plural(total, "pessoa", "pessoas"))}</strong> · ${pct(concluidas, total)} responderam tudo (${n(concluidas)})</p>
+          </summary>
+          <dl class="icp-lista">${itens}</dl>
+        </details>`;
+      })
+      .join("");
+    redesenhar(alvo, html);
+  }
+
+  $("[data-icp]").addEventListener(
+    "toggle",
+    (evento) => {
+      const cartao = evento.target instanceof Element ? evento.target.closest("[data-icp-perfil]") : null;
+      if (cartao && evento.target === cartao) state.icpEscolhas.set(cartao.dataset.icpPerfil, cartao.open);
+    },
+    true
+  );
+
+  /** Texto puro, para colar no WhatsApp ou no Docs. */
+  function textoIcp() {
+    const cartoes = dadosIcp();
+    const cabeca = `ICP — Pesquisa da Escola Enfermagem de Valor\n${rotuloPeriodo()} · gerado em ${dataHora(state.geradoEm)}\n`;
+    const blocos = cartoes.map(({ perfil, total, concluidas, variaveis }) => {
+      const linhas = [`*${perfil.curto}* — ${plural(total, "pessoa", "pessoas")}, ${pct(concluidas, total)} responderam tudo`];
+      for (const { pergunta, linha } of variaveis) {
+        if (!linha) continue;
+        linhas.push(`• ${pergunta.analise}: ${linha.texto} (${linha.pc})`);
+        if (linha.regiao) linhas.push(`• Região: ${linha.regiao.texto} (${linha.regiao.pc})`);
+      }
+      return linhas.join("\n");
+    });
+    return `${cabeca}\n${blocos.join("\n\n")}\n\nPorcentagens sobre quem respondeu cada pergunta naquele perfil.`;
+  }
+
+  async function copiar(texto) {
+    try {
+      await navigator.clipboard.writeText(texto);
+      return true;
+    } catch {
+      // Webview sem Clipboard API: o jeito antigo ainda funciona na maioria.
+      const area = document.createElement("textarea");
+      area.value = texto;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      let ok = false;
+      try {
+        ok = document.execCommand("copy");
+      } catch {
+        ok = false;
+      }
+      area.remove();
+      return ok;
+    }
+  }
+
+  $("[data-copiar-icp]").addEventListener("click", async () => {
+    if (!state.resumo) return;
+    const ok = await copiar(textoIcp());
+    const aviso = $("[data-copiado]");
+    aviso.textContent = ok ? "Resumo copiado. É só colar no WhatsApp ou no Docs." : "Não deu para copiar automaticamente neste navegador.";
+    window.clearTimeout(aviso._timer);
+    aviso._timer = window.setTimeout(() => {
+      aviso.textContent = "";
+    }, 5000);
+  });
+
+  /* ------------------------------------------------------------ Respostas por pergunta */
+
+  function barrasHtml(linhas, base, rotuloBase) {
+    const maior = Math.max(0, ...linhas.map((linha) => linha.total));
+    return `<ol class="barras">${linhas
+      .map((linha) => {
+        const largura = maior ? (linha.total / maior) * 100 : 0;
+        const classe = !linha.total ? " zero" : linha.total === maior ? " lider" : "";
+        return `<li class="linha-barra${classe}">
+          <span class="rotulo">${escapeHtml(linha.rotulo)}${linha.sub ? `<small>${escapeHtml(linha.sub)}</small>` : ""}</span>
+          <span class="trilho" role="img" aria-label="${escapeHtml(`${linha.rotulo}: ${n(linha.total)}, ${pct(linha.total, base)} ${rotuloBase}`)}"><span style="width:${largura.toFixed(
+          2
+        )}%"></span></span>
+          <span class="num"><strong>${n(linha.total)}</strong><span>${pct(linha.total, base)}</span></span>
+        </li>`;
+      })
+      .join("")}</ol>`;
+  }
+
+  function quadroHtml(pergunta, indice) {
+    const base = indice.responderam.get(pergunta.id) || 0;
+    const porValor = indice.dist.get(pergunta.id) || new Map();
+    const chips = [`<span class="chip forte">${escapeHtml(plural(base, "respondeu", "responderam"))}</span>`];
+    if (pergunta.tipo === "multipla") chips.push('<span class="chip">cada pessoa pode marcar mais de uma</span>');
+    if (pergunta.visivelSe) {
+      const so = pergunta.visivelSe.valores.map((valor) => perfilCurto(valor)).join(", ");
+      chips.push(`<span class="chip">só para ${escapeHtml(so.toLowerCase())}</span>`);
+    }
+    const nota = pergunta.nota ? `<p class="quadro-nota">${escapeHtml(pergunta.nota)}</p>` : "";
+    let corpo = "";
+    let classe = "";
+
+    if (!base) {
+      corpo = vazioHtml("Ninguém respondeu ainda.", "");
+    } else if (pergunta.tipo === "escala") {
+      corpo = histogramaHtml(pergunta, indice, porValor, base);
+    } else if (pergunta.tipo === "lista") {
+      classe = " largo estado";
+      // Todos os 27, do mais para o menos citado; empate em ordem alfabética.
+      const linhas = pergunta.opcoes
+        .map((opcao) => ({ rotulo: opcao, sub: "", total: porValor.get(opcao) || 0 }))
+        .sort((a, b) => b.total - a.total || a.rotulo.localeCompare(b.rotulo, "pt-BR"));
+      const regioes = Array.from(regioesDe(porValor)).map(([regiao, total]) => ({ rotulo: regiao, total }));
+      corpo = `${barrasHtml(linhas, base, "de quem respondeu")}
+        <div class="sub-bloco"><h5>Por região</h5>${barrasHtml(
+          regioes.sort((a, b) => b.total - a.total),
+          base,
+          "de quem respondeu"
+        )}</div>`;
+    } else {
+      const linhas = pergunta.opcoes.map((opcao) => ({ rotulo: opcao, total: porValor.get(opcao) || 0 }));
+      // Valor gravado que não é mais alternativa (edição anterior da pesquisa): aparece no fim,
+      // em vez de sumir da conta.
+      for (const [valor, total] of porValor) {
+        if (!pergunta.opcoes.includes(valor)) linhas.push({ rotulo: valor, sub: "alternativa de versão anterior", total });
+      }
+      corpo = barrasHtml(linhas, base, pergunta.tipo === "multipla" ? "de quem respondeu marcaram" : "de quem respondeu");
+    }
+
+    // Genérico por `pergunta.outro`: hoje nenhuma pergunta tem "Outro" (decisão do cliente), então
+    // o link "Ver o que escreveram em Outro" não aparece em quadro nenhum.
+    let outro = "";
+    if (pergunta.outro && base) {
+      const quantos = porValor.get(pergunta.outro) || 0;
+      if (quantos) outro = outroHtml(pergunta, quantos);
+    }
+
+    return `<article class="quadro${classe}" id="q-${escapeHtml(pergunta.id)}">
+      <div class="quadro-cabeca">
+        <p class="quadro-num">Pergunta ${escapeHtml(pergunta.numero)}</p>
+        <h4>${escapeHtml(pergunta.texto)}</h4>
+        <div class="quadro-meta">${chips.join("")}</div>
+        ${nota}
+      </div>
+      ${corpo}
+      ${outro}
+    </article>`;
+  }
+
+  function histogramaHtml(pergunta, indice, porValor, base) {
+    const media = mediaEscala(indice, pergunta);
+    const valores = [];
+    for (let valor = pergunta.min; valor <= pergunta.max; valor++) valores.push({ valor, total: porValor.get(String(valor)) || 0 });
+    const maior = Math.max(1, ...valores.map((item) => item.total));
+    const descricao = valores.map((item) => `${item.valor}: ${n(item.total)}`).join(", ");
+    return `<div class="media"><strong>${media ? DEC.format(media.media) : "—"}</strong><span>média, de 0 a 10 · ${escapeHtml(plural(base, "resposta", "respostas"))}</span></div>
+      <div class="histo" role="img" aria-label="${escapeHtml(`Quantas pessoas escolheram cada nota. ${descricao}.`)}">
+        ${valores
+          .map(
+            (item) =>
+              `<div class="histo-col" title="${escapeHtml(`${item.valor}: ${n(item.total)} (${pct(item.total, base)})`)}"><i style="height:${(
+                (item.total / maior) *
+                100
+              ).toFixed(2)}%"></i>${item.total ? `<b style="bottom:${((item.total / maior) * 100).toFixed(2)}%">${n(item.total)}</b>` : ""}</div>`
+          )
+          .join("")}
+      </div>
+      <div class="histo-eixo" aria-hidden="true">${valores.map((item) => `<span>${item.valor}</span>`).join("")}</div>
+      <div class="histo-legendas"><span>0 · ${escapeHtml(pergunta.legendaMin || "")}</span><span>${escapeHtml(pergunta.legendaMax || "")} · 10</span></div>
+      <div class="tabela-rolagem visualmente-oculto"><table><caption>${escapeHtml(pergunta.analise)}</caption><thead><tr><th scope="col">Nota</th><th scope="col">Pessoas</th><th scope="col">%</th></tr></thead><tbody>${valores
+        .map((item) => `<tr><th scope="row">${item.valor}</th><td>${n(item.total)}</td><td>${pct(item.total, base)}</td></tr>`)
+        .join("")}</tbody></table></div>`;
+  }
+
+  function outroHtml(pergunta, quantos) {
+    const estado = state.outros.get(pergunta.id);
+    const aberto = Boolean(estado);
+    const botao = `<button type="button" class="botao-texto" aria-expanded="${aberto}" aria-controls="outro-${escapeHtml(pergunta.id)}" data-outro="${escapeHtml(
+      pergunta.id
+    )}" data-foco="outro-${escapeHtml(pergunta.id)}">${aberto ? "Esconder o que escreveram em Outro" : `Ver o que escreveram em Outro (${n(quantos)})`}</button>`;
+    if (!aberto) return `<div class="outro">${botao}</div>`;
+    return `<div class="outro">${botao}<div class="outro-painel" id="outro-${escapeHtml(pergunta.id)}">${outroCorpo(pergunta, estado)}</div></div>`;
+  }
+
+  function outroCorpo(pergunta, estado) {
+    if (estado.erro && !estado.itens.length) return erroHtml(estado.erro, `outro:${pergunta.id}`, `repetir-outro-${pergunta.id}`);
+    if (!estado.itens.length && estado.carregando) return esqueleto(3);
+    if (!estado.itens.length) return vazioHtml("Nenhum complemento escrito neste recorte.", "");
+    const chave = EV.chaveOutro(pergunta);
+    const lista = `<ul class="textos">${estado.itens
+      .map((item) => textoItemHtml(item, `<blockquote>${escapeHtml((item.textos || {})[chave] || "")}</blockquote>`))
+      .join("")}</ul>`;
+    const falta = estado.total - estado.itens.length;
+    const mais =
+      falta > 0
+        ? `<div class="mais"><p>Mostrando ${n(estado.itens.length)} de ${n(estado.total)}</p><button type="button" class="botao botao-leve botao-pequeno" data-outro-mais="${escapeHtml(
+            pergunta.id
+          )}" data-foco="outro-mais-${escapeHtml(pergunta.id)}" ${estado.carregando ? "disabled" : ""}>${estado.carregando ? "Carregando..." : "Carregar mais"}</button></div>`
+        : `<div class="mais"><p>${escapeHtml(plural(estado.total, "complemento", "complementos"))}</p></div>`;
+    const erro = estado.erro ? `<p class="nota" role="alert">${escapeHtml(mensagemErro(estado.erro))}</p>` : "";
+    return lista + erro + mais;
+  }
+
+  function pintarPerguntas() {
+    const r = state.resumo;
+    const alvo = $("[data-perguntas]");
+    const indice = indexar(r, undefined);
+    const porEtapa = new Map();
+    for (const pergunta of EV.PERGUNTAS) {
+      const lista = porEtapa.get(pergunta.etapa) || [];
+      lista.push(pergunta);
+      porEtapa.set(pergunta.etapa, lista);
+    }
+    const html = EV.ETAPAS.map((etapa) => {
+      const perguntas = porEtapa.get(etapa.n) || [];
+      const analisaveis = perguntas.filter((pergunta) => ANALISAVEIS.includes(pergunta));
+      const aberta = state.etapasAbertas.has(etapa.n);
+      const resumoEtapa = analisaveis.length
+        ? `${analisaveis.length} ${analisaveis.length === 1 ? "pergunta" : "perguntas"}`
+        : "perguntas abertas, veja em Respostas abertas";
+      const corpo = analisaveis.length
+        ? `<div class="quadros">${analisaveis.map((pergunta) => quadroHtml(pergunta, indice)).join("")}</div>`
+        : `<div class="quadros"><p class="nota">As perguntas ${perguntas
+            .map((pergunta) => pergunta.numero)
+            .join(", ")} são de texto livre. Leia o que as pessoas escreveram em <a href="#sec-abertas">Respostas abertas</a>.</p></div>`;
+      return `<details class="etapa" data-etapa="${etapa.n}"${aberta ? " open" : ""}>
+        <summary data-foco="etapa-${etapa.n}"><span class="etapa-nome">Etapa ${etapa.n} · ${escapeHtml(etapa.titulo)}<small>${escapeHtml(resumoEtapa)}</small></span></summary>
+        ${corpo}
+      </details>`;
+    }).join("");
+    redesenhar(alvo, html);
+  }
+
+  // O acordeão lembra o que a pessoa abriu: a atualização automática não fecha nada.
+  $("[data-perguntas]").addEventListener(
+    "toggle",
+    (evento) => {
+      const etapa = evento.target instanceof Element ? evento.target.closest("[data-etapa]") : null;
+      if (!etapa || evento.target !== etapa) return;
+      const numero = Number(etapa.dataset.etapa);
+      if (etapa.open) state.etapasAbertas.add(numero);
+      else state.etapasAbertas.delete(numero);
+    },
+    true
+  );
+
+  function redesenharQuadro(perguntaId) {
+    const pergunta = EV.perguntaPorId(perguntaId);
+    const quadro = document.getElementById(`q-${perguntaId}`);
+    if (!pergunta || !quadro || !state.resumo) return;
+    const temporario = document.createElement("div");
+    const ativo = document.activeElement;
+    const chave = ativo && quadro.contains(ativo) && ativo.closest("[data-foco]") ? ativo.closest("[data-foco]").getAttribute("data-foco") : "";
+    temporario.innerHTML = quadroHtml(pergunta, indexar(state.resumo, undefined));
+    const novo = temporario.firstElementChild;
+    quadro.replaceWith(novo);
+    const procurar = state.focoDepois || chave;
+    if (procurar) {
+      const alvo = novo.querySelector(`[data-foco="${CSS.escape(procurar)}"]`);
+      if (alvo) {
+        alvo.focus({ preventScroll: true });
+        state.focoDepois = "";
+      }
+    }
+  }
+
+  async function carregarOutro(perguntaId, { mais = false } = {}) {
+    const pergunta = EV.perguntaPorId(perguntaId);
+    if (!pergunta || !pergunta.outro) return;
+    let estado = state.outros.get(perguntaId);
+    if (!estado || !mais) {
+      estado = { itens: mais && estado ? estado.itens : [], total: estado ? estado.total : 0, carregando: false, erro: 0, seq: estado ? estado.seq : 0 };
+      state.outros.set(perguntaId, estado);
+    }
+    const minha = ++estado.seq;
+    estado.carregando = true;
+    estado.erro = 0;
+    redesenharQuadro(perguntaId);
+
+    const params = parametros();
+    params.set("chaves", EV.chaveOutro(pergunta));
+    params.set("limite", String(LIMITE_OUTRO));
+    params.set("offset", String(mais ? estado.itens.length : 0));
+    const { ok, status, body } = await api(`/api/painel/abertas?${params}`);
+
+    // Fechado no meio do caminho, ou uma requisição mais nova já saiu: descarta.
+    if (state.outros.get(perguntaId) !== estado || minha !== estado.seq) return;
+    estado.carregando = false;
+    if (status === 401) {
+      sessaoExpirou();
+      return;
+    }
+    if (!ok) {
+      estado.erro = status || 0;
+    } else {
+      const itens = Array.isArray(body.itens) ? body.itens : [];
+      estado.itens = mais ? estado.itens.concat(itens) : itens;
+      estado.total = num(body.total);
+    }
+    redesenharQuadro(perguntaId);
+  }
+
+  function recarregarOutros() {
+    for (const id of Array.from(state.outros.keys())) carregarOutro(id);
+  }
+
+  $("[data-perguntas]").addEventListener("click", (evento) => {
+    const alvo = evento.target instanceof Element ? evento.target : null;
+    if (!alvo) return;
+    const botaoOutro = alvo.closest("[data-outro]");
+    if (botaoOutro) {
+      const id = botaoOutro.dataset.outro;
+      state.focoDepois = `outro-${id}`;
+      if (state.outros.has(id)) {
+        state.outros.delete(id);
+        redesenharQuadro(id);
+      } else {
+        carregarOutro(id);
+      }
+      return;
+    }
+    const mais = alvo.closest("[data-outro-mais]");
+    if (mais) {
+      state.focoDepois = `outro-mais-${mais.dataset.outroMais}`;
+      carregarOutro(mais.dataset.outroMais, { mais: true });
+      return;
+    }
+  });
+
+  /* ------------------------------------------------------------ Tráfego */
+
+  const CAMPOS_TRAFEGO = {
+    utm_source: "Origem (utm_source)",
+    utm_campaign: "Campanha (utm_campaign)",
+    utm_medium: "Mídia (utm_medium)",
+    utm_content: "Anúncio (utm_content)",
+    dispositivo: "Dispositivo"
+  };
+
+  const NOMES_DISPOSITIVO = { mobile: "Celular", tablet: "Tablet", desktop: "Computador", "(desconhecido)": "(desconhecido)" };
+
+  function taxaHtml(parte, base) {
+    if (!base) return '<span class="taxa">—</span>';
+    const valor = Math.min(100, (parte / base) * 100);
+    return `<span class="taxa"><span>${pct(parte, base)}</span><i aria-hidden="true"><b style="width:${valor.toFixed(1)}%"></b></i></span>`;
+  }
+
+  function pintarTrafego() {
+    const r = state.resumo;
+    const alvo = $("[data-trafego]");
+    $$("[data-campo]").forEach((botao) => botao.setAttribute("aria-pressed", String(botao.dataset.campo === state.trafegoCampo)));
+    const linhas = r.trafego
+      .filter((linha) => linha.campo === state.trafegoCampo)
+      .map((linha) => ({ valor: String(linha.valor), visitantes: num(linha.visitantes), pessoas: num(linha.pessoas), concluidas: num(linha.concluidas) }));
+
+    if (!linhas.length) {
+      redesenhar(alvo, `<div class="trafego-tabela">${vazioHtml("Nenhum acesso neste recorte.", "")}</div>`);
+      return;
+    }
+    const comPerfil = Boolean(state.perfil);
+    const total = linhas.reduce(
+      (soma, linha) => ({ visitantes: soma.visitantes + linha.visitantes, pessoas: soma.pessoas + linha.pessoas, concluidas: soma.concluidas + linha.concluidas }),
+      { visitantes: 0, pessoas: 0, concluidas: 0 }
+    );
+    const nome = (valor) => (state.trafegoCampo === "dispositivo" ? NOMES_DISPOSITIVO[valor] || valor : valor);
+    const html = `<div class="tabela-rolagem trafego-tabela"><table>
+      <caption>${escapeHtml(CAMPOS_TRAFEGO[state.trafegoCampo])}${comPerfil ? ` · identificados e concluídas só de ${escapeHtml(PERFIL_POR_CHAVE.get(state.perfil).curto.toLowerCase())}; visitantes de todos os perfis` : ""}</caption>
+      <thead><tr>
+        <th scope="col">${escapeHtml(state.trafegoCampo === "dispositivo" ? "Dispositivo" : "Valor")}</th>
+        <th scope="col" class="n">Visitantes</th>
+        <th scope="col" class="n">Identificados</th>
+        <th scope="col" class="n">Concluídas</th>
+        <th scope="col" class="n">Identificados ÷ visitantes</th>
+        <th scope="col" class="n">Concluídas ÷ identificados</th>
+      </tr></thead>
+      <tbody>${linhas
+        .map(
+          (linha) => `<tr>
+          <th scope="row">${escapeHtml(nome(linha.valor))}</th>
+          <td class="n">${n(linha.visitantes)}</td>
+          <td class="n">${n(linha.pessoas)}</td>
+          <td class="n">${n(linha.concluidas)}</td>
+          <td class="n">${comPerfil ? "—" : taxaHtml(linha.pessoas, linha.visitantes)}</td>
+          <td class="n">${taxaHtml(linha.concluidas, linha.pessoas)}</td>
+        </tr>`
+        )
+        .join("")}</tbody>
+    </table></div>
+    <p class="nota">${
+      comPerfil
+        ? "Com um perfil escolhido, a taxa de identificação fica de fora: o acesso não tem perfil, e dividir um perfil pelo tráfego de todos daria um número sem sentido."
+        : `“(sem utm)” é quem chegou sem parâmetro de campanha (link direto, bio, compartilhamento). Até 30 valores por campo, dos que mais trouxeram gente. Somando a tabela: ${n(
+            total.visitantes
+          )} visitantes, ${n(total.pessoas)} identificados, ${n(total.concluidas)} concluídas.`
+    }</p>`;
+    redesenhar(alvo, html);
+  }
+
+  $("[data-trafego-campos]").addEventListener("click", (evento) => {
+    const botao = evento.target instanceof Element ? evento.target.closest("[data-campo]") : null;
+    if (!botao) return;
+    state.trafegoCampo = botao.dataset.campo;
+    if (state.resumo) pintarTrafego();
+    else $$("[data-campo]").forEach((item) => item.setAttribute("aria-pressed", String(item === botao)));
+  });
+
+  /* ================================================================== */
+  /* Cruzamento                                                           */
+  /* ================================================================== */
+
+  function montarSelects() {
+    const opcoes = EV.ETAPAS.map((etapa) => {
+      const perguntas = ANALISAVEIS.filter((pergunta) => pergunta.etapa === etapa.n);
+      if (!perguntas.length) return "";
+      return `<optgroup label="${escapeHtml(`Etapa ${etapa.n} · ${etapa.titulo}`)}">${perguntas
+        .map((pergunta) => `<option value="${escapeHtml(pergunta.id)}">${escapeHtml(`${pergunta.numero}. ${pergunta.analise}`)}</option>`)
+        .join("")}</optgroup>`;
+    }).join("");
+    $("[data-cruz-linha]").innerHTML = opcoes;
+    $("[data-cruz-coluna]").innerHTML = opcoes;
+    $("[data-cruz-linha]").value = state.cruz.linha;
+    $("[data-cruz-coluna]").value = state.cruz.coluna;
+  }
+
+  async function carregarCruzamento() {
+    const minha = ++seq.cruz;
+    const alvo = $("[data-cruzamento]");
+    const cartao = alvo.closest(".cartao");
+    if (state.cruz.linha === state.cruz.coluna) {
+      state.cruz.dados = null;
+      redesenhar(alvo, vazioHtml("Escolha duas perguntas diferentes.", "Linhas e colunas precisam ser perguntas diferentes para o cruzamento fazer sentido."));
+      return;
+    }
+    state.cruz.carregando = true;
+    if (!state.cruz.dados) redesenhar(alvo, esqueleto(6));
+    cartao.setAttribute("aria-busy", "true");
+
+    const params = parametros();
+    params.set("linha", state.cruz.linha);
+    params.set("coluna", state.cruz.coluna);
+    const { ok, status, body } = await api(`/api/painel/cruzamento?${params}`);
+    if (minha !== seq.cruz) return;
+    cartao.removeAttribute("aria-busy");
+    state.cruz.carregando = false;
+
+    if (status === 401) {
+      sessaoExpirou();
+      return;
+    }
+    if (!ok || !body.cruzamento) {
+      state.cruz.dados = null;
+      state.cruz.erro = status || 0;
+      redesenhar(alvo, erroHtml(status, "cruzamento"));
+      return;
+    }
+    state.cruz.erro = 0;
+    state.cruz.dados = body.cruzamento;
+    pintarCruzamento();
+  }
+
+  /**
+   * Rampa sequencial da ameixa, contínua, do quase branco até o tom médio. Para no tom em que a
+   * tinta berinjela ainda passa AA (4,6:1): o número dentro da célula fica legível em todas, sem
+   * troca de cor de texto no meio (que faria 21% parecer tão escuro quanto 34%).
+   */
+  function corCelula(t) {
+    const claro = [246, 236, 239];
+    const escuro = [174, 143, 161];
+    const cor = claro.map((canal, i) => Math.round(canal + (escuro[i] - canal) * Math.max(0, Math.min(1, t))));
+    return { fundo: `rgb(${cor.join(",")})`, texto: "var(--ink)" };
+  }
+
+  /** Ordem das alternativas: a da pergunta; perfil usa a ordem de PERFIL; extras no fim. */
+  function ordemDe(perguntaId, valores) {
+    const pergunta = EV.perguntaPorId(perguntaId);
+    const ordem = pergunta && pergunta.opcoes ? pergunta.opcoes.map(String) : pergunta && pergunta.tipo === "escala" ? Array.from({ length: pergunta.max - pergunta.min + 1 }, (_, i) => String(pergunta.min + i)) : [];
+    const presentes = new Set(valores.map(String));
+    const saida = ordem.filter((valor) => presentes.has(valor));
+    for (const valor of valores.map(String)) if (!saida.includes(valor)) saida.push(valor);
+    return saida;
+  }
+
+  function rotuloValor(perguntaId, valor) {
+    if (perguntaId === "perfil") return perfilCurto(valor);
+    const pergunta = EV.perguntaPorId(perguntaId);
+    if (pergunta && pergunta.tipo === "escala") return `Nota ${valor}`;
+    return valor;
+  }
+
+  function pintarCruzamento() {
+    const alvo = $("[data-cruzamento]");
+    $$("[data-modo]").forEach((botao) => botao.setAttribute("aria-pressed", String(botao.dataset.modo === state.cruz.modo)));
+    const dados = state.cruz.dados;
+    if (!dados) return;
+    const linhaP = EV.perguntaPorId(dados.linha) || EV.perguntaPorId(state.cruz.linha);
+    const colunaP = EV.perguntaPorId(dados.coluna) || EV.perguntaPorId(state.cruz.coluna);
+    const base = num(dados.base);
+    const totLinha = new Map((dados.linhas || []).map((item) => [String(item.valor), num(item.total)]));
+    const totColuna = new Map((dados.colunas || []).map((item) => [String(item.valor), num(item.total)]));
+    const celulas = new Map((dados.celulas || []).map((item) => [`${item.linha}\u0000${item.coluna}`, num(item.total)]));
+
+    if (!base) {
+      redesenhar(alvo, vazioHtml("Ninguém respondeu as duas perguntas neste recorte.", linhaP && colunaP && (linhaP.visivelSe || colunaP.visivelSe) ? "Uma delas é só para um perfil: confira se o outro lado não é de outro perfil." : ""));
+      return;
+    }
+
+    // Linha/coluna sem ninguém sai da tabela (os 27 estados virariam 20 linhas de zero).
+    const linhas = ordemDe(dados.linha, Array.from(totLinha.keys()).filter((valor) => totLinha.get(valor) > 0));
+    const colunas = ordemDe(dados.coluna, Array.from(totColuna.keys()).filter((valor) => totColuna.get(valor) > 0));
+    const modo = state.cruz.modo;
+
+    const valorDe = (l, c) => celulas.get(`${l}\u0000${c}`) || 0;
+    const exibido = (l, c) => {
+      const total = valorDe(l, c);
+      if (modo === "linha") return totLinha.get(l) ? total / totLinha.get(l) : 0;
+      if (modo === "coluna") return totColuna.get(c) ? total / totColuna.get(c) : 0;
+      return total;
+    };
+    let maximo = 0;
+    for (const l of linhas) for (const c of colunas) maximo = Math.max(maximo, exibido(l, c));
+
+    const texto = (l, c) => {
+      const total = valorDe(l, c);
+      if (modo === "numeros") return n(total);
+      if (!total) return "0%";
+      return pct(total, modo === "linha" ? totLinha.get(l) : totColuna.get(c));
+    };
+
+    const multipla = [linhaP, colunaP].some((pergunta) => pergunta && pergunta.tipo === "multipla");
+    const baseModo =
+      modo === "linha"
+        ? `Cada linha soma quem deu aquela resposta em “${linhaP ? linhaP.analise : dados.linha}”${multipla ? " (pergunta de marcar várias: a linha pode passar de 100%)" : ""}.`
+        : modo === "coluna"
+          ? `Cada coluna soma quem deu aquela resposta em “${colunaP ? colunaP.analise : dados.coluna}”${multipla ? " (pergunta de marcar várias: a coluna pode passar de 100%)" : ""}.`
+          : "Número de pessoas em cada combinação.";
+
+    const cabecalho = `<tr><th scope="col">${escapeHtml(linhaP ? linhaP.analise : dados.linha)} ↓ · ${escapeHtml(colunaP ? colunaP.analise : dados.coluna)} →</th>${colunas
+      .map((c) => `<th scope="col">${escapeHtml(rotuloValor(dados.coluna, c))}</th>`)
+      .join("")}<th scope="col" class="n">Total</th></tr>`;
+
+    const corpo = linhas
+      .map((l) => {
+        const celulasHtml = colunas
+          .map((c) => {
+            const valor = exibido(l, c);
+            const t = maximo ? valor / maximo : 0;
+            const { fundo, texto: tinta } = valorDe(l, c) ? corCelula(t) : { fundo: "transparent", texto: "var(--ink-soft)" };
+            const titulo = `${rotuloValor(dados.linha, l)} × ${rotuloValor(dados.coluna, c)}: ${plural(valorDe(l, c), "pessoa", "pessoas")}`;
+            return `<td class="celula" style="background:${fundo};color:${tinta}" title="${escapeHtml(titulo)}">${texto(l, c)}</td>`;
+          })
+          .join("");
+        return `<tr><th scope="row">${escapeHtml(rotuloValor(dados.linha, l))}</th>${celulasHtml}<td class="n">${n(totLinha.get(l))}</td></tr>`;
+      })
+      .join("");
+
+    const rodape = `<tr><th scope="row">Total</th>${colunas.map((c) => `<td class="n">${n(totColuna.get(c))}</td>`).join("")}<td class="n">${n(base)}</td></tr>`;
+
+    const ocultas =
+      (linhaP && linhaP.opcoes ? linhaP.opcoes.length - linhas.length : 0) + (colunaP && colunaP.opcoes ? colunaP.opcoes.length - colunas.length : 0);
+
+    redesenhar(
+      alvo,
+      `<p class="cruz-base"><strong>${escapeHtml(plural(base, "pessoa", "pessoas"))} com as duas respostas</strong> · ${escapeHtml(rotuloPeriodo())}${
+        state.perfil ? ` · só ${escapeHtml(PERFIL_POR_CHAVE.get(state.perfil).curto.toLowerCase())}` : ""
+      }. ${escapeHtml(baseModo)}</p>
+      <div class="tabela-rolagem"><table class="cruz">
+        <thead>${cabecalho}</thead>
+        <tbody>${corpo}</tbody>
+        <tfoot>${rodape}</tfoot>
+      </table></div>
+      <div class="escala-legenda"><span>menos</span><i aria-hidden="true"></i><span>mais</span>${
+        ocultas > 0 ? `<span>· ${escapeHtml(plural(ocultas, "alternativa sem ninguém ficou oculta", "alternativas sem ninguém ficaram ocultas"))}</span>` : ""
+      }</div>`
+    );
+  }
+
+  $("[data-cruz-linha]").addEventListener("change", (evento) => {
+    state.cruz.linha = evento.target.value;
+    carregarCruzamento();
+  });
+  $("[data-cruz-coluna]").addEventListener("change", (evento) => {
+    state.cruz.coluna = evento.target.value;
+    carregarCruzamento();
+  });
+  $("[data-cruz-modos]").addEventListener("click", (evento) => {
+    const botao = evento.target instanceof Element ? evento.target.closest("[data-modo]") : null;
+    if (!botao) return;
+    state.cruz.modo = botao.dataset.modo;
+    if (state.cruz.dados) pintarCruzamento();
+    else $$("[data-modo]").forEach((item) => item.setAttribute("aria-pressed", String(item === botao)));
+  });
+
+  /* ================================================================== */
+  /* Respostas abertas                                                    */
+  /* ================================================================== */
+
+  function textoItemHtml(item, conteudo) {
+    return `<li class="texto">${conteudo}<div class="quem"><strong>${escapeHtml(item.nome || "Sem nome")}</strong><span>${escapeHtml(
+      perfilCurto(item.perfil)
+    )}</span><span>${escapeHtml(dataHora(item.criado_em))}</span>${item.status === "concluida" ? "<span>respondeu tudo</span>" : ""}</div></li>`;
+  }
+
+  /** Marca o termo buscado sem abrir brecha: escapa primeiro, depois envolve os trechos. */
+  function realcar(texto, termo) {
+    const seguro = escapeHtml(texto);
+    if (!termo) return seguro;
+    const alvo = escapeHtml(termo).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return seguro.replace(new RegExp(alvo, "gi"), (achado) => `<mark>${achado}</mark>`);
+  }
+
+  function normalizarBusca(texto) {
+    return String(texto || "")
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "")
+      .toLowerCase();
+  }
+
+  function conteudoAberta(item) {
+    const textos = item.textos || {};
+    const termo = state.abertasBusca.trim();
+    if (state.aberta === "frase") {
+      const desejo = textos.frase_desejo;
+      const bloqueio = textos.frase_bloqueio;
+      return `<blockquote><em>Eu gostaria muito de</em> ${desejo ? realcar(desejo, termo) : "<em>—</em>"}<em>, mas ainda não consegui porque</em> ${
+        bloqueio ? realcar(bloqueio, termo) : "<em>—</em>"
+      }</blockquote>`;
+    }
+    const chave = ABERTAS[state.aberta].chaves[0];
+    return `<blockquote>${realcar(textos[chave] || "", termo)}</blockquote>`;
+  }
+
+  function pintarAbertas() {
+    const alvo = $("[data-abertas]");
+    const config = ABERTAS[state.aberta];
+    const pergunta = EV.perguntaPorId(config.pergunta);
+    $("[data-aberta-pergunta]").textContent = pergunta ? `${pergunta.numero}. ${pergunta.texto}` : "";
+    const painel = $("[data-abertas-painel]");
+    painel.setAttribute("aria-labelledby", `aba-${state.aberta}`);
+    $$("[data-aberta]").forEach((aba) => {
+      const ativo = aba.dataset.aberta === state.aberta;
+      aba.setAttribute("aria-selected", String(ativo));
+      aba.tabIndex = ativo ? 0 : -1;
+    });
+
+    const a = state.abertas;
+    if (a.erro && !a.itens.length) {
+      redesenhar(alvo, erroHtml(a.erro, "abertas"));
+      return;
+    }
+    if (!a.pronto) {
+      redesenhar(alvo, esqueleto(6));
+      return;
+    }
+    if (!a.itens.length) {
+      redesenhar(alvo, vazioHtml("Ninguém escreveu nesta pergunta ainda.", "É opcional: aparece aqui assim que alguém responder."));
+      return;
+    }
+
+    // Busca local: filtra o que já veio, sem ir à rede. Deixa claro que é só sobre o carregado.
+    const termo = normalizarBusca(state.abertasBusca.trim());
+    const visiveis = termo
+      ? a.itens.filter((item) => normalizarBusca(Object.values(item.textos || {}).join(" ") + " " + (item.nome || "")).includes(termo))
+      : a.itens;
+    const falta = a.total - a.itens.length;
+    const lista = visiveis.length
+      ? `<ul class="textos">${visiveis.map((item) => textoItemHtml(item, conteudoAberta(item))).join("")}</ul>`
+      : vazioHtml("Nada encontrado no que já carregou.", falta > 0 ? "Carregue mais respostas para buscar nelas também." : "");
+    const contagem = termo
+      ? `${plural(visiveis.length, "resposta encontrada", "respostas encontradas")} entre as ${n(a.itens.length)} carregadas (de ${n(a.total)})`
+      : `Mostrando ${n(a.itens.length)} de ${plural(a.total, "resposta", "respostas")}`;
+    const mais = `<div class="mais"><p>${escapeHtml(contagem)}</p>${
+      falta > 0
+        ? `<button type="button" class="botao botao-leve botao-pequeno" data-abertas-mais data-foco="abertas-mais" ${a.carregando ? "disabled" : ""}>${
+            a.carregando ? "Carregando..." : "Carregar mais"
+          }</button>`
+        : ""
+    }</div>`;
+    const erro = a.erro ? `<p class="nota" role="alert">${escapeHtml(mensagemErro(a.erro))}</p>` : "";
+    redesenhar(alvo, lista + erro + mais);
+  }
+
+  async function carregarAbertas({ reiniciar = false } = {}) {
+    const minha = ++seq.abertas;
+    if (reiniciar) state.abertas = { itens: [], total: 0, erro: 0, carregando: true, pronto: false };
+    state.abertas.carregando = true;
+    state.abertas.erro = 0;
+    pintarAbertas();
+
+    const params = parametros();
+    params.set("chaves", ABERTAS[state.aberta].chaves.join(","));
+    params.set("limite", String(LIMITE_ABERTAS));
+    params.set("offset", String(state.abertas.itens.length));
+    const { ok, status, body } = await api(`/api/painel/abertas?${params}`);
+    if (minha !== seq.abertas) return;
+    state.abertas.carregando = false;
+    if (status === 401) {
+      sessaoExpirou();
+      return;
+    }
+    if (!ok) {
+      state.abertas.erro = status || 0;
+      state.abertas.pronto = true;
+    } else {
+      const itens = Array.isArray(body.itens) ? body.itens : [];
+      state.abertas.itens = state.abertas.itens.concat(itens);
+      state.abertas.total = num(body.total);
+      state.abertas.pronto = true;
+    }
+    pintarAbertas();
+  }
+
+  const abasAbertas = $$("[data-aberta]");
+  function trocarAberta(chave) {
+    if (!ABERTAS[chave] || chave === state.aberta) return;
+    state.aberta = chave;
+    carregarAbertas({ reiniciar: true });
+  }
+  abasAbertas.forEach((aba, indice) => {
+    aba.addEventListener("click", () => trocarAberta(aba.dataset.aberta));
+    aba.addEventListener("keydown", (evento) => {
+      const passo = evento.key === "ArrowRight" ? 1 : evento.key === "ArrowLeft" ? -1 : 0;
+      if (!passo) return;
+      evento.preventDefault();
+      const proxima = abasAbertas[(indice + passo + abasAbertas.length) % abasAbertas.length];
+      proxima.focus();
+      trocarAberta(proxima.dataset.aberta);
+    });
+  });
+
+  $("[data-abertas-busca]").addEventListener("input", (evento) => {
+    state.abertasBusca = evento.target.value;
+    pintarAbertas();
+  });
+
+  $("[data-abertas]").addEventListener("click", (evento) => {
+    const alvo = evento.target instanceof Element ? evento.target : null;
+    if (!alvo) return;
+    if (alvo.closest("[data-abertas-mais]")) {
+      state.focoDepois = "abertas-mais";
+      carregarAbertas();
+    }
+  });
+
+  /* ================================================================== */
+  /* Pessoas                                                              */
+  /* ================================================================== */
+
+  function parametrosLista() {
+    const params = parametros();
+    if (state.status) params.set("status", state.status);
+    const busca = state.busca.trim();
+    if (busca) params.set("busca", busca);
+    return params;
+  }
+
+  /** O CSV sai com os MESMOS filtros da tela (período, perfil, situação, busca). */
+  function atualizarCsv() {
+    const params = parametrosLista();
+    if ($("[data-csv-tentativas]").checked) params.set("tentativas", "todas");
+    $("[data-csv]").href = `/api/painel/exportar.csv?${params}`;
+  }
+
+  async function carregarLista({ reiniciar = false } = {}) {
+    const minha = ++seq.lista;
+    const lista = state.lista;
+    lista.carregando = true;
+    lista.erro = 0;
+    if (!lista.pronto) pintarLista();
+    else pintarContador();
+    $("[data-lista]").setAttribute("aria-busy", "true");
+
+    const params = parametrosLista();
+    params.set("limite", String(LIMITE_LISTA));
+    params.set("offset", String(reiniciar ? 0 : lista.itens.length));
+    const { ok, status, body } = await api(`/api/painel/respostas?${params}`);
+    if (minha !== seq.lista) return;
+    $("[data-lista]").removeAttribute("aria-busy");
+    lista.carregando = false;
+
+    if (status === 401) {
+      sessaoExpirou();
+      return;
+    }
+    if (!ok) {
+      lista.erro = status || 0;
+      if (reiniciar) {
+        lista.itens = [];
+        lista.total = 0;
+      }
+      lista.pronto = true;
+      pintarLista();
+      return;
+    }
+    const itens = Array.isArray(body.itens) ? body.itens : [];
+    lista.itens = reiniciar ? itens : lista.itens.concat(itens);
+    lista.total = num(body.total);
+    lista.pronto = true;
+    pintarLista();
+  }
+
+  function pintarContador() {
+    const lista = state.lista;
+    const alvo = $("[data-contador]");
+    if (!lista.pronto) {
+      alvo.textContent = "Carregando pessoas...";
+      return;
+    }
+    if (lista.erro && !lista.itens.length) {
+      alvo.textContent = "";
+      return;
+    }
+    const filtrado = state.busca.trim() || state.status;
+    alvo.innerHTML = `Mostrando <strong>${n(lista.itens.length)}</strong> de <strong>${n(lista.total)}</strong> ${
+      num(lista.total) === 1 ? "pessoa" : "pessoas"
+    }${filtrado ? " com estes filtros" : ""}${lista.carregando ? " · atualizando..." : ""}`;
+  }
+
+  function statusSelo(item) {
+    if (item.status === "concluida") return '<span class="selo ok"><svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>Respondeu tudo</span>';
+    const pergunta = EV.perguntaPorId(item.pergunta_max) || EV.perguntaPorId(item.pergunta_atual);
+    const onde = pergunta ? `Parou na pergunta ${pergunta.numero}` : "Em andamento";
+    return `<span class="selo meio" title="${escapeHtml(pergunta ? pergunta.analise : "")}">${escapeHtml(`${onde} · ${num(item.progresso_percentual)}%`)}</span>`;
+  }
+
+  function pessoaHtml(item) {
+    const aberto = state.abertos.has(item.id);
+    const link = whatsappLink(item.whatsapp_digits);
+    const telefone = item.whatsapp
+      ? link
+        ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>${escapeHtml(
+            item.whatsapp
+          )}<span class="visualmente-oculto"> (abre o WhatsApp)</span></a>`
+        : `<span>${escapeHtml(item.whatsapp)}</span>`
+      : "<span>sem WhatsApp</span>";
+    const tentativas = num(item.tentativas);
+    const repetidas = tentativas > 1 ? `<span class="selo rep">${escapeHtml(`${n(tentativas)} tentativas`)}</span>` : "";
+    const idSeguro = escapeHtml(item.id);
+    return `<article class="pessoa" data-pessoa="${idSeguro}">
+      <div class="pessoa-cabeca">
+        <div class="pessoa-quem">
+          <span class="pessoa-nome">${escapeHtml(item.nome || "Sem nome")}</span>
+          <span class="pessoa-meta">${escapeHtml(dataHora(item.criado_em))} · ${escapeHtml(perfilCurto(item.perfil))}</span>
+        </div>
+        <div class="pessoa-contato">${telefone}<span>${escapeHtml(item.email || "sem e-mail")}</span></div>
+        <div class="pessoa-selos">${statusSelo(item)}${repetidas}</div>
+        <div class="pessoa-acoes">
+          <span class="pessoa-origem">${escapeHtml(origemTexto(item))}</span>
+          <button type="button" class="botao-texto" aria-expanded="${aberto}" aria-controls="det-${idSeguro}" data-ver="${idSeguro}" data-foco="ver-${idSeguro}">${aberto ? "Fechar" : "Ver tudo"}</button>
+        </div>
+      </div>
+      ${aberto ? detalhePessoaHtml(item) : ""}
+    </article>`;
+  }
+
+  /** Texto de uma resposta para leitura humana, com o complemento do "Outro". */
+  function valorLegivel(pergunta, respostas) {
+    if (pergunta.tipo === "frase") {
+      const [desejo, bloqueio] = pergunta.partes.map((parte) => respostas[parte.id]);
+      if (!desejo && !bloqueio) return null;
+      return `${pergunta.partes[0].antes} ${desejo || "—"}, ${pergunta.partes[1].antes} ${bloqueio || "—"}`;
+    }
+    const valor = respostas[pergunta.id];
+    if (valor == null || valor === "" || (Array.isArray(valor) && !valor.length)) return null;
+    const complemento = pergunta.outro ? respostas[EV.chaveOutro(pergunta)] : "";
+    const comOutro = (texto) => (texto === pergunta.outro && complemento ? `${texto}: ${complemento}` : texto);
+    if (Array.isArray(valor)) return valor.map((item) => `• ${comOutro(String(item))}`).join("\n");
+    if (pergunta.tipo === "escala") return `${valor}/10`;
+    return comOutro(String(valor));
+  }
+
+  function detalhePessoaHtml(item) {
+    const respostas = item.respostas && typeof item.respostas === "object" ? item.respostas : {};
+    const tempos = item.tempos && typeof item.tempos === "object" ? item.tempos : {};
+    let etapaAtual = 0;
+    const linhas = [];
+    for (const pergunta of EV.PERGUNTAS) {
+      // Condicional de outro perfil nem aparece: a cuidadora não tem "pergunta do técnico".
+      if (pergunta.visivelSe && !EV.estaVisivel(pergunta, respostas)) continue;
+      if (pergunta.etapa !== etapaAtual) {
+        etapaAtual = pergunta.etapa;
+        const etapa = EV.etapaPorNumero(etapaAtual);
+        linhas.push(`<li class="etapa-rotulo">Etapa ${etapaAtual} · ${escapeHtml(etapa ? etapa.titulo : "")}</li>`);
+      }
+      const valor = valorLegivel(pergunta, respostas);
+      const tempo = tempos[pergunta.id];
+      linhas.push(`<li class="resposta">
+        <span class="pergunta"><b>${escapeHtml(pergunta.numero)}.</b> ${escapeHtml(pergunta.texto)}</span>
+        <span class="valor${valor == null ? " vazio-valor" : ""}">${valor == null ? "—" : escapeHtml(valor)}</span>
+        <span class="tempo">${tempo != null ? escapeHtml(duracao(tempo)) : ""}</span>
+      </li>`);
+    }
+
+    // Chave gravada que não é mais pergunta (versão anterior): mostra, não esconde.
+    const conhecidas = new Set(EV.PERGUNTAS.flatMap((pergunta) => EV.chavesDaPergunta(pergunta)));
+    const estranhas = Object.keys(respostas).filter((chave) => !conhecidas.has(chave));
+    const extras = estranhas.length
+      ? `<p class="detalhe-titulo">Respostas de versão anterior</p><dl class="grade-dados">${estranhas
+          .map((chave) => `<div><dt>${escapeHtml(chave)}</dt><dd>${escapeHtml(Array.isArray(respostas[chave]) ? respostas[chave].join(", ") : respostas[chave])}</dd></div>`)
+          .join("")}</dl>`
+      : "";
+
+    const pergunta = EV.perguntaPorId(item.pergunta_atual);
+    const dados = [
+      ["Situação", item.status === "concluida" ? "Respondeu tudo" : "Em andamento"],
+      ["Progresso", `${num(item.progresso_percentual)}% · ${n(item.obrigatorias_respondidas)} de ${n(item.obrigatorias)} obrigatórias · ${n(item.respondidas)} de ${n(item.total_perguntas)} respondidas`],
+      ["Tela atual", item.pergunta_atual === "fim" ? "Tela final" : pergunta ? `Pergunta ${pergunta.numero} · ${pergunta.analise}` : item.pergunta_atual],
+      ["Tempo no contato", tempos.contato != null ? duracao(tempos.contato) : ""],
+      ["Tempo total", item.tempo_total_segundos != null ? duracao(item.tempo_total_segundos) : item.status === "concluida" ? "" : "ainda não concluiu"],
+      ["Se identificou em", dataHora(item.criado_em)],
+      ["Última resposta", dataHora(item.ultima_resposta_em)],
+      ["Concluiu em", item.concluido_em ? dataHora(item.concluido_em) : ""],
+      ["Chegou à tela final em", item.finalizado_em ? dataHora(item.finalizado_em) : ""],
+      [
+        "Enviado ao n8n",
+        item.webhook_enviado_em
+          ? `Enviado ao n8n em ${dataHora(item.webhook_enviado_em)}`
+          : item.finalizado_em
+            ? "Ainda não confirmado pelo n8n"
+            : ""
+      ],
+      ["Tentativas com este WhatsApp", n(item.tentativas || 1)],
+      ["WhatsApp internacional", item.whatsapp_internacional],
+      ["Dispositivo", NOMES_DISPOSITIVO[item.dispositivo] || item.dispositivo],
+      ["utm_source", item.utm_source],
+      ["utm_medium", item.utm_medium],
+      ["utm_campaign", item.utm_campaign],
+      ["utm_content", item.utm_content],
+      ["utm_term", item.utm_term],
+      ["fbclid", item.fbclid],
+      ["gclid", item.gclid],
+      ["Página", item.page_url],
+      ["Veio de (referrer)", item.referrer],
+      ["Id da sessão", item.id],
+      ["Versão da pesquisa", item.pesquisa_versao]
+    ].filter(([, valor]) => valor != null && valor !== "");
+
+    return `<div class="pessoa-detalhe" id="det-${escapeHtml(item.id)}">
+      <p class="detalhe-titulo">Respostas, na ordem da pesquisa</p>
+      <ol class="respostas">${linhas.join("")}</ol>
+      ${extras}
+      <p class="detalhe-titulo">Progresso e rastreio</p>
+      <dl class="grade-dados">${dados.map(([rotulo, valor]) => `<div><dt>${escapeHtml(rotulo)}</dt><dd>${escapeHtml(valor)}</dd></div>`).join("")}</dl>
+    </div>`;
+  }
+
+  function pintarLista() {
+    const alvo = $("[data-lista]");
+    const lista = state.lista;
+    pintarContador();
+    if (!lista.pronto) {
+      redesenhar(alvo, esqueleto(8));
+      return;
+    }
+    if (lista.erro && !lista.itens.length) {
+      redesenhar(alvo, erroHtml(lista.erro, "lista"));
+      return;
+    }
+    if (!lista.itens.length) {
+      const filtrado = state.busca.trim() || state.status;
+      redesenhar(
+        alvo,
+        vazioHtml(
+          filtrado ? "Ninguém encontrado com estes filtros." : "Ninguém se identificou neste recorte ainda.",
+          filtrado ? "Confira a busca ou troque a situação para “Todas”." : "As pessoas aparecem aqui assim que deixam nome, WhatsApp e e-mail."
+        )
+      );
+      return;
+    }
+    const falta = lista.total - lista.itens.length;
+    const mais = `<div class="mais">${
+      falta > 0
+        ? `<button type="button" class="botao botao-leve" data-lista-mais data-foco="lista-mais" ${lista.carregando ? "disabled" : ""}>${
+            lista.carregando ? "Carregando..." : `Carregar mais ${n(Math.min(LIMITE_LISTA, falta))}`
+          }</button>`
+        : `<p>Essas são todas.</p>`
+    }</div>`;
+    const erro = lista.erro ? `<p class="nota" role="alert">${escapeHtml(mensagemErro(lista.erro))}</p>` : "";
+    redesenhar(alvo, `<div class="pessoas">${lista.itens.map(pessoaHtml).join("")}</div>${erro}${mais}`);
+  }
+
+  $("[data-lista]").addEventListener("click", (evento) => {
+    const alvo = evento.target instanceof Element ? evento.target : null;
+    if (!alvo) return;
+    const ver = alvo.closest("[data-ver]");
+    if (ver) {
+      // Abre sem ir à rede: todas as colunas da pessoa já vieram na lista.
+      const id = ver.dataset.ver;
+      if (state.abertos.has(id)) state.abertos.delete(id);
+      else state.abertos.add(id);
+      state.focoDepois = `ver-${id}`;
+      pintarLista();
+      return;
+    }
+    if (alvo.closest("[data-lista-mais]")) {
+      state.focoDepois = "lista-mais";
+      carregarLista();
+    }
+  });
+
+  let timerBusca = 0;
+  $("[data-busca]").addEventListener("input", (evento) => {
+    state.busca = evento.target.value;
+    atualizarCsv();
+    window.clearTimeout(timerBusca);
+    timerBusca = window.setTimeout(() => carregarLista({ reiniciar: true }), 400);
+  });
+  $("[data-status]").addEventListener("change", (evento) => {
+    state.status = evento.target.value;
+    atualizarCsv();
+    carregarLista({ reiniciar: true });
+  });
+  $("[data-csv-tentativas]").addEventListener("change", atualizarCsv);
+
+  /* ================================================================== */
+  /* Filtros: eventos                                                     */
+  /* ================================================================== */
+
+  $("[data-periodos]").addEventListener("click", (evento) => {
+    const botao = evento.target instanceof Element ? evento.target.closest("[data-periodo]") : null;
+    if (!botao) return;
+    const periodo = botao.dataset.periodo;
+    if (periodo === "personalizado") {
+      // Só abre o formulário; o recorte muda quando as duas datas forem aplicadas.
+      $$("[data-periodo]").forEach((item) => item.setAttribute("aria-pressed", String(item === botao)));
+      const datas = $("[data-datas]");
+      datas.hidden = false;
+      const de = $("[data-data-de]");
+      const ate = $("[data-data-ate]");
+      const hoje = hojeSP();
+      de.max = hoje;
+      ate.max = hoje;
+      if (!de.value) de.value = state.de || somarDias(hoje, -13);
+      if (!ate.value) ate.value = state.ate || hoje;
+      de.focus();
+      return;
+    }
+    if (periodo === state.periodo) {
+      $("[data-datas]").hidden = true;
+      pintarFiltros();
+      return;
+    }
+    state.periodo = periodo;
+    $("[data-datas-erro]").textContent = "";
+    escreverUrl();
+    carregarTudo();
+  });
+
+  $("[data-datas]").addEventListener("submit", (evento) => {
+    evento.preventDefault();
+    const de = $("[data-data-de]").value;
+    const ate = $("[data-data-ate]").value;
+    const erro = $("[data-datas-erro]");
+    if (!ymdValido(de) || !ymdValido(ate)) {
+      erro.textContent = "Escolha as duas datas.";
+      return;
+    }
+    if (de > ate) {
+      erro.textContent = "A data inicial precisa ser antes da final.";
+      return;
+    }
+    erro.textContent = "";
+    state.periodo = "personalizado";
+    state.de = de;
+    state.ate = ate;
+    escreverUrl();
+    carregarTudo();
+  });
+
+  function trocarPerfil(chave) {
+    if (chave === state.perfil) return;
+    state.perfil = chave;
+    escreverUrl();
+    carregarTudo();
+  }
+
+  $("[data-perfis]").addEventListener("click", (evento) => {
+    const aba = evento.target instanceof Element ? evento.target.closest("[data-perfil]") : null;
+    if (!aba) return;
+    state.focoDepois = `perfil-${aba.dataset.perfil || "todos"}`;
+    trocarPerfil(aba.dataset.perfil);
+  });
+
+  $("[data-perfis]").addEventListener("keydown", (evento) => {
+    const passo = evento.key === "ArrowRight" ? 1 : evento.key === "ArrowLeft" ? -1 : 0;
+    if (!passo) return;
+    const abas = $$("[data-perfil]");
+    const atual = abas.indexOf(document.activeElement);
+    if (atual < 0) return;
+    evento.preventDefault();
+    const proxima = abas[(atual + passo + abas.length) % abas.length];
+    state.focoDepois = `perfil-${proxima.dataset.perfil || "todos"}`;
+    proxima.focus();
+    trocarPerfil(proxima.dataset.perfil);
+  });
+
+  $("[data-atualizar]").addEventListener("click", () => paginaAtual.atualizar());
+
+  document.addEventListener("click", (evento) => {
+    const repetir = evento.target instanceof Element ? evento.target.closest("[data-repetir]") : null;
+    if (!repetir) return;
+    const acao = repetir.dataset.repetir;
+    if (acao === "resumo") carregarResumo();
+    else if (acao === "lista") carregarLista({ reiniciar: true });
+    else if (acao === "cruzamento") carregarCruzamento();
+    else if (acao === "abertas") carregarAbertas({ reiniciar: !state.abertas.itens.length });
+    else if (acao.startsWith("outro:")) carregarOutro(acao.slice(6));
+  });
+
+  /* ------------------------------------------------------------ Atualização automática */
+
+  let timerAuto = 0;
+  let ultimaAuto = Date.now();
+
+  function iniciarAuto() {
+    pararAuto();
+    ultimaAuto = Date.now();
+    timerAuto = window.setInterval(tickAuto, AUTO_MS);
+  }
+
+  function pararAuto() {
+    if (timerAuto) window.clearInterval(timerAuto);
+    timerAuto = 0;
+  }
+
+  function tickAuto() {
+    // Só com a aba visível, o painel aberto, a caixa marcada e nada em voo: aba esquecida em
+    // segundo plano não fica martelando o banco.
+    if (!$("[data-auto]").checked || document.visibilityState !== "visible" || panelView.hidden || emVoo > 0) return;
+    ultimaAuto = Date.now();
+    paginaAtual.atualizar({ automatico: true });
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && Date.now() - ultimaAuto >= AUTO_MS) tickAuto();
+  });
+
+  /* ================================================================== */
+  /* Registro da pesquisa na faixa de páginas                             */
+  /* ================================================================== */
+
+  Object.assign(PAGINAS[0], {
+    entrar: () => carregarTudo(),
+    atualizar: (opcoes) => atualizar(opcoes),
+    sair: () => limparDados()
+  });
+
+  $("[data-paginas]").addEventListener("click", (evento) => {
+    const aba = evento.target instanceof Element ? evento.target.closest("[data-pagina]") : null;
+    if (aba) trocarPagina(aba.dataset.pagina);
+  });
+  $("[data-paginas]").addEventListener("keydown", (evento) => {
+    const passo = evento.key === "ArrowRight" ? 1 : evento.key === "ArrowLeft" ? -1 : 0;
+    if (!passo) return;
+    const indice = PAGINAS.indexOf(paginaAtual);
+    const proxima = PAGINAS[(indice + passo + PAGINAS.length) % PAGINAS.length];
+    evento.preventDefault();
+    trocarPagina(proxima.id);
+    const botao = document.getElementById(`pagina-${proxima.id}`);
+    if (botao) botao.focus();
+  });
+
+  /* ================================================================== */
+  /* Início                                                               */
+  /* ================================================================== */
+
+  pintarPaginas();
+  montarSelects();
+  lerUrl();
+  pintarFiltros();
+  atualizarCsv();
+
+  (async () => {
+    const { ok, body, status } = await api("/api/painel/sessao");
+    if (ok && body.email) {
+      state.email = body.email;
+      mostrarPainel();
+      paginaAtual.entrar();
+      return;
+    }
+    mostrarLogin(status === 0 ? "Sem conexão com o servidor. Verifique a internet e tente de novo." : status === 503 ? "O painel ainda não está configurado no servidor." : "");
+  })();
+})();
