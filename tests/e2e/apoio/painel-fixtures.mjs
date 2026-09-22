@@ -260,8 +260,24 @@ function valores(v) {
   return [];
 }
 
-export function recorte(dados, { desde, ate, perfil }) {
-  const pessoas = dados.pessoas.filter((p) => noRecorte(p.criado_em, desde, ate) && (!perfil || p.perfil === perfil));
+/** Busca como o servidor + SQL: nome/e-mail por trecho; dígitos só quando parece telefone. */
+function casaBusca(p, busca) {
+  // O servidor tira a sintaxe do PostgREST antes (vírgula, parênteses, *, %, aspas, barra).
+  const b = String(busca || "").slice(0, 80).replace(/[,()*%"\\]/g, "").trim();
+  if (!b) return true;
+  const baixo = b.toLowerCase();
+  if (p.nome.toLowerCase().includes(baixo) || p.email.toLowerCase().includes(baixo)) return true;
+  if (!/^[\d\s+.-]+$/.test(b)) return false;
+  let dig = b.replace(/\D/g, "");
+  if (dig.length >= 12 && dig.startsWith("55")) dig = dig.slice(2);
+  return Boolean(dig) && p.whatsapp_digits.includes(dig);
+}
+
+// Perfil, situação e busca são filtros de PESSOA; visitante (acesso) só tem período.
+export function recorte(dados, { desde, ate, perfil, status, busca }) {
+  const pessoas = dados.pessoas.filter(
+    (p) => noRecorte(p.criado_em, desde, ate) && (!perfil || p.perfil === perfil) && (!status || p.status === status) && casaBusca(p, busca)
+  );
   const visitantes = dados.visitantes.filter((v) => noRecorte(v.criado_em, desde, ate));
   return { pessoas, visitantes };
 }
@@ -412,13 +428,7 @@ export function abertas(dados, filtros, chaves, limite = 200, offset = 0) {
 }
 
 export function lista(dados, filtros, { status, busca, limite = 100, offset = 0 }) {
-  let { pessoas } = recorte(dados, filtros);
-  if (status) pessoas = pessoas.filter((p) => p.status === status);
-  if (busca) {
-    const b = busca.toLowerCase();
-    const dig = busca.replace(/\D/g, "");
-    pessoas = pessoas.filter((p) => p.nome.toLowerCase().includes(b) || p.email.toLowerCase().includes(b) || (dig.length >= 4 && p.whatsapp_digits.includes(dig)));
-  }
+  let { pessoas } = recorte(dados, { ...filtros, status: status ?? filtros.status, busca: busca ?? filtros.busca });
   pessoas = pessoas.slice().sort((a, b) => b.criado_em.localeCompare(a.criado_em) || b.id.localeCompare(a.id));
   return { total: pessoas.length, itens: pessoas.slice(offset, offset + limite) };
 }

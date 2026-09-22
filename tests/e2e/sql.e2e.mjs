@@ -189,6 +189,42 @@ describe("instalação", () => {
     assert.equal(r.json.length, 1);
   });
 
+  test("banco com as funções do painel na assinatura ANTIGA: o arquivo troca por uma só, a nova", async () => {
+    // Produção hoje: pesquisa_painel/cruzamento/abertas sem p_status/p_busca. Sem o drop da
+    // assinatura antiga, ficariam duas versões e o /rpc do PostgREST ficaria ambíguo.
+    await stack.sql(`
+      drop function if exists public.pesquisa_painel(timestamptz, timestamptz, text, text[], text, text, text);
+      drop function if exists public.pesquisa_cruzamento(text, text, timestamptz, timestamptz, text, text, text, text);
+      drop function if exists public.pesquisa_abertas(text[], timestamptz, timestamptz, text, int, int, text, text, text);
+      create function public.pesquisa_painel(p_desde timestamptz default null, p_ate timestamptz default null, p_perfil text default null, p_ignorar text[] default '{}')
+        returns json language sql as $$ select '{"antiga": true}'::json $$;
+      create function public.pesquisa_cruzamento(p_linha text, p_coluna text, p_desde timestamptz default null, p_ate timestamptz default null, p_perfil text default null)
+        returns json language sql as $$ select '{"antiga": true}'::json $$;
+      create function public.pesquisa_abertas(p_chaves text[], p_desde timestamptz default null, p_ate timestamptz default null, p_perfil text default null, p_limite int default 200, p_offset int default 0)
+        returns json language sql as $$ select '{"antiga": true}'::json $$;
+      select 1 as ok;
+    `);
+    await stack.aplicarSql();
+    await stack.aplicarSql();
+    const assinaturas = await stack.sql(`
+      select proname, pg_get_function_identity_arguments(oid) as args
+      from pg_proc
+      where pronamespace = 'public'::regnamespace and proname in ('pesquisa_painel', 'pesquisa_cruzamento', 'pesquisa_abertas')
+      order by proname
+    `);
+    assert.deepEqual(assinaturas, [
+      { proname: "pesquisa_abertas", args: "p_chaves text[], p_desde timestamp with time zone, p_ate timestamp with time zone, p_perfil text, p_limite integer, p_offset integer, p_status text, p_busca text, p_busca_digitos text" },
+      { proname: "pesquisa_cruzamento", args: "p_linha text, p_coluna text, p_desde timestamp with time zone, p_ate timestamp with time zone, p_perfil text, p_status text, p_busca text, p_busca_digitos text" },
+      { proname: "pesquisa_painel", args: "p_desde timestamp with time zone, p_ate timestamp with time zone, p_perfil text, p_ignorar text[], p_status text, p_busca text, p_busca_digitos text" }
+    ]);
+    // O PostgREST enxerga a nova (e não a antiga): chamada sem os parâmetros novos continua valendo.
+    const r = await rpcOk("pesquisa_painel", {});
+    assert.equal(r.antiga, undefined);
+    assert.equal(typeof r.visitantes, "number");
+    const comNovos = await rpcOk("pesquisa_painel", { p_status: null, p_busca: null, p_busca_digitos: null });
+    assert.equal(typeof comNovos.pessoas, "number");
+  });
+
   test("tabelas com RLS ligado e sem política; views security_invoker", async () => {
     const linhas = await stack.sql(`
       select c.relname, c.relrowsecurity::text as rls,
@@ -287,9 +323,9 @@ describe("segurança: chave pública não lê nada", () => {
         bool_or(has_table_privilege(papel, 'public.' || objeto, 'select,insert,update,delete,truncate,references,trigger'))::text as tabelas,
         bool_or(has_function_privilege(papel, 'public.pesquisa_salvar(jsonb)', 'execute')
              or has_function_privilege(papel, 'public.pesquisa_registrar_evento(uuid,text,jsonb)', 'execute')
-             or has_function_privilege(papel, 'public.pesquisa_painel(timestamptz,timestamptz,text,text[])', 'execute')
-             or has_function_privilege(papel, 'public.pesquisa_cruzamento(text,text,timestamptz,timestamptz,text)', 'execute')
-             or has_function_privilege(papel, 'public.pesquisa_abertas(text[],timestamptz,timestamptz,text,int,int)', 'execute')
+             or has_function_privilege(papel, 'public.pesquisa_painel(timestamptz,timestamptz,text,text[],text,text,text)', 'execute')
+             or has_function_privilege(papel, 'public.pesquisa_cruzamento(text,text,timestamptz,timestamptz,text,text,text,text)', 'execute')
+             or has_function_privilege(papel, 'public.pesquisa_abertas(text[],timestamptz,timestamptz,text,int,int,text,text,text)', 'execute')
              or has_function_privilege(papel, 'public.pesquisa_valores(jsonb)', 'execute'))::text as funcoes
       from unnest(array['anon', 'authenticated']) as papel,
            unnest(array['pesquisa_visitas', 'pesquisa_respostas', 'pesquisa_pessoas', 'pesquisa_planilha']) as objeto
@@ -299,7 +335,7 @@ describe("segurança: chave pública não lê nada", () => {
     const [s] = await stack.sql(`
       select has_table_privilege('service_role', 'public.pesquisa_respostas', 'select,insert,update')::text as tabela,
              has_table_privilege('service_role', 'public.pesquisa_planilha', 'select')::text as view,
-             has_function_privilege('service_role', 'public.pesquisa_painel(timestamptz,timestamptz,text,text[])', 'execute')::text as funcao
+             has_function_privilege('service_role', 'public.pesquisa_painel(timestamptz,timestamptz,text,text[],text,text,text)', 'execute')::text as funcao
     `);
     assert.deepEqual(s, { tabela: "true", view: "true", funcao: "true" });
   });
@@ -1041,6 +1077,92 @@ describe("pesquisa_painel", () => {
     ]);
   });
 
+  test("filtro de situação: pessoas, tentativas (linhas cruas), funil e tráfego filtram; visitantes não", async () => {
+    const conc = await rpcOk("pesquisa_painel", { p_status: "concluida", p_ignorar: IGNORAR });
+    assert.equal(conc.visitantes, 5);
+    assert.equal(conc.visitas, 8);
+    assert.equal(conc.comecaram, 4);
+    assert.equal(conc.pessoas, 2); // A1, C1
+    assert.equal(conc.tentativas, 2); // só as linhas concluídas: A1, C1
+    assert.equal(conc.concluidas, 2);
+    assert.equal(conc.tempo_mediano_segundos, 750);
+    assert.deepEqual(conc.pararam_em, []);
+    assert.deepEqual(conc.perfis, [{ perfil: CUID, total: 2, concluidas: 2 }]);
+    // A coluna de visitantes do por_dia e do tráfego continua sem filtro.
+    assert.deepEqual(conc.por_dia, [
+      { dia: "2026-09-10", visitantes: 3, pessoas: 2, concluidas: 1 },
+      { dia: "2026-09-11", visitantes: 0, pessoas: 0, concluidas: 1 },
+      { dia: "2026-09-12", visitantes: 2, pessoas: 0, concluidas: 0 }
+    ]);
+    assert.deepEqual(conc.trafego.filter((x) => x.campo === "utm_source"), [
+      { campo: "utm_source", valor: "(sem utm)", visitantes: 2, pessoas: 1, concluidas: 1 },
+      { campo: "utm_source", valor: "instagram", visitantes: 2, pessoas: 1, concluidas: 1 },
+      { campo: "utm_source", valor: "facebook", visitantes: 1, pessoas: 0, concluidas: 0 }
+    ]);
+
+    const and = await rpcOk("pesquisa_painel", { p_status: "em_andamento", p_ignorar: IGNORAR });
+    assert.equal(and.visitantes, 5);
+    assert.equal(and.pessoas, 3); // B1, D1, E1
+    assert.equal(and.tentativas, 6); // A2, B1, C2, D1, D2, E1
+    assert.equal(and.concluidas, 0);
+    assert.equal(and.tempo_mediano_segundos, null);
+    assert.deepEqual(and.por_etapa.map((x) => x.chegaram), [3, 2, 2, 1, 0, 0, 0, 0, 0]);
+    assert.deepEqual(and.pararam_em, [
+      { pergunta: "perfil", total: 1 },
+      { pergunta: "maior_dificuldade", total: 1 },
+      { pergunta: "renda_desejada", total: 1 }
+    ]);
+  });
+
+  test("busca por nome, e-mail e dígitos do WhatsApp; sem curinga; tentativas também filtram", async () => {
+    const semFiltro = await rpcOk("pesquisa_painel", { p_status: null, p_busca: "", p_busca_digitos: "", p_ignorar: IGNORAR });
+    assert.equal(semFiltro.pessoas, 5);
+    assert.equal(semFiltro.tentativas, 8);
+
+    // Nome, sem diferenciar maiúsculas: "PESSOA 4" = D (D1 na view; D1 e D2 como tentativas).
+    const nome = await rpcOk("pesquisa_painel", { p_busca: "PESSOA 4", p_ignorar: IGNORAR });
+    assert.equal(nome.visitantes, 5);
+    assert.equal(nome.comecaram, 4);
+    assert.equal(nome.pessoas, 1);
+    assert.equal(nome.tentativas, 2);
+    assert.deepEqual(nome.perfis, [{ perfil: ENF, total: 1, concluidas: 0 }]);
+    assert.deepEqual(nome.trafego.filter((x) => x.campo === "utm_source" && x.pessoas > 0), [
+      { campo: "utm_source", valor: "facebook", visitantes: 1, pessoas: 1, concluidas: 0 }
+    ]);
+
+    // E-mail: C (C1 e C2).
+    const email = await rpcOk("pesquisa_painel", { p_busca: "p3@gmail", p_ignorar: IGNORAR });
+    assert.equal(email.pessoas, 1);
+    assert.equal(email.tentativas, 2);
+    assert.equal(email.concluidas, 1);
+
+    // Dígitos: só quando o servidor manda p_busca_digitos.
+    const digitos = await rpcOk("pesquisa_painel", { p_busca: "(11) 9222", p_busca_digitos: "119222", p_ignorar: IGNORAR });
+    assert.equal(digitos.pessoas, 1); // B
+    assert.equal(digitos.tentativas, 1);
+    const semDigitos = await rpcOk("pesquisa_painel", { p_busca: "9222", p_ignorar: IGNORAR });
+    assert.equal(semDigitos.pessoas, 0, "sem p_busca_digitos o telefone não entra");
+
+    // % e _ são texto, não curinga (strpos, não LIKE).
+    for (const curinga of ["%", "_", "p_@", "Pessoa%"]) {
+      const r = await rpcOk("pesquisa_painel", { p_busca: curinga, p_ignorar: IGNORAR });
+      assert.equal(r.pessoas, 0, curinga);
+      assert.equal(r.tentativas, 0, curinga);
+      assert.equal(r.visitantes, 5, curinga);
+    }
+
+    // Situação + busca: a pessoa A está concluída na view (A1), mas A2 é uma tentativa em
+    // andamento com o mesmo nome — a tentativa crua conta, a pessoa não.
+    const ambos = await rpcOk("pesquisa_painel", { p_status: "em_andamento", p_busca: "pessoa 1", p_ignorar: IGNORAR });
+    assert.equal(ambos.pessoas, 0);
+    assert.equal(ambos.tentativas, 1);
+
+    // Perfil + busca.
+    const perfil = await rpcOk("pesquisa_painel", { p_perfil: CUID, p_busca: "pessoa", p_ignorar: IGNORAR });
+    assert.equal(perfil.pessoas, 2);
+    assert.equal(perfil.tentativas, 4);
+  });
+
   test("filtro de período: desde inclusivo, até exclusivo, sobre a linha escolhida pela view", async () => {
     // Dia 10/09 inteiro em Brasília = [10/09 03:00Z, 11/09 03:00Z).
     const dia10 = await rpcOk("pesquisa_painel", {
@@ -1136,8 +1258,53 @@ describe("pesquisa_cruzamento", () => {
   });
 });
 
+describe("pesquisa_cruzamento: situação e busca", () => {
+  before(semear);
+
+  test("p_status e p_busca mudam a base e as células", async () => {
+    const todos = await rpcOk("pesquisa_cruzamento", { p_linha: "perfil", p_coluna: "idade" });
+    assert.equal(todos.base, 4); // A1, B1, C1, D1 (E1 sem perfil)
+
+    const andamento = await rpcOk("pesquisa_cruzamento", { p_linha: "perfil", p_coluna: "idade", p_status: "em_andamento" });
+    assert.equal(andamento.base, 2); // B1, D1
+    assert.deepEqual(andamento.celulas, [
+      { linha: ENF, coluna: "25 a 34 anos", total: 1 },
+      { linha: TEC, coluna: "25 a 34 anos", total: 1 }
+    ]);
+
+    const email = await rpcOk("pesquisa_cruzamento", { p_linha: "perfil", p_coluna: "idade", p_busca: "P1@GMAIL.COM" });
+    assert.deepEqual(email.celulas, [{ linha: CUID, coluna: "25 a 34 anos", total: 1 }]);
+
+    const tel = await rpcOk("pesquisa_cruzamento", { p_linha: "perfil", p_coluna: "idade", p_busca: "11944", p_busca_digitos: "11944" });
+    assert.equal(tel.base, 1);
+    assert.equal(tel.celulas[0].linha, ENF);
+
+    const curinga = await rpcOk("pesquisa_cruzamento", { p_linha: "perfil", p_coluna: "idade", p_busca: "%" });
+    assert.equal(curinga.base, 0);
+  });
+});
+
 describe("pesquisa_abertas", () => {
   before(semear);
+
+  test("p_status e p_busca filtram (total e itens)", async () => {
+    const chaves = ["problema_unico", "sonho"];
+    const conc = await rpcOk("pesquisa_abertas", { p_chaves: chaves, p_status: "concluida" });
+    assert.equal(conc.total, 2);
+    const and = await rpcOk("pesquisa_abertas", { p_chaves: chaves, p_status: "em_andamento" });
+    assert.deepEqual(and, { total: 0, itens: [] });
+    const nome = await rpcOk("pesquisa_abertas", { p_chaves: chaves, p_busca: "pessoa 3" });
+    assert.deepEqual(nome.itens.map((i) => i.id), [ID.C1]);
+    assert.equal(nome.total, 1);
+    const tel = await rpcOk("pesquisa_abertas", { p_chaves: chaves, p_busca: "91111", p_busca_digitos: "91111" });
+    assert.deepEqual(tel.itens.map((i) => i.id), [ID.A1]);
+    const curinga = await rpcOk("pesquisa_abertas", { p_chaves: chaves, p_busca: "_" });
+    assert.equal(curinga.total, 0);
+    // Paginação continua funcionando com os parâmetros novos no fim.
+    const pagina = await rpcOk("pesquisa_abertas", { p_chaves: chaves, p_limite: 1, p_offset: 1, p_status: "concluida", p_busca: "gmail" });
+    assert.equal(pagina.total, 2);
+    assert.deepEqual(pagina.itens.map((i) => i.id), [ID.A1]);
+  });
 
   test("só quem escreveu algo, mais recentes primeiro, textos só com as chaves pedidas", async () => {
     const r = await rpcOk("pesquisa_abertas", { p_chaves: ["problema_unico", "sonho"] });

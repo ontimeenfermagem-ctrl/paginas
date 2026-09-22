@@ -8,9 +8,10 @@
  * Duas regras que valem para o arquivo inteiro:
  *
  *   1. Nenhum número agregado sai das linhas carregadas na tela. Placar, funil, quadros, ICP e
- *      tráfego vêm de /api/painel/resumo (SQL sobre o período inteiro); a tabela cruzada vem de
- *      /api/painel/cruzamento. A lista de pessoas é paginada e buscável — contar em cima dela
- *      mentiria assim que alguém digitasse na busca.
+ *      tráfego vêm de /api/painel/resumo (SQL sobre todas as respostas do recorte); a tabela
+ *      cruzada vem de /api/painel/cruzamento. Os quatro filtros da barra do topo (período, perfil,
+ *      situação e busca) valem para TODA requisição: números, lista, abertas e CSV mostram
+ *      sempre o mesmo recorte. Acesso e clique em Começar não têm pessoa: só o período vale neles.
  *   2. O painel não tem lista própria de perguntas. Rótulos, ordem, alternativas, perfis e
  *      condicionais vêm de EVPesquisa (js/pesquisa-config.js), o mesmo arquivo que a pesquisa
  *      e o servidor usam. Mudou lá, mudou aqui.
@@ -138,6 +139,7 @@
     geral: null,
     resumo: null,
     geradoEm: "",
+    resumoChave: "", // filtros do resumo que está na tela
     erroResumo: 0,
     carregouUmaVez: false,
     lista: { itens: [], total: 0, carregando: false, erro: 0, pronto: false },
@@ -368,7 +370,7 @@
     return "Não foi possível carregar os dados agora. Tente de novo em instantes.";
   }
 
-  /** Filtros comuns (período e perfil) como query string. */
+  /** Os filtros da barra (período, perfil, situação e busca) como query string. */
   function parametros({ comPerfil = true } = {}) {
     const params = new URLSearchParams();
     const { desde, ate } = intervalo();
@@ -376,7 +378,35 @@
     if (ate) params.set("ate", ate);
     const perfil = PERFIL_POR_CHAVE.get(state.perfil);
     if (comPerfil && perfil) params.set("perfil", perfil.valor);
+    if (state.status) params.set("status", state.status);
+    const busca = state.busca.trim();
+    if (busca) params.set("busca", busca);
     return params;
+  }
+
+  const STATUS_ROTULO = { concluida: "Responderam tudo", em_andamento: "Em andamento" };
+
+  /** Algum filtro que só existe para quem se identificou (perfil, situação ou busca)? */
+  function filtroDePessoa() {
+    return Boolean(state.perfil || state.status || state.busca.trim());
+  }
+
+  /** Marca dos números de acesso quando há filtro de pessoa: eles não mudam com esses filtros. */
+  function seloSemFiltro() {
+    return filtroDePessoa()
+      ? '<span class="selo-todos" title="Acesso e clique em Começar não têm nome nem perfil: só o período vale aqui">sem filtro de pessoa<span class="visualmente-oculto">: acesso não tem nome nem perfil</span></span>'
+      : "";
+  }
+
+  /** "“maria” · responderam tudo · técnicos" — para legendas. Vazio sem filtro de pessoa. */
+  function descricaoFiltroPessoa() {
+    const partes = [];
+    const busca = state.busca.trim();
+    if (busca) partes.push(`“${busca}”`);
+    if (state.status) partes.push(STATUS_ROTULO[state.status].toLowerCase());
+    const perfil = PERFIL_POR_CHAVE.get(state.perfil);
+    if (perfil) partes.push(perfil.curto.toLowerCase());
+    return partes.join(" · ");
   }
 
   /* ------------------------------------------------------------ Foco */
@@ -537,6 +567,9 @@
     }
     const perfil = params.get("perfil") || "";
     state.perfil = PERFIL_POR_CHAVE.has(perfil) ? perfil : "";
+    const status = params.get("status") || "";
+    state.status = Object.prototype.hasOwnProperty.call(STATUS_ROTULO, status) ? status : "";
+    state.busca = (params.get("busca") || "").slice(0, 80);
   }
 
   /** Filtro vira query string: o link pode ser mandado para outra pessoa e recarregado. */
@@ -548,6 +581,8 @@
       params.set("ate", state.ate);
     }
     if (state.perfil) params.set("perfil", state.perfil);
+    if (state.status) params.set("status", state.status);
+    if (state.busca.trim()) params.set("busca", state.busca.trim());
     const texto = params.toString();
     const url = `${window.location.pathname}${texto ? `?${texto}` : ""}${window.location.hash}`;
     try {
@@ -602,6 +637,7 @@
     ocupado(1);
 
     const comPerfil = Boolean(state.perfil);
+    const chave = parametros().toString();
     const pedidos = [api(`/api/painel/resumo?${parametros({ comPerfil: false })}`)];
     if (comPerfil) pedidos.push(api(`/api/painel/resumo?${parametros()}`));
     const [geral, doPerfil] = await Promise.all(pedidos);
@@ -633,6 +669,7 @@
     state.resumo = comPerfil ? normalizarResumo(doPerfil.body.resumo) : state.geral;
     state.geradoEm = (comPerfil ? doPerfil.body.gerado_em : geral.body.gerado_em) || new Date().toISOString();
     state.carregouUmaVez = true;
+    state.resumoChave = chave;
     panelStatus.textContent = "";
     pintarAgregados();
   }
@@ -715,6 +752,15 @@
   /* ------------------------------------------------------------ Filtros */
 
   function pintarFiltros() {
+    // Busca e situação vêm também da URL: o campo mostra o que está valendo (sem atropelar quem
+    // está digitando).
+    const campoBusca = $("[data-busca]");
+    if (document.activeElement !== campoBusca && campoBusca.value !== state.busca) campoBusca.value = state.busca;
+    campoBusca.classList.toggle("ativo", Boolean(state.busca.trim()));
+    $("[data-status]").value = state.status;
+    $("[data-status]").classList.toggle("ativo", Boolean(state.status));
+    pintarFiltroAtivo();
+
     $$("[data-periodo]").forEach((botao) => {
       botao.setAttribute("aria-pressed", String(botao.dataset.periodo === state.periodo));
     });
@@ -754,6 +800,24 @@
         .join("")
     );
     mostrarAbaAtiva(container);
+  }
+
+  /** Aviso "Filtrando: ..." com o botão de limpar. Some quando não há filtro de pessoa. */
+  function pintarFiltroAtivo() {
+    const alvo = $("[data-filtro-ativo]");
+    const descricao = descricaoFiltroPessoa();
+    alvo.hidden = !descricao;
+    if (!descricao) {
+      alvo.innerHTML = "";
+      return;
+    }
+    const r = state.resumo;
+    // Só mostra a contagem quando ela é deste recorte (e não do anterior, ainda na tela).
+    const quantos = r && state.resumoChave === parametros().toString() ? ` · <strong>${escapeHtml(plural(r.pessoas, "pessoa", "pessoas"))}</strong>` : "";
+    redesenhar(
+      alvo,
+      `<span class="filtro-ativo-texto">Filtrando: ${escapeHtml(descricao)}${quantos}</span><button type="button" class="botao-texto" data-limpar-filtros data-foco="limpar-filtros">Limpar filtros</button>`
+    );
   }
 
   /** Faixa rolável (celular): traz a aba escolhida para dentro da faixa, sem rolar a página. */
@@ -802,7 +866,8 @@
     const r = state.resumo;
     const comPerfil = Boolean(state.perfil);
     const perfil = PERFIL_POR_CHAVE.get(state.perfil);
-    const todos = comPerfil ? '<span class="selo-todos">todos os perfis</span>' : "";
+    const filtrado = filtroDePessoa();
+    const todos = seloSemFiltro();
 
     const visitantes = num(g.visitantes);
     const comecaram = num(g.comecaram);
@@ -831,11 +896,19 @@
             detalhe: `<strong>${pct(pessoas, pessoasGeral)}</strong> de todos que se identificaram (${n(pessoasGeral)})`,
             extra: `<span class="selo-todos">${escapeHtml(perfil.curto)}</span>`
           }
-        : {
-            rotulo: "Se identificaram",
-            valor: n(pessoas),
-            detalhe: `<strong>${pct(pessoas, comecaram)}</strong> de quem começou`
-          },
+        : filtrado
+          ? {
+              // Busca/situação: comparar com o acesso de todos não diz nada.
+              rotulo: "Se identificaram",
+              valor: n(pessoas),
+              detalhe: "com os filtros escolhidos",
+              extra: `<span class="selo-todos">${escapeHtml(descricaoFiltroPessoa())}</span>`
+            }
+          : {
+              rotulo: "Se identificaram",
+              valor: n(pessoas),
+              detalhe: `<strong>${pct(pessoas, comecaram)}</strong> de quem começou`
+            },
       {
         rotulo: "Responderam tudo",
         valor: n(concluidas),
@@ -873,12 +946,12 @@
   function pintarFunil() {
     const g = state.geral;
     const r = state.resumo;
-    const comPerfil = Boolean(state.perfil);
+    const comPerfil = filtroDePessoa();
     const porEtapa = new Map(r.por_etapa.map((linha) => [num(linha.etapa), num(linha.chegaram)]));
 
     const degraus = [];
-    // Acesso e começo não têm perfil (a pergunta 1 vem depois): com perfil escolhido, o funil
-    // começa em quem se identificou, para não comparar um perfil com o tráfego de todos.
+    // Acesso e começo não têm pessoa (nem perfil, nem nome): com perfil, situação ou busca, o
+    // funil começa em quem se identificou, para não comparar um recorte com o tráfego de todos.
     if (!comPerfil) {
       degraus.push({ rotulo: "Acessaram a pesquisa", valor: num(g.visitantes) });
       degraus.push({ rotulo: "Clicaram em Começar", valor: num(g.comecaram) });
@@ -928,7 +1001,7 @@
     redesenhar($("[data-funil]"), html);
 
     $("[data-funil-sub]").textContent = comPerfil
-      ? `Só ${PERFIL_POR_CHAVE.get(state.perfil).curto.toLowerCase()}. Barras proporcionais a quem se identificou; cada pessoa conta no ponto mais distante que alcançou.`
+      ? `Só ${descricaoFiltroPessoa()}. Barras proporcionais a quem se identificou; cada pessoa conta no ponto mais distante que alcançou.`
       : "Barras proporcionais a quem acessou. Cada pessoa conta no ponto mais distante que alcançou.";
 
     const nota = $("[data-funil-nota]");
@@ -939,7 +1012,7 @@
         maior.para.toLowerCase()
       )}</strong>: ${escapeHtml(plural(maior.queda, "pessoa", "pessoas"))}. ${
         comPerfil
-          ? "Acesso e clique em Começar não entram aqui: o perfil só é conhecido depois da primeira pergunta."
+          ? "Acesso e clique em Começar não entram aqui: eles não têm nome nem perfil, então não dá para filtrar."
           : "As porcentagens são sobre quem acessou; a etiqueta compara com o passo anterior."
       }`;
     } else {
@@ -997,7 +1070,10 @@
     }
 
     const legenda = `<ul class="dia-legenda" aria-label="Legenda">${SERIES_DIA.map(
-      (serie, indice) => `<li><i class="amostra ${serie.classe}" aria-hidden="true"></i>${escapeHtml(serie.rotulo)} <strong>${n(totais[indice])}</strong></li>`
+      (serie, indice) =>
+        `<li><i class="amostra ${serie.classe}" aria-hidden="true"></i>${escapeHtml(serie.rotulo)} <strong>${n(totais[indice])}</strong>${
+          serie.chave === "visitantes" ? seloSemFiltro() : ""
+        }</li>`
     ).join("")}</ul>`;
 
     const tabela = `<div class="tabela-rolagem"><table>
@@ -1685,14 +1761,14 @@
       redesenhar(alvo, `<div class="trafego-tabela">${vazioHtml("Nenhum acesso neste recorte.", "")}</div>`);
       return;
     }
-    const comPerfil = Boolean(state.perfil);
+    const comPerfil = filtroDePessoa();
     const total = linhas.reduce(
       (soma, linha) => ({ visitantes: soma.visitantes + linha.visitantes, pessoas: soma.pessoas + linha.pessoas, concluidas: soma.concluidas + linha.concluidas }),
       { visitantes: 0, pessoas: 0, concluidas: 0 }
     );
     const nome = (valor) => (state.trafegoCampo === "dispositivo" ? NOMES_DISPOSITIVO[valor] || valor : valor);
     const html = `<div class="tabela-rolagem trafego-tabela"><table>
-      <caption>${escapeHtml(CAMPOS_TRAFEGO[state.trafegoCampo])}${comPerfil ? ` · identificados e concluídas só de ${escapeHtml(PERFIL_POR_CHAVE.get(state.perfil).curto.toLowerCase())}; visitantes de todos os perfis` : ""}</caption>
+      <caption>${escapeHtml(CAMPOS_TRAFEGO[state.trafegoCampo])}${comPerfil ? ` · identificados e concluídas só de ${escapeHtml(descricaoFiltroPessoa())}; visitantes sem filtro de pessoa` : ""}</caption>
       <thead><tr>
         <th scope="col">${escapeHtml(state.trafegoCampo === "dispositivo" ? "Dispositivo" : "Valor")}</th>
         <th scope="col" class="n">Visitantes</th>
@@ -1716,7 +1792,7 @@
     </table></div>
     <p class="nota">${
       comPerfil
-        ? "Com um perfil escolhido, a taxa de identificação fica de fora: o acesso não tem perfil, e dividir um perfil pelo tráfego de todos daria um número sem sentido."
+        ? "Com perfil, situação ou busca escolhidos, a taxa de identificação fica de fora: o acesso não tem nome nem perfil, e dividir um recorte pelo tráfego de todos daria um número sem sentido."
         : `“(sem utm)” é quem chegou sem parâmetro de campanha (link direto, bio, compartilhamento). Até 30 valores por campo, dos que mais trouxeram gente. Somando a tabela: ${n(
             total.visitantes
           )} visitantes, ${n(total.pessoas)} identificados, ${n(total.concluidas)} concluídas.`
@@ -1889,7 +1965,7 @@
     redesenhar(
       alvo,
       `<p class="cruz-base"><strong>${escapeHtml(plural(base, "pessoa", "pessoas"))} com as duas respostas</strong> · ${escapeHtml(rotuloPeriodo())}${
-        state.perfil ? ` · só ${escapeHtml(PERFIL_POR_CHAVE.get(state.perfil).curto.toLowerCase())}` : ""
+        filtroDePessoa() ? ` · só ${escapeHtml(descricaoFiltroPessoa())}` : ""
       }. ${escapeHtml(baseModo)}</p>
       <div class="tabela-rolagem"><table class="cruz">
         <thead>${cabecalho}</thead>
@@ -2073,12 +2149,9 @@
   /* Pessoas                                                              */
   /* ================================================================== */
 
+  // A lista usa exatamente os filtros da barra do topo (período, perfil, situação e busca).
   function parametrosLista() {
-    const params = parametros();
-    if (state.status) params.set("status", state.status);
-    const busca = state.busca.trim();
-    if (busca) params.set("busca", busca);
-    return params;
+    return parametros();
   }
 
   /** O CSV sai com os MESMOS filtros da tela (período, perfil, situação, busca). */
@@ -2325,18 +2398,6 @@
     }
   });
 
-  let timerBusca = 0;
-  $("[data-busca]").addEventListener("input", (evento) => {
-    state.busca = evento.target.value;
-    atualizarCsv();
-    window.clearTimeout(timerBusca);
-    timerBusca = window.setTimeout(() => carregarLista({ reiniciar: true }), 400);
-  });
-  $("[data-status]").addEventListener("change", (evento) => {
-    state.status = evento.target.value;
-    atualizarCsv();
-    carregarLista({ reiniciar: true });
-  });
   $("[data-csv-tentativas]").addEventListener("change", atualizarCsv);
 
   /* ================================================================== */
@@ -2419,6 +2480,49 @@
     state.focoDepois = `perfil-${proxima.dataset.perfil || "todos"}`;
     proxima.focus();
     trocarPerfil(proxima.dataset.perfil);
+  });
+
+  // Busca e situação são filtros como o período e o perfil: mudam TODOS os números.
+  let timerBusca = 0;
+  $("[data-busca]").addEventListener("input", (evento) => {
+    const valor = evento.target.value;
+    window.clearTimeout(timerBusca);
+    timerBusca = window.setTimeout(() => {
+      if (valor.trim() === state.busca.trim()) {
+        state.busca = valor;
+        return;
+      }
+      state.busca = valor;
+      escreverUrl();
+      carregarTudo();
+    }, 400);
+  });
+  $("[data-busca]").addEventListener("keydown", (evento) => {
+    // Enter aplica na hora, sem esperar o debounce.
+    if (evento.key !== "Enter") return;
+    evento.preventDefault();
+    window.clearTimeout(timerBusca);
+    const valor = evento.target.value;
+    if (valor.trim() === state.busca.trim()) return;
+    state.busca = valor;
+    escreverUrl();
+    carregarTudo();
+  });
+  $("[data-status]").addEventListener("change", (evento) => {
+    state.status = evento.target.value;
+    escreverUrl();
+    carregarTudo();
+  });
+  $("[data-filtro-ativo]").addEventListener("click", (evento) => {
+    if (!(evento.target instanceof Element) || !evento.target.closest("[data-limpar-filtros]")) return;
+    window.clearTimeout(timerBusca);
+    state.busca = "";
+    state.status = "";
+    state.perfil = "";
+    $("[data-busca]").value = "";
+    escreverUrl();
+    carregarTudo();
+    $("[data-busca]").focus();
   });
 
   $("[data-atualizar]").addEventListener("click", () => paginaAtual.atualizar());

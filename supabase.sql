@@ -587,11 +587,26 @@ $$;
 -- respostas (a parte cara) acontece uma vez e alimenta distribuições, "responderam" e escalas.
 -- Ordenações de texto usam collate "C" para o resultado não depender do idioma do servidor.
 -- --------------------------------------------------------------------------------------------
+-- Filtros de PESSOA (perfil, status e busca) valem para tudo que tem pessoa: pessoas, tentativas,
+-- funil a partir de "se identificaram", distribuições, dias e tráfego (colunas de pessoas).
+-- Visitantes (acessaram/visitas/começaram e a coluna de visitantes) não têm nome, e-mail nem
+-- perfil: só o período vale para eles.
+--   p_status        = null | 'em_andamento' | 'concluida'
+--   p_busca         = trecho do nome ou do e-mail (sem diferenciar maiúsculas); strpos, e não LIKE,
+--                     para nenhum caractere digitado virar curinga
+--   p_busca_digitos = os dígitos da busca quando ela parece telefone (o servidor decide)
+--
+-- A assinatura mudou (parâmetros novos no fim): o drop da antiga evita duas versões sobrecarregadas,
+-- que deixariam o /rest/v1/rpc ambíguo. "if exists" mantém o arquivo idempotente.
+drop function if exists public.pesquisa_painel(timestamptz, timestamptz, text, text[]);
 create or replace function public.pesquisa_painel(
   p_desde timestamptz default null,
   p_ate timestamptz default null,
   p_perfil text default null,
-  p_ignorar text[] default '{}'
+  p_ignorar text[] default '{}',
+  p_status text default null,
+  p_busca text default null,
+  p_busca_digitos text default null
 )
 returns json
 language sql
@@ -607,6 +622,11 @@ as $$
       and (p_desde is null or criado_em >= p_desde)
       and (p_ate is null or criado_em < p_ate)
       and (p_perfil is null or perfil = p_perfil)
+      and (p_status is null or status = p_status)
+      and (coalesce(p_busca, '') = ''
+           or strpos(lower(coalesce(nome, '')), lower(p_busca)) > 0
+           or strpos(lower(coalesce(email, '')), lower(p_busca)) > 0
+           or (coalesce(p_busca_digitos, '') <> '' and strpos(coalesce(whatsapp_digits, ''), p_busca_digitos) > 0))
   ),
   visitantes as materialized (
     select *
@@ -722,6 +742,12 @@ as $$
         and (p_desde is null or criado_em >= p_desde)
         and (p_ate is null or criado_em < p_ate)
         and (p_perfil is null or perfil = p_perfil)
+        -- Mesmo recorte de pessoa, aplicado a cada tentativa (status/contato da própria linha).
+        and (p_status is null or status = p_status)
+        and (coalesce(p_busca, '') = ''
+             or strpos(lower(coalesce(nome, '')), lower(p_busca)) > 0
+             or strpos(lower(coalesce(email, '')), lower(p_busca)) > 0
+             or (coalesce(p_busca_digitos, '') <> '' and strpos(coalesce(whatsapp_digits, ''), p_busca_digitos) > 0))
     ),
     'concluidas', (select count(*)::int from pessoas where status = 'concluida'),
     'com_perfil', (select count(*)::int from pessoas where perfil is not null),
@@ -816,12 +842,18 @@ $$;
 -- escolha a pessoa aparece em cada alternativa que marcou; `linhas` e `colunas` contam pessoas
 -- distintas, para o "% da linha" e o "% da coluna" terem o denominador certo.
 -- --------------------------------------------------------------------------------------------
+-- p_status / p_busca / p_busca_digitos: mesmo recorte de pessoa da pesquisa_painel. Assinatura nova:
+-- a antiga sai antes (idempotente).
+drop function if exists public.pesquisa_cruzamento(text, text, timestamptz, timestamptz, text);
 create or replace function public.pesquisa_cruzamento(
   p_linha text,
   p_coluna text,
   p_desde timestamptz default null,
   p_ate timestamptz default null,
-  p_perfil text default null
+  p_perfil text default null,
+  p_status text default null,
+  p_busca text default null,
+  p_busca_digitos text default null
 )
 returns json
 language sql
@@ -837,6 +869,11 @@ as $$
       and (p_desde is null or criado_em >= p_desde)
       and (p_ate is null or criado_em < p_ate)
       and (p_perfil is null or perfil = p_perfil)
+      and (p_status is null or status = p_status)
+      and (coalesce(p_busca, '') = ''
+           or strpos(lower(coalesce(nome, '')), lower(p_busca)) > 0
+           or strpos(lower(coalesce(email, '')), lower(p_busca)) > 0
+           or (coalesce(p_busca_digitos, '') <> '' and strpos(coalesce(whatsapp_digits, ''), p_busca_digitos) > 0))
       and respostas ? p_linha
       and respostas ? p_coluna
   ),
@@ -888,13 +925,19 @@ $$;
 -- pesquisa_abertas: as respostas escritas (perguntas abertas e frase; hoje nenhuma pergunta tem "Outro"), paginadas,
 -- mais recentes primeiro. `textos` traz só as chaves pedidas que a pessoa de fato escreveu.
 -- --------------------------------------------------------------------------------------------
+-- p_status / p_busca / p_busca_digitos: mesmo recorte de pessoa da pesquisa_painel (no fim da lista,
+-- depois de p_limite/p_offset). Assinatura nova: a antiga sai antes (idempotente).
+drop function if exists public.pesquisa_abertas(text[], timestamptz, timestamptz, text, int, int);
 create or replace function public.pesquisa_abertas(
   p_chaves text[],
   p_desde timestamptz default null,
   p_ate timestamptz default null,
   p_perfil text default null,
   p_limite int default 200,
-  p_offset int default 0
+  p_offset int default 0,
+  p_status text default null,
+  p_busca text default null,
+  p_busca_digitos text default null
 )
 returns json
 language sql
@@ -916,6 +959,11 @@ as $$
       and (p_desde is null or p.criado_em >= p_desde)
       and (p_ate is null or p.criado_em < p_ate)
       and (p_perfil is null or p.perfil = p_perfil)
+      and (p_status is null or p.status = p_status)
+      and (coalesce(p_busca, '') = ''
+           or strpos(lower(coalesce(p.nome, '')), lower(p_busca)) > 0
+           or strpos(lower(coalesce(p.email, '')), lower(p_busca)) > 0
+           or (coalesce(p_busca_digitos, '') <> '' and strpos(coalesce(p.whatsapp_digits, ''), p_busca_digitos) > 0))
       -- ?| usa só o jsonb da linha e descarta rápido quem não escreveu nada.
       and p.respostas ?| coalesce(p_chaves, '{}'::text[])
       and t.textos is not null
@@ -948,16 +996,16 @@ $$;
 revoke all on function public.pesquisa_valores(jsonb) from public, anon, authenticated;
 revoke all on function public.pesquisa_registrar_evento(uuid, text, jsonb) from public, anon, authenticated;
 revoke all on function public.pesquisa_salvar(jsonb) from public, anon, authenticated;
-revoke all on function public.pesquisa_painel(timestamptz, timestamptz, text, text[]) from public, anon, authenticated;
-revoke all on function public.pesquisa_cruzamento(text, text, timestamptz, timestamptz, text) from public, anon, authenticated;
-revoke all on function public.pesquisa_abertas(text[], timestamptz, timestamptz, text, int, int) from public, anon, authenticated;
+revoke all on function public.pesquisa_painel(timestamptz, timestamptz, text, text[], text, text, text) from public, anon, authenticated;
+revoke all on function public.pesquisa_cruzamento(text, text, timestamptz, timestamptz, text, text, text, text) from public, anon, authenticated;
+revoke all on function public.pesquisa_abertas(text[], timestamptz, timestamptz, text, int, int, text, text, text) from public, anon, authenticated;
 
 grant execute on function public.pesquisa_valores(jsonb) to service_role;
 grant execute on function public.pesquisa_registrar_evento(uuid, text, jsonb) to service_role;
 grant execute on function public.pesquisa_salvar(jsonb) to service_role;
-grant execute on function public.pesquisa_painel(timestamptz, timestamptz, text, text[]) to service_role;
-grant execute on function public.pesquisa_cruzamento(text, text, timestamptz, timestamptz, text) to service_role;
-grant execute on function public.pesquisa_abertas(text[], timestamptz, timestamptz, text, int, int) to service_role;
+grant execute on function public.pesquisa_painel(timestamptz, timestamptz, text, text[], text, text, text) to service_role;
+grant execute on function public.pesquisa_cruzamento(text, text, timestamptz, timestamptz, text, text, text, text) to service_role;
+grant execute on function public.pesquisa_abertas(text[], timestamptz, timestamptz, text, int, int, text, text, text) to service_role;
 
 -- Sem isto, as rotas novas do /rest/v1 respondem 404 até o PostgREST reler o esquema sozinho — e o
 -- formulário passaria os primeiros minutos sem gravar nada.

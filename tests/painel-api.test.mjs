@@ -382,8 +382,58 @@ test("resumo: chama pesquisa_painel com filtros e as chaves de texto a ignorar",
   assert.equal(filtrado.status, 200);
   assert.deepEqual(
     { ...backend.chamadas.at(-1).body, p_ignorar: undefined },
-    { p_desde: "2026-09-14T03:00:00.000Z", p_ate: "2026-09-21T06:00:00.000Z", p_perfil: "Técnico(a) de enfermagem", p_ignorar: undefined }
+    {
+      p_desde: "2026-09-14T03:00:00.000Z",
+      p_ate: "2026-09-21T06:00:00.000Z",
+      p_perfil: "Técnico(a) de enfermagem",
+      p_ignorar: undefined,
+      p_status: null,
+      p_busca: null,
+      p_busca_digitos: null
+    }
   );
+});
+
+test("resumo, cruzamento e abertas: status e busca viram filtro (mesma validação da lista e do CSV)", async () => {
+  const backend = createFakeBackend({
+    rpc: {
+      pesquisa_abertas: { total: 0, itens: [] },
+      pesquisa_cruzamento: { linha: "perfil", coluna: "idade", base: 0, celulas: [], linhas: [], colunas: [] }
+    }
+  });
+  const { get } = await logado({ backend });
+  const rotas = {
+    pesquisa_painel: "/api/painel/resumo?",
+    pesquisa_cruzamento: "/api/painel/cruzamento?linha=perfil&coluna=idade&",
+    pesquisa_abertas: "/api/painel/abertas?chaves=sonho&"
+  };
+  const casos = [
+    // Vazio (ou ausente) vira null: sem filtro.
+    ["", { p_status: null, p_busca: null, p_busca_digitos: null }],
+    ["status=&busca=", { p_status: null, p_busca: null, p_busca_digitos: null }],
+    ["status=concluida", { p_status: "concluida", p_busca: null, p_busca_digitos: null }],
+    ["status=em_andamento&busca=maria", { p_status: "em_andamento", p_busca: "maria", p_busca_digitos: null }],
+    // Sintaxe do PostgREST sai, como na lista; com letras não procura no telefone.
+    [`busca=${encodeURIComponent(" Maria (11) 9*,%\"\\ ")}`, { p_status: null, p_busca: "Maria 11 9", p_busca_digitos: null }],
+    // Cara de telefone: dígitos também (+55 e máscara saem).
+    [`busca=${encodeURIComponent("+55 (11) 91234-5678")}`, { p_status: null, p_busca: "+55 11 91234-5678", p_busca_digitos: "11912345678" }],
+    [`busca=${encodeURIComponent("edna.4@hotmail.com")}`, { p_status: null, p_busca: "edna.4@hotmail.com", p_busca_digitos: null }],
+    // Só caracteres proibidos: nenhum filtro.
+    [`busca=${encodeURIComponent("(*)")}`, { p_status: null, p_busca: null, p_busca_digitos: null }]
+  ];
+  for (const [nome, prefixo] of Object.entries(rotas)) {
+    for (const [query, esperado] of casos) {
+      const response = await get(prefixo + query);
+      assert.equal(response.status, 200, `${nome} ${query}`);
+      const chamada = backend.chamadas.at(-1);
+      assert.equal(chamada.caminho, `/rest/v1/rpc/${nome}`);
+      const { p_status, p_busca, p_busca_digitos } = chamada.body;
+      assert.deepEqual({ p_status, p_busca, p_busca_digitos }, esperado, `${nome} ${query}`);
+    }
+  }
+  // Busca muito longa tem teto (o mesmo da lista).
+  await get(`/api/painel/resumo?busca=${"a".repeat(300)}`);
+  assert.ok(backend.chamadas.at(-1).body.p_busca.length <= 80);
 });
 
 test("filtros inválidos → 422 invalid_filters, sem ir ao banco", async () => {
@@ -399,6 +449,10 @@ test("filtros inválidos → 422 invalid_filters, sem ir ao banco", async () => 
     "/api/painel/resumo?perfil=Outro",
     "/api/painel/abertas?chaves=ambientes_outro",
     "/api/painel/respostas?status=todas",
+    "/api/painel/resumo?status=todas",
+    "/api/painel/resumo?status=Concluida",
+    "/api/painel/cruzamento?linha=perfil&coluna=idade&status=x",
+    "/api/painel/abertas?chaves=sonho&status=concluidas",
     "/api/painel/respostas?limite=0",
     "/api/painel/respostas?limite=-5",
     "/api/painel/respostas?limite=dez",
@@ -514,7 +568,10 @@ test("abertas: chama pesquisa_abertas só com chaves de texto", async () => {
     p_ate: null,
     p_perfil: "Enfermeiro(a)",
     p_limite: 50,
-    p_offset: 100
+    p_offset: 100,
+    p_status: null,
+    p_busca: null,
+    p_busca_digitos: null
   });
 
   await get("/api/painel/abertas?chaves=problema_unico");
@@ -537,7 +594,10 @@ test("cruzamento: chama pesquisa_cruzamento com duas perguntas analisáveis dife
     p_coluna: "renda_atual",
     p_desde: "2026-09-01T00:00:00.000Z",
     p_ate: null,
-    p_perfil: null
+    p_perfil: null,
+    p_status: null,
+    p_busca: null,
+    p_busca_digitos: null
   });
 
   // Múltipla, escala e lista também cruzam.

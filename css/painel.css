@@ -617,6 +617,110 @@ summary:focus-visible,
   box-shadow: 0 0 0 3px var(--ember-glow);
 }
 
+/* Busca e situação na barra do topo (filtros de pessoa). */
+.filtros-pessoa {
+  display: flex;
+  min-width: 0;
+  gap: 0.5rem;
+}
+
+.busca-global {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  color: var(--ink-soft);
+}
+
+.busca-global svg {
+  position: absolute;
+  left: 0.75rem;
+  pointer-events: none;
+}
+
+.busca-global input,
+.status-global select {
+  width: 100%;
+  min-height: 40px;
+  border: 1.5px solid var(--border);
+  border-radius: 999px;
+  background: #fffdf8;
+  color: var(--ink);
+  font: inherit;
+  /* 16px: abaixo disso o Safari do iPhone dá zoom ao focar. */
+  font-size: 1rem;
+}
+
+.busca-global input {
+  padding: 0.35rem 0.9rem 0.35rem 2.2rem;
+}
+
+.status-global {
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.status-global select {
+  max-width: 13rem;
+  padding: 0.35rem 2rem 0.35rem 0.9rem;
+  appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' fill='none' stroke='%23704c63' stroke-width='2' stroke-linecap='round'/></svg>");
+  background-position: right 0.75rem center;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+
+.busca-global input:focus,
+.status-global select:focus {
+  border-color: var(--ember);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ember-glow);
+}
+
+/* Filtro de pessoa ligado: fica visível no topo o que está valendo. */
+.status-global select.ativo,
+.busca-global input.ativo {
+  border-color: var(--ember);
+}
+
+.filtro-ativo {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 0;
+  padding: 0.3rem 0.35rem 0.3rem 0.8rem;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ember-glow) 60%, var(--parchment-soft));
+  color: var(--ink);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  gap: 0 0.6rem;
+}
+
+.filtro-ativo[hidden] {
+  display: none;
+}
+
+.filtro-ativo-texto {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.filtro-ativo .botao-texto {
+  min-height: 36px;
+  margin-left: auto;
+  font-weight: 700;
+}
+
+.pessoas-dica {
+  flex: 1 1 260px;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+}
+
 /* Abas de perfil: rótulo curto + contagem. */
 .perfis {
   display: flex;
@@ -929,9 +1033,27 @@ summary:focus-visible,
   color: var(--ink);
 }
 
+/* Marca de recorte: "Técnicos", "“maria” · responderam tudo" ou "sem filtro de pessoa" (acesso). */
+.selo-todos {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  background: var(--parchment-deep);
+  color: var(--ink-soft);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
 .placar .selo-todos {
   align-self: flex-start;
   margin-top: 0.2rem;
+  margin-left: 0;
   padding: 0.05rem 0.5rem;
   border-radius: 999px;
   background: var(--parchment-deep);
@@ -2398,7 +2520,9 @@ summary.icp-cabeca::after {
     grid-template-areas:
       "periodo periodo"
       "datas datas"
-      "perfis acoes";
+      "perfis acoes"
+      "pessoa pessoa"
+      "ativo ativo";
     grid-template-columns: minmax(0, 1fr) auto;
     column-gap: 0.5rem;
   }
@@ -2422,6 +2546,18 @@ summary.icp-cabeca::after {
 
   .perfis {
     grid-area: perfis;
+  }
+
+  .filtros-pessoa {
+    grid-area: pessoa;
+  }
+
+  .filtro-ativo {
+    grid-area: ativo;
+  }
+
+  .status-global select {
+    max-width: 9.5rem;
   }
 
   .datas {

@@ -1227,6 +1227,24 @@ function lerBusca(params) {
   return safeString(params.get("busca"), 80).replace(/[,()*%"\\]/g, "").trim();
 }
 
+// Só procura no telefone quando a busca PARECE telefone (dígitos, espaço, +, ponto, traço).
+// Tirar os dígitos de "edna.4@hotmail.com" daria "4", e a lista traria todo WhatsApp com 4.
+function digitosDaBusca(busca) {
+  if (!busca || !/^[\d\s+.-]+$/.test(busca)) return "";
+  return leadRules.normalizePhoneDigits(busca) || "";
+}
+
+/**
+ * Filtros de pessoa (status e busca) para as RPCs do painel: os mesmos da lista e do CSV, para os
+ * números e a lista mostrarem sempre o mesmo recorte. Vazio vai como null (= sem filtro).
+ */
+function filtrosDePessoaRpc(params) {
+  const status = lerStatus(params);
+  const busca = lerBusca(params);
+  const digitos = digitosDaBusca(busca);
+  return { p_status: status, p_busca: busca || null, p_busca_digitos: digitos || null };
+}
+
 /** Filtros de lista (respostas e CSV) em query do PostgREST. */
 function filtrosPostgrest(query, { desde, ate, perfil, status, busca }) {
   // A coluna `pesquisa` separa os formulários: o painel desta pesquisa só lê as linhas dela.
@@ -1237,12 +1255,8 @@ function filtrosPostgrest(query, { desde, ate, perfil, status, busca }) {
   if (status) query.set("status", `eq.${status}`);
   if (busca) {
     const filtros = [`nome.ilike.*${busca}*`, `email.ilike.*${busca}*`];
-    // Só procura no telefone quando a busca PARECE telefone (dígitos, espaço, +, ponto, traço).
-    // Tirar os dígitos de "edna.4@hotmail.com" daria "4", e a lista traria todo WhatsApp com 4.
-    if (/^[\d\s+.-]+$/.test(busca)) {
-      const digits = leadRules.normalizePhoneDigits(busca);
-      if (digits) filtros.push(`whatsapp_digits.ilike.*${digits}*`);
-    }
+    const digits = digitosDaBusca(busca);
+    if (digits) filtros.push(`whatsapp_digits.ilike.*${digits}*`);
     query.set("or", `(${filtros.join(",")})`);
   }
 }
@@ -1279,13 +1293,15 @@ async function rotaDoPainel(request, response, options, rotulo, executar) {
 function handleResumo(request, response, options) {
   return rotaDoPainel(request, response, options, "o resumo", async (params) => {
     const { desde, ate, perfil } = lerFiltrosComuns(params);
+    const pessoa = filtrosDePessoaRpc(params);
     const resumo = await readObjectResponse(
       await callRpc(options, "pesquisa_painel", {
         p_desde: desde,
         p_ate: ate,
         p_perfil: perfil,
         // Texto livre não tem "valor mais comum": fica fora das distribuições.
-        p_ignorar: CHAVES_TEXTO
+        p_ignorar: CHAVES_TEXTO,
+        ...pessoa
       })
     );
     return { resumo, gerado_em: new Date(options.now()).toISOString() };
@@ -1325,6 +1341,7 @@ function handleAbertas(request, response, options) {
       .map((chave) => chave.trim())
       .filter(Boolean);
     if (!chaves.length || chaves.some((chave) => !CHAVES_TEXTO_SET.has(chave))) invalido();
+    const pessoa = filtrosDePessoaRpc(params);
     const limite = lerInteiro(params, "limite", { padrao: ABERTAS_PADRAO, minimo: 1, maximo: PAINEL_LIST_MAX });
     const offset = lerInteiro(params, "offset", { padrao: 0, minimo: 0 });
 
@@ -1335,7 +1352,8 @@ function handleAbertas(request, response, options) {
         p_ate: filtros.ate,
         p_perfil: filtros.perfil,
         p_limite: limite,
-        p_offset: offset
+        p_offset: offset,
+        ...pessoa
       })
     );
     return {
@@ -1351,6 +1369,7 @@ function handleCruzamento(request, response, options) {
     const linha = params.get("linha") || "";
     const coluna = params.get("coluna") || "";
     if (!IDS_ANALISAVEIS.has(linha) || !IDS_ANALISAVEIS.has(coluna) || linha === coluna) invalido();
+    const pessoa = filtrosDePessoaRpc(params);
 
     const cruzamento = await readObjectResponse(
       await callRpc(options, "pesquisa_cruzamento", {
@@ -1358,7 +1377,8 @@ function handleCruzamento(request, response, options) {
         p_coluna: coluna,
         p_desde: filtros.desde,
         p_ate: filtros.ate,
-        p_perfil: filtros.perfil
+        p_perfil: filtros.perfil,
+        ...pessoa
       })
     );
     return { cruzamento };

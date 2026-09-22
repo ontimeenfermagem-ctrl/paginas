@@ -106,6 +106,25 @@
           </form>
 
           <div class="perfis" role="tablist" aria-label="Perfil profissional" data-perfis></div>
+
+          <!-- Busca e situação são filtros como período e perfil: mudam TODOS os números, a lista,
+               as respostas abertas e o CSV. -->
+          <div class="filtros-pessoa" role="search" aria-label="Filtrar por pessoa">
+            <label class="busca-global">
+              <span class="visualmente-oculto">Buscar por nome, WhatsApp ou e-mail</span>
+              <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              <input type="search" data-busca autocomplete="off" enterkeyhint="search" maxlength="80" placeholder="Nome, WhatsApp ou e-mail">
+            </label>
+            <label class="status-global">
+              <span class="visualmente-oculto">Situação</span>
+              <select data-status>
+                <option value="">Todas as situações</option>
+                <option value="concluida">Responderam tudo</option>
+                <option value="em_andamento">Em andamento</option>
+              </select>
+            </label>
+          </div>
+          <p class="filtro-ativo" data-filtro-ativo aria-live="polite" hidden></p>
         </div>
 
         <p class="status" data-panel-status role="status" aria-live="polite"></p>
@@ -264,18 +283,7 @@
             <p class="secao-sub">Uma linha por pessoa (pelo WhatsApp), com a tentativa mais completa dela.</p>
           </div>
           <div class="pessoas-barra">
-            <label class="campo-inline campo-busca">
-              <span>Buscar</span>
-              <input type="search" data-busca autocomplete="off" placeholder="Nome, WhatsApp ou e-mail">
-            </label>
-            <label class="campo-inline">
-              <span>Situação</span>
-              <select data-status>
-                <option value="">Todas</option>
-                <option value="concluida">Responderam tudo</option>
-                <option value="em_andamento">Em andamento</option>
-              </select>
-            </label>
+            <p class="pessoas-dica">Para achar alguém, use a busca e a situação na barra de filtros do topo.</p>
             <div class="csv">
               <a class="botao botao-leve" data-csv href="/api/painel/exportar.csv" download>
                 <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -294,7 +302,7 @@
 
         <footer class="rodape">
           <img src="/img/ev-icone-color.png" alt="" width="155" height="155">
-          <p>Escola Enfermagem de Valor · painel interno. Os números contam o período inteiro no banco; a busca e a lista não mudam os números.</p>
+          <p>Escola Enfermagem de Valor · painel interno. Todos os números respeitam os filtros escolhidos (período, perfil, situação e busca), contados sobre todas as respostas no banco. Acessos e cliques em Começar não têm nome nem perfil, então só mudam com o período.</p>
         </footer>
       </div>
     </main>

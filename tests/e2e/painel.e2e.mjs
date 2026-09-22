@@ -99,7 +99,8 @@ function criarMock(page, { dados = DADOS, logado = true } = {}) {
         const q = Object.fromEntries(url.searchParams);
         if (q.perfil && !Object.values(EV.PERFIL).includes(q.perfil)) return json(422, { ok: false, error: "invalid_filters" });
         for (const k of ["desde", "ate"]) if (q[k] && Number.isNaN(Date.parse(q[k]))) return json(422, { ok: false, error: "invalid_filters" });
-        const filtros = { desde: q.desde, ate: q.ate, perfil: q.perfil };
+        if (q.status && !["concluida", "em_andamento"].includes(q.status)) return json(422, { ok: false, error: "invalid_filters" });
+        const filtros = { desde: q.desde, ate: q.ate, perfil: q.perfil, status: q.status, busca: q.busca };
         if (rota === "resumo") return json(200, { ok: true, resumo: painel(mock.dados, filtros), gerado_em: new Date().toISOString() });
         if (rota === "cruzamento") {
           const ids = EV.perguntasAnalisaveis().map((p) => p.id);
@@ -294,7 +295,7 @@ cenario("filtros", async () => {
   const placar = await page.$$eval("[data-placar] li .valor", (els) => els.map((e) => e.textContent.trim()));
   confere(placar[2] === String(r.pessoas), `identificados do perfil = ${r.pessoas} (${placar[2]})`);
   const selos = await page.$$eval("[data-placar] .selo-todos", (els) => els.map((e) => e.textContent));
-  confere(selos.filter((s) => s === "todos os perfis").length === 2, "acesso e começo marcados como todos os perfis");
+  confere(selos.filter((s) => s.startsWith("sem filtro de pessoa")).length === 2, `acesso e começo marcados como sem filtro de pessoa (${selos.join(" | ")})`);
   const degraus = await page.$$eval("[data-funil] > li", (els) => els.length);
   confere(degraus === 10, `funil do perfil começa em se identificaram (${degraus} degraus)`);
   const cartoes = await page.$$eval(".icp-cartao", (els) => els.length);
@@ -445,6 +446,122 @@ cenario("auto", async () => {
   confere((await page.$$("[data-pessoa]")).length === 100, "auto não reinicia a lista depois de carregar mais");
   confere(await page.isVisible(`#det-${primeiro}`), "detalhe aberto sobrevive à atualização");
   await contexto.close();
+});
+
+/* ---------------------------------------------------------------- Busca e situação: filtros de verdade */
+cenario("filtros-de-pessoa", async () => {
+  const fmt = (x) => new Intl.NumberFormat("pt-BR").format(x);
+  const placarDe = (page) => page.$$eval("[data-placar] li .valor", (els) => els.map((e) => e.textContent.trim()));
+  const ROTAS = ["resumo", "respostas", "cruzamento", "abertas"];
+  const todasLevam = (mock, trecho) => ROTAS.every((rota) => mock.chamadas.some((c) => c.rota === rota) && mock.chamadas.filter((c) => c.rota === rota).every((c) => c.url.includes(trecho)));
+
+  for (const [largura, altura] of [[1280, 800], [390, 844]]) {
+    const { page, mock, erros } = await novaPagina(browser, { largura, altura });
+    await page.waitForSelector("[data-panel-view]:not([hidden])");
+    await esperarCalmo(page);
+    const geral = painel(DADOS, {});
+    // A busca e a situação moram na barra de filtros do topo, junto de período e perfil.
+    confere((await page.locator("[data-filtros] [data-busca]").count()) === 1 && (await page.locator("[data-filtros] [data-status]").count()) === 1, `${largura}: busca e situação na barra de filtros`);
+    confere((await page.locator("#sec-pessoas [data-busca], #sec-pessoas [data-status]").count()) === 0, `${largura}: nada de busca própria na seção Pessoas`);
+    confere(await page.isVisible("[data-filtros] [data-busca]"), `${largura}: busca visível`);
+    confere(await page.isHidden("[data-filtro-ativo]"), `${largura}: sem aviso de filtro no começo`);
+    const corpo = await page.textContent("body");
+    confere(!/não mudam os números/.test(corpo) && !/busca e a lista não/.test(corpo), `${largura}: nenhum texto dizendo que a busca não muda os números`);
+    confere(corpo.includes("Todos os números respeitam os filtros escolhidos"), `${largura}: rodapé verdadeiro`);
+
+    // Busca por nome: debounce, TODAS as requisições levam a busca, placar muda.
+    mock.chamadas = [];
+    await page.type("[data-busca]", "maria", { delay: 40 });
+    await page.waitForTimeout(650);
+    await esperarCalmo(page);
+    const resumos = mock.chamadas.filter((c) => c.rota === "resumo");
+    confere(resumos.length === 1, `${largura}: debounce faz um resumo só (${resumos.length})`);
+    confere(todasLevam(mock, "busca=maria"), `${largura}: resumo, lista, cruzamento e abertas levam busca=maria`);
+    const rBusca = painel(DADOS, { busca: "maria" });
+    confere(rBusca.pessoas > 0 && rBusca.pessoas < geral.pessoas, `fixture: busca recorta (${rBusca.pessoas} de ${geral.pessoas})`);
+    let placar = await placarDe(page);
+    confere(placar[0] === fmt(geral.visitantes), `${largura}: acessaram não muda com a busca (${placar[0]})`);
+    confere(placar[2] === fmt(rBusca.pessoas), `${largura}: identificados com busca = ${rBusca.pessoas} (${placar[2]})`);
+    confere(placar[3] === fmt(rBusca.concluidas), `${largura}: concluídas com busca = ${rBusca.concluidas} (${placar[3]})`);
+    confere(placar[5] === fmt(rBusca.tentativas - rBusca.pessoas), `${largura}: tentativas repetidas com busca`);
+    const selos = await page.$$eval("[data-placar] .selo-todos", (els) => els.map((e) => e.textContent));
+    confere(selos.filter((x) => x.startsWith("sem filtro de pessoa")).length === 2, `${largura}: acesso e começo marcados sem filtro de pessoa (${selos.join(" | ")})`);
+    const aviso = (await page.textContent("[data-filtro-ativo]")).replace(/\s+/g, " ");
+    confere(aviso.includes("Filtrando") && aviso.includes("maria") && aviso.includes(fmt(rBusca.pessoas)) && aviso.includes("Limpar filtros"), `${largura}: aviso de filtro (${aviso})`);
+    confere(new URL(page.url()).searchParams.get("busca") === "maria", `${largura}: URL guarda a busca`);
+    confere((await page.getAttribute("[data-csv]", "href")).includes("busca=maria"), `${largura}: CSV leva a busca`);
+    confere((await page.$$eval("[data-funil] > li", (els) => els.length)) === 10, `${largura}: funil filtrado começa em se identificaram`);
+    const contador = (await page.textContent("[data-contador]")).replace(/\s+/g, " ");
+    confere(contador.includes(`de ${fmt(rBusca.pessoas)}`), `${largura}: lista e placar batem (${contador})`);
+
+    // Situação: soma com a busca.
+    mock.chamadas = [];
+    await page.selectOption("[data-status]", "concluida");
+    await esperarCalmo(page);
+    const rAmbos = painel(DADOS, { busca: "maria", status: "concluida" });
+    confere(todasLevam(mock, "status=concluida") && todasLevam(mock, "busca=maria"), `${largura}: requisições levam status e busca`);
+    placar = await placarDe(page);
+    confere(placar[2] === fmt(rAmbos.pessoas) && placar[3] === fmt(rAmbos.pessoas), `${largura}: só concluídas (${placar[2]}/${placar[3]} = ${rAmbos.pessoas})`);
+    confere((await page.textContent("[data-filtro-ativo]")).includes("responderam tudo"), `${largura}: aviso cita a situação`);
+    let u = new URL(page.url());
+    confere(u.searchParams.get("status") === "concluida" && u.searchParams.get("busca") === "maria", `${largura}: URL ${u.search}`);
+    await tela(page, `filtro-pessoa-${largura}`);
+    const larguraDoc = await page.evaluate(() => document.documentElement.scrollWidth);
+    confere(larguraDoc <= largura, `${largura}: sem rolagem horizontal com filtro (${larguraDoc})`);
+
+    // Recarregar mantém busca e situação (campo preenchido e requisições filtradas).
+    mock.chamadas = [];
+    await page.reload();
+    await page.waitForSelector("[data-panel-view]:not([hidden])");
+    await esperarCalmo(page);
+    confere((await page.inputValue("[data-busca]")) === "maria" && (await page.inputValue("[data-status]")) === "concluida", `${largura}: recarregar mantém busca e situação`);
+    confere(todasLevam(mock, "status=concluida") && todasLevam(mock, "busca=maria"), `${largura}: depois de recarregar, tudo filtrado`);
+    confere((await placarDe(page))[2] === fmt(rAmbos.pessoas), `${largura}: placar filtrado depois de recarregar`);
+
+    // Em andamento, sem busca.
+    await page.fill("[data-busca]", "");
+    await page.selectOption("[data-status]", "em_andamento");
+    await page.waitForTimeout(600);
+    await esperarCalmo(page);
+    const rAnd = painel(DADOS, { status: "em_andamento" });
+    placar = await placarDe(page);
+    confere(placar[2] === fmt(rAnd.pessoas) && placar[3] === "0", `${largura}: em andamento (${placar[2]}, concluídas ${placar[3]})`);
+    u = new URL(page.url());
+    confere(u.searchParams.get("status") === "em_andamento" && !u.searchParams.has("busca"), `${largura}: URL sem busca vazia (${u.search})`);
+
+    // Busca por telefone (com máscara) acha a pessoa, e os números mudam para 1.
+    const alvo = DADOS.pessoas.find((p) => p.status === "em_andamento" && !DADOS.pessoas.some((o) => o !== p && o.whatsapp_digits === p.whatsapp_digits));
+    await page.fill("[data-busca]", alvo.whatsapp);
+    await page.waitForTimeout(600);
+    await esperarCalmo(page);
+    confere(painel(DADOS, { status: "em_andamento", busca: alvo.whatsapp }).pessoas === 1, "fixture: WhatsApp com máscara acha 1 pessoa");
+    confere((await placarDe(page))[2] === "1", `${largura}: busca por WhatsApp muda o placar para 1`);
+    confere((await page.locator(`[data-pessoa="${alvo.id}"]`).count()) === 1, `${largura}: busca por WhatsApp acha a pessoa`);
+
+    // Limpar filtros: tudo volta.
+    mock.chamadas = [];
+    await page.click("[data-limpar-filtros]");
+    await esperarCalmo(page);
+    placar = await placarDe(page);
+    confere(placar[2] === fmt(geral.pessoas) && placar[3] === fmt(geral.concluidas), `${largura}: limpar filtros volta ao total`);
+    confere(await page.isHidden("[data-filtro-ativo]"), `${largura}: aviso some`);
+    u = new URL(page.url());
+    confere(!u.searchParams.has("busca") && !u.searchParams.has("status"), `${largura}: URL limpa (${u.search})`);
+    confere(mock.chamadas.filter((c) => c.rota === "resumo").every((c) => !c.url.includes("busca=") && !c.url.includes("status=")), `${largura}: resumo sem filtro de pessoa`);
+    confere(erros.length === 0, `${largura}: sem erros (${erros.join(" | ")})`);
+    await page.context().close();
+  }
+
+  // Link compartilhado com filtros: a primeira carga já vem filtrada.
+  const { page, mock } = await novaPagina(browser, { url: `/painel?busca=${encodeURIComponent("ana")}&status=concluida&perfil=tecnico` });
+  await page.waitForSelector("[data-panel-view]:not([hidden])");
+  await esperarCalmo(page);
+  const rUrl = painel(DADOS, { busca: "ana", status: "concluida", perfil: EV.PERFIL.tecnico });
+  confere((await placarDe(page))[2] === fmt(rUrl.pessoas), `link com filtros: identificados = ${rUrl.pessoas}`);
+  confere(mock.chamadas.filter((c) => c.rota === "resumo").every((c) => c.url.includes("busca=ana") && c.url.includes("status=concluida")), "link com filtros: os dois resumos levam busca e situação");
+  const csv = await page.getAttribute("[data-csv]", "href");
+  confere(csv.includes("busca=ana") && csv.includes("status=concluida") && csv.includes("perfil="), `link com filtros: CSV com os quatro filtros (${csv})`);
+  await page.context().close();
 });
 
 /* ---------------------------------------------------------------- Lista: busca, carregar mais, ver tudo */
