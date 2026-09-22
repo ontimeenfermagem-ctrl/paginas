@@ -30,6 +30,9 @@
   const TIMEOUT_MS = 12000;
   /** Pausa entre o toque na opção e a próxima pergunta: dá tempo de ver a marcação. */
   const ATRASO_AVANCO = 300;
+  // Logo depois que uma pergunta aparece, as opções ignoram toques: quem toca duas vezes (achou
+  // que o primeiro toque não pegou) não responde a pergunta seguinte sem vê-la.
+  const TRAVA_TOQUE_MS = 500;
   /** Duração dos "três pontinhos" antes da fala de cada etapa. */
   const DIGITANDO_MS = 600;
   /** Texto livre vai ao servidor depois desta pausa na digitação (e sempre ao sair da tela). */
@@ -187,11 +190,18 @@
   }
 
   /** O que já estava guardado ganha; a visita nova só preenche o que faltava. */
+  // Campanha (utm_* + fbclid + gclid) é um bloco só de primeiro toque: se a primeira visita tinha
+  // qualquer um, fica o bloco dela inteiro; senão, o da visita nova. Misturar campo a campo
+  // creditaria uma campanha do Facebook à bio do Instagram, por exemplo.
+  const CAMPOS_CAMPANHA = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid", "gclid"];
+
   function mesclarRastreio(antigo, novo) {
     const saida = {};
+    const texto = (fonte, campo) => (fonte && typeof fonte[campo] === "string" && fonte[campo] ? fonte[campo] : null);
+    const blocoAntigo = CAMPOS_CAMPANHA.some((campo) => texto(antigo, campo));
     for (const campo of CAMPOS_RASTREIO) {
-      const velho = antigo && typeof antigo[campo] === "string" && antigo[campo] ? antigo[campo] : null;
-      saida[campo] = velho || (novo && novo[campo]) || null;
+      if (CAMPOS_CAMPANHA.includes(campo)) saida[campo] = blocoAntigo ? texto(antigo, campo) : (novo && novo[campo]) || null;
+      else saida[campo] = texto(antigo, campo) || (novo && novo[campo]) || null;
     }
     if (!["mobile", "tablet", "desktop"].includes(saida.dispositivo)) saida.dispositivo = dispositivo();
     return saida;
@@ -294,6 +304,7 @@
   const falasVistas = new Set(); // etapas cuja fala já "digitou" nesta visita
   const etapasRastreadas = new Set(); // etapas que já foram ao pixel nesta visita
   let travaAvanco = null; // timer do avanço automático (unica/escala)
+  let travaToque = null; // timer que devolve o toque às opções de uma pergunta recém-montada
   let timerTexto = null;
 
   /* ================================================================== */
@@ -970,17 +981,24 @@
   // Quem sai do campo tocando no botão de enviar não pode ver o botão fugir do dedo: mostrar erro
   // ou sugestão no blur empurra o botão para baixo e o toque cai no vazio. Nesse caso o blur não
   // mexe na tela, e o próprio envio valida e mostra tudo.
+  //
+  // Quem encerra o "apertando" é o CLIQUE, e não um timer: em todo navegador o clique vem depois do
+  // blur (no iPhone o blur chega nos eventos de mouse emulados, depois do pointerup). Com timer, um
+  // navegador lento ou em segundo plano atrasava a volta, e o blur seguinte deixava de validar.
   let apertandoEnviar = false;
+  let soltarTimer = 0;
+  function soltarEnviar() {
+    window.clearTimeout(soltarTimer);
+    apertandoEnviar = false;
+  }
   botaoContato.addEventListener("pointerdown", () => {
     apertandoEnviar = true;
+    window.clearTimeout(soltarTimer);
+    // Dedo que sai do botão sem clicar: a validação ao sair do campo volta sozinha.
+    soltarTimer = window.setTimeout(soltarEnviar, 1000);
   });
-  for (const fim of ["pointerup", "pointercancel", "pointerleave"]) {
-    botaoContato.addEventListener(fim, () => {
-      window.setTimeout(() => {
-        apertandoEnviar = false;
-      }, 0);
-    });
-  }
+  botaoContato.addEventListener("click", soltarEnviar, true);
+  botaoContato.addEventListener("pointercancel", soltarEnviar);
 
   for (const campo of Object.keys(campos)) {
     campos[campo].addEventListener("blur", () => {
@@ -1212,6 +1230,12 @@
   function montarPergunta(pergunta) {
     const tela = telas.pergunta;
     tela.innerHTML = "";
+    tela.classList.add("tela-travada");
+    if (travaToque) window.clearTimeout(travaToque);
+    travaToque = window.setTimeout(() => {
+      travaToque = null;
+      tela.classList.remove("tela-travada");
+    }, TRAVA_TOQUE_MS);
     tela.dataset.tipo = pergunta.tipo;
     tela.dataset.pergunta = pergunta.id;
     const idTitulo = `titulo-${pergunta.id}`;

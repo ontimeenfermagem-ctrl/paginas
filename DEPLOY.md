@@ -80,8 +80,8 @@ A senha em si não é guardada em lugar nenhum, só o hash. Guarde a senha num g
    | `PAINEL_EMAIL` | o e-mail de login do painel |
    | `PAINEL_SENHA_HASH` | a linha do passo 3 (cole como está, sem aspas) |
    | `PAINEL_SESSAO_SEGREDO` | a linha do passo 3 |
-   | `PESQUISA_WEBHOOK_URL` | opcional: vazio = `https://n8n.tecnicadevalor.com.br/webhook/pesquisa-icp`; outro endereço troca; `off` desliga. Recebe **um** aviso `pesquisa_concluida` por pessoa, quando ela chega à tela de fim |
-   | `SITE_URL` | opcional, mas recomendado assim que o domínio existir (ex.: `https://pesquisa.seudominio.com.br`): a prévia do link no WhatsApp ganha imagem com endereço absoluto, `og:url` e `canonical` |
+   | `PESQUISA_WEBHOOK_URL` | opcional: vazio = `https://n8n.tecnicadevalor.com.br/webhook/pesquisa-icp`; outro endereço troca; `off` desliga. Recebe **um** aviso `pesquisa_concluida` por pessoa, quando ela chega à tela de fim. Se o n8n estiver fora, o servidor reenvia sozinho (varredura 30 s depois de subir e a cada 10 min, até 7 dias). A varredura também manda quem respondeu todas as obrigatórias e fechou antes da tela de fim, depois de 30 min parada |
+   | `SITE_URL` | opcional, recomendado assim que o domínio existir (ex.: `https://pesquisa.seudominio.com.br`): fixa o endereço do `og:url`, do `canonical` e da imagem da prévia do WhatsApp. Sem ele, o servidor usa o endereço pelo qual a página foi pedida (cabeçalho `X-Forwarded-Host`/`Host`, validado), então a prévia já sai com imagem no domínio do Railway |
    | `META_PIXEL_ID` | opcional: vazio = `538380380948773` (pixel da Enfermagem de Valor); `off` desliga |
 
    `PORT` não precisa: o Railway define sozinho.
@@ -97,7 +97,7 @@ O domínio ainda não foi decidido, e nada no código depende dele. Abaixo, `SEU
 2. O Railway mostra um registro **CNAME** (e às vezes um TXT de verificação). Crie esses registros no provedor de DNS do domínio `escolaenfermagemdevalor.com.br`, exatamente como aparecem. Se o DNS estiver na Cloudflare, deixe o registro **sem proxy** (nuvem cinza) — com o proxy ligado, o limite de tentativas por IP passa a enxergar o IP da Cloudflare.
 3. Espere o selo verde e o certificado HTTPS no Railway (costuma levar de minutos a uma hora).
 
-4. Cadastre `SITE_URL=https://SEU-DOMINIO` nas variáveis do Railway (a prévia do WhatsApp precisa da imagem com endereço completo).
+4. Cadastre `SITE_URL=https://SEU-DOMINIO` nas variáveis do Railway: sem ele a prévia do WhatsApp já funciona (usa o endereço da requisição), mas com ele o `canonical` aponta sempre para o domínio oficial, mesmo quando alguém abre pelo endereço `*.up.railway.app`.
 
 A pesquisa mora em `https://SEU-DOMINIO/pesquisa-icp`. A raiz `https://SEU-DOMINIO/` redireciona para ela mantendo as UTMs, e o endereço antigo `/pesquisa` também (301). Nos anúncios e no link da bio, use UTMs, por exemplo:
 
@@ -192,7 +192,10 @@ Datas ficam gravadas em UTC. Para ver no horário de Brasília: `criado_em at ti
 
 ## Operação
 
-- **Trocar a senha do painel:** gere de novo (passo 3) e atualize `PAINEL_SENHA_HASH` no Railway.
+- **Trocar a senha do painel:** gere de novo (passo 3) e atualize **os dois**, `PAINEL_SENHA_HASH` e
+  `PAINEL_SESSAO_SEGREDO`, no Railway. Trocar só o hash não derruba quem já está logado: a sessão
+  aberta (inclusive num aparelho perdido) continua valendo por até 8 h. Trocar o segredo derruba
+  todas na hora. "Sair" no painel apaga o cookie daquele aparelho, mas não invalida o token.
 - **Derrubar todas as sessões abertas** (perdeu um celular logado, por exemplo): troque `PAINEL_SESSAO_SEGREDO`.
 - **Mudar uma pergunta:** veja "Mudar uma pergunta" no `README.md` (é só `js/pesquisa-config.js` + subir a `VERSAO`).
 - **A pesquisa responde erro ao gravar / painel com erro 502:** confira se o `supabase.sql` foi rodado no projeto certo e se a chave é a service_role. Se o log do Railway falar em função não encontrada logo depois de rodar o SQL, rode no SQL Editor `notify pgrst, 'reload schema';`.

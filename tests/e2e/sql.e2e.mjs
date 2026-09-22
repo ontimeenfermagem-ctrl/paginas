@@ -365,7 +365,7 @@ describe("pesquisa_registrar_evento", () => {
     assert.equal(v.utm_source, "instagram");
   });
 
-  test("rastreio de primeiro toque: não sobrescreve, só preenche o que faltava; vazio vira null", async () => {
+  test("rastreio de primeiro toque: campanha (utm/fbclid/gclid) é um bloco só; page_url/referrer só preenchem o que faltava; vazio vira null", async () => {
     const id = randomUUID();
     await registrar(id, "visita", {
       utm_source: "instagram",
@@ -392,10 +392,20 @@ describe("pesquisa_registrar_evento", () => {
     assert.equal(v.utm_campaign, "lancamento");
     assert.equal(v.page_url, "https://x/pesquisa?utm_source=instagram");
     assert.equal(v.dispositivo, "mobile");
-    assert.equal(v.utm_medium, "cpc");
-    assert.equal(v.utm_content, "anuncio-2");
-    assert.equal(v.fbclid, "abc");
+    // O bloco da primeira visita fica inteiro: nada da campanha do Facebook entra nele.
+    assert.equal(v.utm_medium, null);
+    assert.equal(v.utm_content, null);
+    assert.equal(v.fbclid, null);
     assert.equal(v.referrer, "https://l.instagram.com/");
+
+    // Primeira visita sem campanha nenhuma: o bloco da visita seguinte entra inteiro.
+    const outro = randomUUID();
+    await registrar(outro, "visita", { page_url: "https://x/pesquisa", dispositivo: "mobile" });
+    await registrar(outro, "visita", { utm_source: "facebook", utm_medium: "cpc", fbclid: "fb-2" });
+    const w = await visitante(outro);
+    assert.equal(w.utm_source, "facebook");
+    assert.equal(w.utm_medium, "cpc");
+    assert.equal(w.fbclid, "fb-2");
   });
 
   test("evento inválido falha e não grava nada", async () => {
@@ -467,7 +477,7 @@ describe("pesquisa_salvar", () => {
     assert.equal(linha.respondidas, 9);
     assert.equal(linha.progresso_percentual, 30);
     assert.equal(linha.utm_source, "instagram", "primeiro toque");
-    assert.equal(linha.utm_medium, "cpc", "campo vazio é preenchido");
+    assert.equal(linha.utm_medium, null, "campanha é um bloco de primeiro toque: nada da visita nova entra");
     assert.deepEqual(linha.tempos, { contato: 20, perfil: 5, idade: 3 });
     assert.ok(linha.ultima_resposta_em);
 

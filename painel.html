@@ -85,7 +85,7 @@
                 <span>Auto</span>
                 <span class="visualmente-oculto" id="auto-dica">Atualiza sozinho a cada minuto enquanto esta aba estiver aberta</span>
               </label>
-              <button type="button" class="botao botao-leve botao-pequeno" data-atualizar>
+              <button type="button" class="botao botao-leve botao-pequeno" data-atualizar aria-label="Atualizar agora">
                 <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 <span>Atualizar</span>
               </button>
@@ -222,9 +222,9 @@
           </div>
           <div class="cartao">
             <div class="abas" role="tablist" aria-label="Pergunta aberta" data-abertas-abas>
-              <button type="button" class="aba" role="tab" id="aba-problema" aria-controls="abertas-painel" data-aberta="problema" aria-selected="true" tabindex="0">O único problema</button>
-              <button type="button" class="aba" role="tab" id="aba-sonho" aria-controls="abertas-painel" data-aberta="sonho" aria-selected="false" tabindex="-1">Maior sonho</button>
-              <button type="button" class="aba" role="tab" id="aba-frase" aria-controls="abertas-painel" data-aberta="frase" aria-selected="false" tabindex="-1">Complete a frase</button>
+              <button type="button" class="aba" role="tab" id="aba-problema" aria-controls="abertas-painel" data-aberta="problema" aria-selected="true" tabindex="0"><span class="so-largo">O único problema</span><span class="so-estreito">Problema</span></button>
+              <button type="button" class="aba" role="tab" id="aba-sonho" aria-controls="abertas-painel" data-aberta="sonho" aria-selected="false" tabindex="-1"><span class="so-largo">Maior sonho</span><span class="so-estreito">Sonho</span></button>
+              <button type="button" class="aba" role="tab" id="aba-frase" aria-controls="abertas-painel" data-aberta="frase" aria-selected="false" tabindex="-1"><span class="so-largo">Complete a frase</span><span class="so-estreito">Frase</span></button>
             </div>
             <div id="abertas-painel" role="tabpanel" aria-labelledby="aba-problema" data-abertas-painel>
               <p class="aberta-pergunta" data-aberta-pergunta></p>

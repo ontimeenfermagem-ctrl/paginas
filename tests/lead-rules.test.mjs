@@ -181,3 +181,16 @@ test("mensagens para a tela saem do mesmo arquivo", () => {
   assert.equal(typeof L.MESSAGES.email.domain, "string");
   assert.ok(Object.isFrozen(L.MESSAGES));
 });
+
+test("nome vai para o banco com maiúsculas certas e partículas minúsculas", () => {
+  assert.equal(L.formatName("maria da silva"), "Maria da Silva");
+  assert.equal(L.formatName("  MARIA   DOS SANTOS "), "Maria dos Santos");
+  assert.equal(L.formatName("joão d'ávila"), "João D'Ávila");
+  assert.equal(L.formatName("ana-clara de souza e silva"), "Ana-Clara de Souza e Silva");
+  assert.equal(L.formatName("ÉRICA ÚRSULA"), "Érica Úrsula");
+  // Partícula no começo é nome, não partícula.
+  assert.equal(L.formatName("da silva maria"), "Da Silva Maria");
+  assert.equal(L.formatName(""), "");
+  // Formatar não muda o que a validação aceita.
+  for (const nome of ["maria da silva", "ANA B", "joão d'ávila"]) assert.equal(L.nameError(L.formatName(nome)), L.nameError(nome));
+});

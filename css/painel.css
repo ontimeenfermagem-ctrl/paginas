@@ -465,7 +465,8 @@ summary:focus-visible,
   border-bottom: 1px solid var(--border);
   backdrop-filter: saturate(1.2) blur(10px);
   -webkit-backdrop-filter: saturate(1.2) blur(10px);
-  background: rgba(244, 235, 221, 0.93);
+  /* Opaco: no Safari do iPhone, com alfa, o texto que passa por baixo aparecia através da barra. */
+  background: rgb(244, 235, 221);
   gap: 0.5rem;
   /* minmax(0, 1fr): sem isto a trilha do grid cresce até o conteúdo das faixas roláveis e a
      página inteira ganha rolagem lateral no celular. */
@@ -2351,8 +2352,47 @@ summary.icp-cabeca::after {
   }
 }
 
+/* Faixas roláveis: esmaecem a borda onde ainda há opções escondidas (js: sinalizarRolagem). */
+.rola-dir {
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 36px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 36px), transparent);
+}
+.rola-esq {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 36px);
+  mask-image: linear-gradient(90deg, transparent, #000 36px);
+}
+.rola-esq.rola-dir {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 36px, #000 calc(100% - 36px), transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 36px, #000 calc(100% - 36px), transparent);
+}
+
+/* Na tabela de Tráfego, a taxa curta ("351 · 60%") só aparece no celular, no lugar das colunas
+   de taxa. */
+.taxa-curta {
+  display: none;
+  color: var(--ink-soft);
+  font-size: 0.85em;
+}
+
 /* Celular estreito: filtros compactos para o topo preso não comer a tela. */
 @media (max-width: 719px) {
+  .trafego-tabela .col-taxa {
+    display: none;
+  }
+
+  .trafego-tabela .taxa-curta {
+    display: inline;
+    white-space: nowrap;
+  }
+
+  /* "Agrupar por" do Tráfego e "Mostrar como" do Cruzamento: quebram em duas linhas em vez de
+     esconder a última opção fora da tela. */
+  .segmentado-pequeno {
+    flex-wrap: wrap;
+    overflow-x: visible;
+    border-radius: 18px;
+  }
+
   /* Celular: período numa linha inteira; perfis e (Auto + Atualizar) dividem a segunda. */
   .filtros {
     grid-template-areas:

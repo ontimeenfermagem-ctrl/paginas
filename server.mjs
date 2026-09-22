@@ -34,6 +34,8 @@ const DEFAULT_WEBHOOK_URL = "https://n8n.tecnicadevalor.com.br/webhook/pesquisa-
 // que o painel mostra).
 const WEBHOOK_ESPERAS_MS = Object.freeze([0, 3_000, 10_000]);
 const SUPABASE_TIMEOUT_MS = 10_000;
+// Entradas do cache de HTML/JS/CSS comprimidos (arquivos x codificações x origens da pesquisa).
+const RESPONSE_CACHE_MAX = 200;
 
 // Pixel da Enfermagem de Valor, o mesmo das outras páginas da marca. "off" desliga.
 const DEFAULT_META_PIXEL_ID = "538380380948773";
@@ -46,11 +48,12 @@ const FORMATTED_PHONE_PATTERN = /^\(\d{2}\) \d{5}-\d{4}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Uma visita e um clique em "Começar" por carregamento: 60/min cobre IP compartilhado de operadora.
-const EVENTO_RATE_LIMIT_MAX = 60;
+const EVENTO_RATE_LIMIT_MAX = 240;
 const EVENTO_RATE_LIMIT_WINDOW_MS = 60_000;
 // A pesquisa grava a cada resposta (39 perguntas em ~7 minutos, mais re-tentativas da fila):
-// 120/min por IP deixa folga para várias pessoas atrás do mesmo IP de celular.
-const SALVAR_RATE_LIMIT_MAX = 120;
+// Cerca de 2 gravações por pergunta: 600/min por IP deixa folga para ~10 pessoas ao mesmo tempo
+// atrás do mesmo IP de operadora (CGNAT), comum em disparo de campanha.
+const SALVAR_RATE_LIMIT_MAX = 600;
 const SALVAR_RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_KEYS = 5_000;
 
@@ -545,7 +548,9 @@ export function validarContato(fonte) {
 
   if (Object.keys(campos).length) return { campos };
   const digits = whatsapp.replace(/\D/g, "");
-  return { contato: { nome, whatsapp, whatsapp_digits: digits, email } };
+  // "maria da silva" e "MARIA DA SILVA" vão para o banco, o painel, o CSV e o n8n como
+  // "Maria da Silva": a equipe copia o nome direto para a mensagem de WhatsApp.
+  return { contato: { nome: leadRules.formatName(nome), whatsapp, whatsapp_digits: digits, email } };
 }
 
 function normalizarTempos(fonte) {
@@ -701,7 +706,7 @@ export function montarPayloadWebhook({ linha, id, contato, respostas, rastreio, 
     pesquisa: { id: textoOuNull(l.pesquisa) ?? pesquisa.ID, versao: textoOuNull(l.pesquisa_versao) ?? pesquisa.VERSAO },
     sessao_id: textoOuNull(l.id) ?? id,
     iniciada_em: isoOuNull(l.criado_em),
-    concluida_em: isoOuNull(l.finalizado_em) ?? new Date(agora).toISOString(),
+    concluida_em: isoOuNull(l.finalizado_em) ?? isoOuNull(l.concluido_em) ?? new Date(agora).toISOString(),
     tempo_total_segundos: Number.isFinite(l.tempo_total_segundos) ? l.tempo_total_segundos : null,
     lead: {
       nome,
@@ -757,18 +762,145 @@ async function avisarWebhook(options, dados) {
       continue;
     }
 
-    try {
-      await supabaseRequest(options, `pesquisa_respostas?id=eq.${encodeURIComponent(dados.id)}`, {
-        method: "PATCH",
-        body: { webhook_enviado_em: new Date(options.now()).toISOString() },
-        headers: { Prefer: "return=minimal" }
-      });
-    } catch (error) {
-      console.error(`Aviso entregue, mas falhou ao marcar webhook_enviado_em: ${error?.message || "erro"}`);
-    }
+    await marcarEnviado(options, dados.id);
     return true;
   }
   return false;
+}
+
+async function marcarEnviado(options, id) {
+  try {
+    await supabaseRequest(options, `pesquisa_respostas?id=eq.${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: { webhook_enviado_em: new Date(options.now()).toISOString() },
+      headers: { Prefer: "return=minimal" }
+    });
+  } catch (error) {
+    console.error(`Aviso entregue, mas falhou ao marcar webhook_enviado_em: ${error?.message || "erro"}`);
+  }
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Reenvio automático ao n8n                                                                   */
+/* ------------------------------------------------------------------------------------------ */
+
+// 30 s depois de subir e depois a cada 10 min. Só olha tentativas finalizadas entre 7 dias e
+// 2 minutos atrás: os 2 minutos deixam as três tentativas imediatas (0, 3 s, 10 s, cada uma com
+// até 10 s de timeout) terminarem antes, para as duas não mandarem o mesmo aviso.
+const REENVIO_ATRASO_INICIAL_MS = 30_000;
+const REENVIO_INTERVALO_MS = 10 * 60_000;
+const REENVIO_JANELA_MAX_MS = 7 * 24 * 60 * 60_000;
+const REENVIO_JANELA_MIN_MS = 2 * 60_000;
+const REENVIO_LIMITE = 25;
+// Concluída (tudo o obrigatório respondido) sem chegar à tela de fim: espera 30 min parada antes
+// de mandar, para não atropelar quem ainda está escrevendo as abertas opcionais.
+const REENVIO_ABANDONO_MS = 30 * 60_000;
+
+/** A mesma montagem do aviso normal, a partir só da linha gravada (rastreio de primeiro toque). */
+function payloadDaLinha(linha, agora) {
+  const contato = {
+    nome: linha.nome ?? null,
+    whatsapp: linha.whatsapp ?? null,
+    whatsapp_digits: linha.whatsapp_digits ?? null,
+    email: linha.email ?? null
+  };
+  const respostas = isPlainObject(linha.respostas) ? linha.respostas : {};
+  return montarPayloadWebhook({ linha, id: linha.id, contato, respostas, rastreio: {}, agora });
+}
+
+/**
+ * Varredura que reenvia ao n8n as tentativas finalizadas que ficaram sem webhook_enviado_em (n8n
+ * fora nas três tentativas, ou servidor reiniciado no meio). Uma tentativa por linha; em 2xx marca
+ * a linha. Nunca roda duas ao mesmo tempo. Falha vai só para o log, sem dado pessoal.
+ */
+function criarReenvio(options, { atrasoInicialMs = REENVIO_ATRASO_INICIAL_MS, intervaloMs = REENVIO_INTERVALO_MS } = {}) {
+  let emCurso = null;
+  let parado = false;
+  let inicial = null;
+  let periodico = null;
+
+  async function varrer() {
+    const agora = options.now();
+    const desde = new Date(agora - REENVIO_JANELA_MAX_MS).toISOString();
+    const ate = new Date(agora - REENVIO_JANELA_MIN_MS).toISOString();
+    const parada = new Date(agora - REENVIO_ABANDONO_MS).toISOString();
+    // Dois casos: (a) chegou à tela de fim e o aviso não saiu; (b) respondeu tudo o que é
+    // obrigatório (status concluida) mas fechou antes da tela de fim — por exemplo, na pergunta
+    // aberta opcional — e está parada há 30 min. O painel conta (b) como concluída, então o n8n
+    // também precisa recebê-la.
+    const filtro =
+      `(and(finalizado_em.gte.${desde},finalizado_em.lte.${ate}),` +
+      `and(finalizado_em.is.null,status.eq.concluida,concluido_em.gte.${desde},atualizado_em.lte.${parada}))`;
+    const consulta = [
+      "select=*",
+      `pesquisa=eq.${encodeURIComponent(pesquisa.ID)}`,
+      "webhook_enviado_em=is.null",
+      `or=${encodeURIComponent(filtro)}`,
+      "order=criado_em.asc",
+      `limit=${REENVIO_LIMITE}`
+    ].join("&");
+
+    let linhas;
+    try {
+      linhas = await (await supabaseRequest(options, `pesquisa_respostas?${consulta}`)).json();
+    } catch (error) {
+      console.error(`Reenvio ao n8n: falha ao buscar pendentes: ${error?.message || "erro"}`);
+      return { pendentes: 0, entregues: 0 };
+    }
+    if (!Array.isArray(linhas)) return { pendentes: 0, entregues: 0 };
+
+    let entregues = 0;
+    for (const linha of linhas) {
+      if (parado) break;
+      if (!isPlainObject(linha) || !linha.id) continue;
+      try {
+        await forwardToWebhook({ payload: payloadDaLinha(linha, options.now()), webhookUrl: options.webhookUrl, fetchImpl: options.fetchImpl });
+      } catch (error) {
+        console.error(`Reenvio ao n8n: falha ao entregar: ${error?.message || "erro"}`);
+        continue;
+      }
+      await marcarEnviado(options, linha.id);
+      entregues += 1;
+    }
+    if (linhas.length) console.log(`Reenvio ao n8n: ${entregues} de ${linhas.length} pendente(s) entregue(s).`);
+    return { pendentes: linhas.length, entregues };
+  }
+
+  function executar() {
+    if (parado) return Promise.resolve({ pendentes: 0, entregues: 0 });
+    if (emCurso) return emCurso;
+    emCurso = varrer()
+      .catch((error) => {
+        console.error(`Reenvio ao n8n: falha inesperada: ${error?.message || "erro"}`);
+        return { pendentes: 0, entregues: 0 };
+      })
+      .finally(() => {
+        emCurso = null;
+      });
+    return emCurso;
+  }
+
+  function iniciar() {
+    if (parado || inicial || periodico) return;
+    inicial = setTimeout(() => {
+      inicial = null;
+      if (parado) return;
+      executar();
+      periodico = setInterval(executar, intervaloMs);
+      periodico.unref?.();
+    }, atrasoInicialMs);
+    inicial.unref?.();
+  }
+
+  function parar() {
+    parado = true;
+    clearTimeout(inicial);
+    clearInterval(periodico);
+    inicial = null;
+    periodico = null;
+  }
+
+  return { executar, iniciar, parar, emCurso: () => emCurso };
 }
 
 async function handleEvento(request, response, options) {
@@ -904,7 +1036,10 @@ async function handleSalvar(request, response, options) {
 
   // 8. Aviso ao n8n: UM por tentativa, só quando a pessoa chega ao fim (o banco decide, dentro da
   //    trava da linha, se esta é a primeira chegada). Sem await.
-  if (options.webhookUrl && finalizouAgora) {
+  //    Se a varredura já mandou esta tentativa (concluída e parada nas abertas; ela voltou depois),
+  //    não manda de novo.
+  const jaEnviada = isPlainObject(resultado.linha) && resultado.linha.webhook_enviado_em != null;
+  if (options.webhookUrl && finalizouAgora && !jaEnviada) {
     avisarWebhook(options, { linha: resultado.linha, id, contato, respostas, rastreio }).catch((error) => {
       console.error(`Falha inesperada no aviso ao webhook: ${error?.message || "erro"}`);
     });
@@ -1484,9 +1619,10 @@ function escapeAttr(valor) {
 }
 
 /**
- * Endereço público do site, só quando SITE_URL existe (o domínio ainda não foi decidido e nada de
- * domínio fixo no código). Com ele, a prévia do link no WhatsApp ganha og:url, canonical e a
- * imagem com endereço absoluto — o WhatsApp não monta prévia com imagem de caminho relativo.
+ * Endereço público do site: SITE_URL quando existe; senão, a origem derivada da requisição (ver
+ * origemDaRequisicao). Com ele, a prévia do link no WhatsApp ganha og:url, canonical e a imagem
+ * com endereço absoluto — o WhatsApp não monta prévia com imagem de caminho relativo. Sem origem
+ * válida, a página sai como está no arquivo.
  */
 function metaDoSite(source, siteUrl) {
   if (!siteUrl) return source;
@@ -1499,6 +1635,34 @@ function metaDoSite(source, siteUrl) {
       "</head>",
       `<meta property="og:url" content="${escapeAttr(pagina)}" />\n<link rel="canonical" href="${escapeAttr(pagina)}" />\n</head>`
     );
+}
+
+// hostname[:porta] e nada mais: letras, dígitos, hífen e pontos. Sem espaço, @, barra ou aspas —
+// o valor vai parar num atributo HTML e numa chave de cache.
+const HOST_PATTERN = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*(?::\d{1,5})?$/;
+
+function primeiroValor(cabecalho) {
+  const texto = Array.isArray(cabecalho) ? cabecalho[0] : cabecalho;
+  return String(texto ?? "").split(",")[0].trim();
+}
+
+/**
+ * Sem SITE_URL, a origem pública vem da requisição: X-Forwarded-Host (o proxy do Railway) ou
+ * Host; protocolo de X-Forwarded-Proto se for http/https, senão http só para localhost. Host fora
+ * do padrão → "" (a página sai sem og:url/canonical, como no arquivo).
+ */
+export function origemDaRequisicao(headers = {}) {
+  const host = (primeiroValor(headers["x-forwarded-host"]) || primeiroValor(headers.host)).toLowerCase();
+  if (!host || host.length > 260 || !HOST_PATTERN.test(host)) return "";
+  const nome = host.replace(/:\d+$/, "");
+  const protoCabecalho = primeiroValor(headers["x-forwarded-proto"]).toLowerCase();
+  const proto =
+    protoCabecalho === "http" || protoCabecalho === "https"
+      ? protoCabecalho
+      : nome === "localhost" || nome === "127.0.0.1"
+        ? "http"
+        : "https";
+  return `${proto}://${host}`;
 }
 
 // O Pixel entra só na pesquisa. O painel tem dado pessoal na tela: nada de terceiros ali.
@@ -1628,13 +1792,21 @@ async function serveStatic(request, response, config) {
 
   if (compressibleExtensions.has(extension)) {
     const encoding = negotiateEncoding(request.headers["accept-encoding"]);
+    // Só a pesquisa depende da origem. Sem SITE_URL ela vem da requisição, e por isso ENTRA NA
+    // CHAVE do cache: um Host forjado só muda a página de quem o forjou, nunca a de outra pessoa.
+    const origem = pathname === PESQUISA_PAGE ? config.siteUrl || origemDaRequisicao(request.headers) : "";
     // Cada arquivo é transformado e comprimido uma única vez por versão (mtime + tamanho).
-    const cacheKey = [filePath, fileStats.mtimeMs, fileStats.size, encoding].join("|");
+    const cacheKey = [filePath, fileStats.mtimeMs, fileStats.size, encoding, origem].join("|");
     let body = config.responseBodyCache.get(cacheKey);
     if (!body) {
-      body = buildResponseBody({ filePath, pathname, extension, encoding, pixelId: config.metaPixelId, siteUrl: config.siteUrl });
+      body = buildResponseBody({ filePath, pathname, extension, encoding, pixelId: config.metaPixelId, siteUrl: origem });
       config.responseBodyCache.set(cacheKey, body);
       body.catch(() => config.responseBodyCache.delete(cacheKey));
+      // Teto do cache: com a origem na chave, alguém mandando mil Hosts diferentes não enche a
+      // memória — sai a entrada mais antiga (a próxima requisição dela só recomprime).
+      while (config.responseBodyCache.size > RESPONSE_CACHE_MAX) {
+        config.responseBodyCache.delete(config.responseBodyCache.keys().next().value);
+      }
     }
     const data = await body;
 
@@ -1694,6 +1866,9 @@ export function createServerApp({
   webhookUrl = "",
   webhookEsperasMs = WEBHOOK_ESPERAS_MS,
   siteUrl = "",
+  // Reenvio automático ao n8n: desligado por padrão (teste nenhum dispara varredura sozinho).
+  // true liga com 30 s / 10 min; um objeto { atrasoInicialMs, intervaloMs } troca os tempos.
+  reenvio = false,
   metaPixelId = DEFAULT_META_PIXEL_ID,
   fetchImpl = globalThis.fetch,
   resolveEmailDomain = createDnsEmailDomainResolver(),
@@ -1744,7 +1919,7 @@ export function createServerApp({
     ["/api/painel/exportar.csv", handleExportarCsv]
   ]);
 
-  return createServer(async (request, response) => {
+  const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url, "http://localhost");
 
@@ -1785,6 +1960,17 @@ export function createServerApp({
       else response.destroy();
     }
   });
+
+  // Sem webhook ou sem banco, não há o que reenviar: a varredura nem existe.
+  if (reenvio && options.webhookUrl && supabaseEnabled(options)) {
+    const varredura = criarReenvio(options, reenvio === true ? {} : reenvio);
+    server.reenvio = varredura;
+    server.on("listening", () => varredura.iniciar());
+    server.on("close", () => varredura.parar());
+  } else {
+    server.reenvio = null;
+  }
+  return server;
 }
 
 /**
@@ -1835,7 +2021,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const webhookEnv = String(env.PESQUISA_WEBHOOK_URL || "").trim();
   const webhookUrl = webhookEnv.toLowerCase() === "off" ? "" : webhookEnv || DEFAULT_WEBHOOK_URL;
   if (!webhookUrl) console.warn("Aviso: PESQUISA_WEBHOOK_URL=off — nenhuma pesquisa concluída será enviada ao n8n.");
-  if (!normalizarSiteUrl(env.SITE_URL)) console.warn("Aviso: SITE_URL ausente — a pesquisa sai sem og:url/canonical e com a imagem da prévia em caminho relativo.");
+  if (!normalizarSiteUrl(env.SITE_URL)) console.warn("Aviso: SITE_URL ausente — og:url, canonical e a imagem da prévia usam o endereço de cada requisição (Host/X-Forwarded-Host).");
   if (!normalizarPixelId(metaPixelId)) console.warn("Aviso: Meta Pixel desligado (META_PIXEL_ID = off ou inválido).");
 
   const server = createServerApp({
@@ -1846,7 +2032,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     painelSessaoSegredo: env.PAINEL_SESSAO_SEGREDO || "",
     webhookUrl,
     siteUrl: env.SITE_URL || "",
-    metaPixelId
+    metaPixelId,
+    reenvio: true
   });
 
   server.listen(port, "0.0.0.0", () => {
@@ -1855,6 +2042,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
   // O Railway manda SIGTERM no deploy: termina o que está em voo em vez de cortar uma gravação.
   process.on("SIGTERM", () => {
+    server.reenvio?.parar();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 10_000).unref();
   });

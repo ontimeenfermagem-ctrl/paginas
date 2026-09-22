@@ -198,6 +198,13 @@ a {
   flex-direction: column;
 }
 
+/* Pergunta recém-montada: as opções não recebem toque por 500 ms (ver TRAVA_TOQUE_MS). O teclado
+   continua funcionando; só o segundo toque de um toque duplo é que se perde. */
+.tela-travada .opcao,
+.tela-travada .escala-numero {
+  pointer-events: none;
+}
+
 .entra-frente {
   animation: entra-frente 250ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
@@ -274,12 +281,16 @@ a {
 .botao-principal:hover svg {
   transform: translateX(3px);
 }
+/* "Ainda falta responder": visivelmente mais fraco, mas com o rótulo legível (contraste > 7:1),
+   porque o botão continua tocável para explicar o que falta. */
 .botao-principal.apagado {
-  opacity: 0.45;
+  background: var(--parchment-deep);
+  color: var(--ember-deep);
+  border: 1.5px dashed color-mix(in oklab, var(--ember) 55%, transparent);
   box-shadow: none;
 }
 .botao-principal.apagado:hover {
-  background: var(--ember);
+  background: var(--parchment-deep);
 }
 
 .botao-secundario {
@@ -1354,7 +1365,7 @@ a {
     padding: 10px;
   }
   .escala {
-    gap: 6px;
+    gap: 4px;
   }
   .rodape .botao-secundario {
     min-width: 92px;
@@ -1362,15 +1373,65 @@ a {
   }
 }
 
-/* Telas baixas (celular pequeno deitado ou 568px de altura): foto menor. */
-@media (max-height: 640px) and (max-width: 767px) {
+/* Celular: o botão "Começar" vem logo depois do texto e os selos descem para baixo dele — quem
+   chega do anúncio precisa ver o que tocar sem rolar. */
+@media (max-width: 767px) {
+  .selos {
+    order: 1;
+    margin-top: 24px;
+  }
+  .bv-acoes {
+    margin-top: 22px;
+  }
+}
+
+/* Celulares de altura comum (568 a 760px de área visível, menos ainda dentro do Instagram):
+   logo, foto e espaços menores para o botão caber na primeira tela. */
+@media (max-height: 760px) and (max-width: 767px) {
+  .bv-logo {
+    width: 104px;
+  }
   .bv-foto {
-    width: 112px;
-    height: 112px;
-    margin-top: 18px;
+    width: 100px;
+    height: 100px;
+    padding: 4px;
+    margin-top: 16px;
+  }
+  .bv-selo-nome {
+    bottom: -10px;
+    padding: 4px 12px;
+    font-size: 11.5px;
   }
   .eyebrow {
-    margin-top: 28px;
+    margin-top: 24px;
+    font-size: 12px;
+  }
+  .bv-titulo {
+    margin-top: 8px;
+    font-size: clamp(25px, 6.8vw, 32px);
+  }
+  .bv-texto {
+    margin-top: 10px;
+    font-size: 16px;
+    line-height: 1.5;
+  }
+  .bv-acoes {
+    margin-top: 18px;
+  }
+}
+
+/* Telas bem baixas (iPhone SE, celular deitado): ainda menos. */
+@media (max-height: 640px) and (max-width: 767px) {
+  .bv-logo {
+    width: 88px;
+  }
+  .bv-foto {
+    width: 80px;
+    height: 80px;
+    margin-top: 12px;
+  }
+  .eyebrow {
+    margin-top: 20px;
   }
 }
 

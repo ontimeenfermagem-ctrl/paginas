@@ -429,6 +429,35 @@ caso("validação local do contato e máscara", async (page, reg) => {
   assert.equal(reg.salvar.length, 0);
 });
 
+caso("WhatsApp colado no formato do próprio WhatsApp (+55 11 9xxxx-xxxx) não é cortado", async (page) => {
+  await page.goto(base + URLQ);
+  await page.click("#botao-comecar");
+  for (const colado of ["+55 11 91234-5678", "+55 (11) 91234-5678", "(11) 9 1234-5678"]) {
+    await page.fill("#campo-whatsapp", "");
+    await page.locator("#campo-whatsapp").focus();
+    await page.keyboard.insertText(colado); // respeita o maxlength, como uma colagem de verdade
+    assert.equal(await page.inputValue("#campo-whatsapp"), "(11) 91234-5678", colado);
+  }
+});
+
+caso("toque duplo na única não responde a pergunta seguinte sem a pessoa ver", async (page, reg) => {
+  await comecar(page);
+  assert.equal((await perguntaAtual(page)).id, "perfil");
+  await esperar(700); // a pessoa lê a pergunta antes do primeiro toque
+  const alvo = await page.locator(".opcao").nth(1).boundingBox();
+  const x = alvo.x + alvo.width / 2;
+  const y = alvo.y + alvo.height / 2;
+  await page.touchscreen.tap(x, y);
+  await esperar(400); // o avanço automático sai em 300 ms; o segundo toque cai na tela nova
+  await page.touchscreen.tap(x, y);
+  await esperarTrocar(page, "perfil");
+  await esperar(700);
+  const r = await lerRascunho(page);
+  const seguinte = (await perguntaAtual(page)).id;
+  assert.equal(r.respostas[seguinte], undefined, `a pergunta "${seguinte}" ficou sem resposta`);
+  assert.equal(Object.keys(r.respostas).length, 1, JSON.stringify(r.respostas));
+});
+
 caso("sugestão de e-mail gmial.com", async (page, reg) => {
   await page.goto(base + URLQ);
   await page.click("#botao-comecar");
@@ -689,12 +718,13 @@ caso("sem localStorage: funciona e não quebra", async (page, reg) => {
   assert.match(reg.salvar[0].visitante_id, /^[0-9a-f-]{36}$/);
 });
 
-caso("UTM de primeiro toque: nova UTM só preenche o que faltava", async (page, reg) => {
+caso("UTM de primeiro toque: a campanha da primeira visita fica inteira (sem misturar com a nova)", async (page, reg) => {
   await page.goto(base + "/pesquisa-icp?utm_source=instagram");
-  await page.goto(base + "/pesquisa-icp?utm_source=whatsapp&utm_campaign=nova");
+  await page.goto(base + "/pesquisa-icp?utm_source=whatsapp&utm_campaign=nova&fbclid=FBX");
   const r = await lerRascunho(page);
   assert.equal(r.rastreio.utm_source, "instagram");
-  assert.equal(r.rastreio.utm_campaign, "nova");
+  assert.equal(r.rastreio.utm_campaign, null);
+  assert.equal(r.rastreio.fbclid, null);
   assert.equal(reg.evento.length, 2);
   assert.ok(reg.evento.every((e) => e.evento === "visita" && e.visitante_id === reg.evento[0].visitante_id));
 });

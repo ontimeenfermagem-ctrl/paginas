@@ -130,6 +130,25 @@
     return toText(value).trim().replace(/\s+/g, " ");
   }
 
+  // Partículas que ficam minúsculas no meio do nome ("Maria da Silva", "Ana de Souza e Lima").
+  const NAME_PARTICLES = new Set(["da", "das", "de", "di", "do", "dos", "du", "e"]);
+
+  /**
+   * Nome como vai para o banco, o painel, o CSV e o n8n: "MARIA DA SILVA" e "maria da silva" viram
+   * "Maria da Silva". Cada parte separada por hífen ou apóstrofo ganha maiúscula ("Ana-Clara",
+   * "D'Ávila"). Só formata: quem valida continua sendo nameError, sobre o texto digitado.
+   */
+  function formatName(value) {
+    return normalizeName(value)
+      .split(" ")
+      .map((word, index) => {
+        const lower = word.toLocaleLowerCase("pt-BR");
+        if (index > 0 && NAME_PARTICLES.has(lower)) return lower;
+        return lower.replace(/(^|[-'’])(\p{L})/gu, (_, sep, letter) => sep + letter.toLocaleUpperCase("pt-BR"));
+      })
+      .join(" ");
+  }
+
   function nameError(value) {
     const name = normalizeName(value);
     if (!name) return "empty";
@@ -287,6 +306,7 @@
     editDistance,
     emailDomain,
     emailError,
+    formatName,
     formatPhone,
     formatPhoneWhileTyping,
     message,

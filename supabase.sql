@@ -369,13 +369,16 @@ begin
     comecou_em = coalesce(v.comecou_em, excluded.comecou_em),
     page_url = coalesce(v.page_url, excluded.page_url),
     referrer = coalesce(v.referrer, excluded.referrer),
-    utm_source = coalesce(v.utm_source, excluded.utm_source),
-    utm_medium = coalesce(v.utm_medium, excluded.utm_medium),
-    utm_campaign = coalesce(v.utm_campaign, excluded.utm_campaign),
-    utm_content = coalesce(v.utm_content, excluded.utm_content),
-    utm_term = coalesce(v.utm_term, excluded.utm_term),
-    fbclid = coalesce(v.fbclid, excluded.fbclid),
-    gclid = coalesce(v.gclid, excluded.gclid),
+    -- Campanha (utm_* + fbclid + gclid) é UM bloco de primeiro toque: se a primeira visita tinha
+    -- qualquer um deles, fica o bloco dela inteiro; senão entra o bloco da visita nova. Campo a
+    -- campo misturaria visitas diferentes numa atribuição que não existiu.
+    utm_source = case when (v.utm_source, v.utm_medium, v.utm_campaign, v.utm_content, v.utm_term, v.fbclid, v.gclid) is null then excluded.utm_source else v.utm_source end,
+    utm_medium = case when (v.utm_source, v.utm_medium, v.utm_campaign, v.utm_content, v.utm_term, v.fbclid, v.gclid) is null then excluded.utm_medium else v.utm_medium end,
+    utm_campaign = case when (v.utm_source, v.utm_medium, v.utm_campaign, v.utm_content, v.utm_term, v.fbclid, v.gclid) is null then excluded.utm_campaign else v.utm_campaign end,
+    utm_content = case when (v.utm_source, v.utm_medium, v.utm_campaign, v.utm_content, v.utm_term, v.fbclid, v.gclid) is null then excluded.utm_content else v.utm_content end,
+    utm_term = case when (v.utm_source, v.utm_medium, v.utm_campaign, v.utm_content, v.utm_term, v.fbclid, v.gclid) is null then excluded.utm_term else v.utm_term end,
+    fbclid = case when (v.utm_source, v.utm_medium, v.utm_campaign, v.utm_content, v.utm_term, v.fbclid, v.gclid) is null then excluded.fbclid else v.fbclid end,
+    gclid = case when (v.utm_source, v.utm_medium, v.utm_campaign, v.utm_content, v.utm_term, v.fbclid, v.gclid) is null then excluded.gclid else v.gclid end,
     dispositivo = coalesce(v.dispositivo, excluded.dispositivo);
 end;
 $$;
@@ -532,13 +535,14 @@ begin
     end,
     page_url = coalesce(r.page_url, nullif(btrim(p ->> 'page_url'), '')),
     referrer = coalesce(r.referrer, nullif(btrim(p ->> 'referrer'), '')),
-    utm_source = coalesce(r.utm_source, nullif(btrim(p ->> 'utm_source'), '')),
-    utm_medium = coalesce(r.utm_medium, nullif(btrim(p ->> 'utm_medium'), '')),
-    utm_campaign = coalesce(r.utm_campaign, nullif(btrim(p ->> 'utm_campaign'), '')),
-    utm_content = coalesce(r.utm_content, nullif(btrim(p ->> 'utm_content'), '')),
-    utm_term = coalesce(r.utm_term, nullif(btrim(p ->> 'utm_term'), '')),
-    fbclid = coalesce(r.fbclid, nullif(btrim(p ->> 'fbclid'), '')),
-    gclid = coalesce(r.gclid, nullif(btrim(p ->> 'gclid'), '')),
+    -- Campanha como UM bloco de primeiro toque (ver pesquisa_registrar_evento).
+    utm_source = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then nullif(btrim(p ->> 'utm_source'), '') else r.utm_source end,
+    utm_medium = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then nullif(btrim(p ->> 'utm_medium'), '') else r.utm_medium end,
+    utm_campaign = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then nullif(btrim(p ->> 'utm_campaign'), '') else r.utm_campaign end,
+    utm_content = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then nullif(btrim(p ->> 'utm_content'), '') else r.utm_content end,
+    utm_term = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then nullif(btrim(p ->> 'utm_term'), '') else r.utm_term end,
+    fbclid = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then nullif(btrim(p ->> 'fbclid'), '') else r.fbclid end,
+    gclid = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then nullif(btrim(p ->> 'gclid'), '') else r.gclid end,
     dispositivo = coalesce(r.dispositivo, nullif(btrim(p ->> 'dispositivo'), ''))
   where r.id = v_id
     and r.seq < v_seq

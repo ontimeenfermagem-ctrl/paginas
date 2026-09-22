@@ -753,6 +753,46 @@
         })
         .join("")
     );
+    mostrarAbaAtiva(container);
+  }
+
+  /** Faixa rolável (celular): traz a aba escolhida para dentro da faixa, sem rolar a página. */
+  function mostrarAbaAtiva(container) {
+    const ativa = container.querySelector('[aria-selected="true"]');
+    if (ativa && container.scrollWidth > container.clientWidth) {
+      const caixa = container.getBoundingClientRect();
+      const r = ativa.getBoundingClientRect();
+      const esquerda = r.left - caixa.left + container.scrollLeft;
+      const direita = esquerda + r.width;
+      if (esquerda < container.scrollLeft) container.scrollLeft = Math.max(0, esquerda - 24);
+      else if (direita > container.scrollLeft + container.clientWidth) container.scrollLeft = direita - container.clientWidth + 24;
+    }
+    sinalizarRolagem(container);
+  }
+
+  /**
+   * Faixas que rolam de lado (perfis, período, abas, menu de seções): esmaecem a borda do lado
+   * em que ainda há conteúdo, para ninguém achar que as opções acabaram ali.
+   */
+  function sinalizarRolagem(faixa) {
+    const resto = faixa.scrollWidth - faixa.clientWidth - faixa.scrollLeft;
+    faixa.classList.toggle("rola-dir", resto > 2);
+    faixa.classList.toggle("rola-esq", faixa.scrollLeft > 2);
+  }
+
+  function ligarFaixasRolaveis() {
+    const faixas = () => $$(".perfis, .segmentado, .abas, .atalhos");
+    for (const faixa of faixas()) faixa.addEventListener("scroll", () => sinalizarRolagem(faixa), { passive: true });
+    const todas = () => faixas().forEach(sinalizarRolagem);
+    window.addEventListener("resize", todas, { passive: true });
+    // Também quando a faixa aparece (o painel começa escondido atrás do login) ou muda de tamanho.
+    if (typeof ResizeObserver === "function") {
+      const observador = new ResizeObserver((entradas) => entradas.forEach((e) => (e.target.matches(".perfis") ? mostrarAbaAtiva(e.target) : sinalizarRolagem(e.target))));
+      faixas().forEach((faixa) => observador.observe(faixa));
+    }
+    todas();
+    // Fontes da web chegam depois e mudam as larguras.
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(todas).catch(() => {});
   }
 
   /* ------------------------------------------------------------ Placar */
@@ -1658,18 +1698,18 @@
         <th scope="col" class="n">Visitantes</th>
         <th scope="col" class="n">Identificados</th>
         <th scope="col" class="n">Concluídas</th>
-        <th scope="col" class="n">Identificados ÷ visitantes</th>
-        <th scope="col" class="n">Concluídas ÷ identificados</th>
+        <th scope="col" class="n col-taxa">Identificados ÷ visitantes</th>
+        <th scope="col" class="n col-taxa">Concluídas ÷ identificados</th>
       </tr></thead>
       <tbody>${linhas
         .map(
           (linha) => `<tr>
           <th scope="row">${escapeHtml(nome(linha.valor))}</th>
           <td class="n">${n(linha.visitantes)}</td>
-          <td class="n">${n(linha.pessoas)}</td>
-          <td class="n">${n(linha.concluidas)}</td>
-          <td class="n">${comPerfil ? "—" : taxaHtml(linha.pessoas, linha.visitantes)}</td>
-          <td class="n">${taxaHtml(linha.concluidas, linha.pessoas)}</td>
+          <td class="n">${n(linha.pessoas)}${comPerfil || !linha.visitantes ? "" : `<span class="taxa-curta"> · ${pct(linha.pessoas, linha.visitantes)}</span>`}</td>
+          <td class="n">${n(linha.concluidas)}${linha.pessoas ? `<span class="taxa-curta"> · ${pct(linha.concluidas, linha.pessoas)}</span>` : ""}</td>
+          <td class="n col-taxa">${comPerfil ? "—" : taxaHtml(linha.pessoas, linha.visitantes)}</td>
+          <td class="n col-taxa">${taxaHtml(linha.concluidas, linha.pessoas)}</td>
         </tr>`
         )
         .join("")}</tbody>
@@ -2107,7 +2147,7 @@
     if (item.status === "concluida") return '<span class="selo ok"><svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>Respondeu tudo</span>';
     const pergunta = EV.perguntaPorId(item.pergunta_max) || EV.perguntaPorId(item.pergunta_atual);
     const onde = pergunta ? `Parou na pergunta ${pergunta.numero}` : "Em andamento";
-    return `<span class="selo meio" title="${escapeHtml(pergunta ? pergunta.analise : "")}">${escapeHtml(`${onde} · ${num(item.progresso_percentual)}%`)}</span>`;
+    return `<span class="selo meio" title="${escapeHtml(pergunta ? pergunta.analise : "")}">${escapeHtml(`${onde} · ${num(item.progresso_percentual)}% respondido`)}</span>`;
   }
 
   function pessoaHtml(item) {
@@ -2456,6 +2496,7 @@
   lerUrl();
   pintarFiltros();
   atualizarCsv();
+  ligarFaixasRolaveis();
 
   (async () => {
     const { ok, body, status } = await api("/api/painel/sessao");

@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, afterEach, before, test } from "node:test";
 import { gunzipSync, brotliDecompressSync } from "node:zlib";
-import { createServerApp, respostasLegiveis, calcularPosicao } from "../server.mjs";
+import { createServerApp, respostasLegiveis, calcularPosicao, montarPayloadWebhook, origemDaRequisicao } from "../server.mjs";
 
 const SUPABASE_URL = "https://projeto-de-teste.supabase.co";
 const SUPABASE_KEY = "chave-service-role-de-teste";
@@ -257,25 +257,89 @@ test("/pesquisa (endereço antigo) é 301 para /pesquisa-icp com a query", async
   assert.equal(semQuery.headers.get("location"), "/pesquisa-icp");
 });
 
-test("SITE_URL: og:url, canonical e imagem absoluta só quando configurado", async () => {
-  const html = '<!doctype html><html><head><meta property="og:image" content="/img/og-pesquisa.jpg" /><meta name="twitter:image" content="/img/og-pesquisa.jpg" /></head><body></body></html>';
+const HTML_OG = '<!doctype html><html><head><meta property="og:image" content="/img/og-pesquisa.jpg" /><meta name="twitter:image" content="/img/og-pesquisa.jpg" /></head><body></body></html>';
+
+async function pastaOg() {
   const pasta = await mkdtemp(path.join(tmpdir(), "ev-pesquisa-site-"));
-  await writeFile(path.join(pasta, "pesquisa.html"), html);
+  await writeFile(path.join(pasta, "pesquisa.html"), HTML_OG);
+  return pasta;
+}
 
-  const sem = await listen(createServerApp({ rootDirectory: pasta, metaPixelId: "off" }));
-  assert.equal(await (await fetch(`${sem}/pesquisa-icp`)).text(), html);
+async function textoCom(appUrl, headers) {
+  return (await rawGet(appUrl, "/pesquisa-icp", headers)).body.toString("utf8");
+}
 
+function assertOrigem(texto, origem) {
+  const e = origem.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+  assert.match(texto, new RegExp(`<meta property="og:image" content="${e}\\/img\\/og-pesquisa\\.jpg" \\/>`));
+  assert.match(texto, new RegExp(`<meta name="twitter:image" content="${e}\\/img\\/og-pesquisa\\.jpg" \\/>`));
+  assert.match(texto, new RegExp(`<meta property="og:url" content="${e}\\/pesquisa-icp" \\/>`));
+  assert.match(texto, new RegExp(`<link rel="canonical" href="${e}\\/pesquisa-icp" \\/>`));
+}
+
+test("SITE_URL: og:url, canonical e imagem absoluta; SITE_URL manda mesmo com Host/X-Forwarded-Host", async () => {
+  const pasta = await pastaOg();
   const com = await listen(createServerApp({ rootDirectory: pasta, metaPixelId: "off", siteUrl: "https://pesquisa.exemplo.com.br/" }));
-  const texto = await (await fetch(`${com}/pesquisa-icp`)).text();
-  assert.match(texto, /<meta property="og:image" content="https:\/\/pesquisa\.exemplo\.com\.br\/img\/og-pesquisa\.jpg" \/>/);
-  assert.match(texto, /<meta name="twitter:image" content="https:\/\/pesquisa\.exemplo\.com\.br\/img\/og-pesquisa\.jpg" \/>/);
-  assert.match(texto, /<meta property="og:url" content="https:\/\/pesquisa\.exemplo\.com\.br\/pesquisa-icp" \/>/);
-  assert.match(texto, /<link rel="canonical" href="https:\/\/pesquisa\.exemplo\.com\.br\/pesquisa-icp" \/>/);
+  assertOrigem(await (await fetch(`${com}/pesquisa-icp`)).text(), "https://pesquisa.exemplo.com.br");
+  const forjado = await textoCom(com, { Host: "outro.site.com", "X-Forwarded-Host": "mais-um.com", "X-Forwarded-Proto": "http" });
+  assertOrigem(forjado, "https://pesquisa.exemplo.com.br");
+  assert.ok(!/outro\.site|mais-um/.test(forjado));
 
-  // Valor que não é endereço http(s) não entra na página.
+  // Valor que não é endereço http(s) não entra na página: cai na origem da requisição.
   const ruim = await listen(createServerApp({ rootDirectory: pasta, metaPixelId: "off", siteUrl: 'javascript:alert(1)"' }));
-  assert.equal(await (await fetch(`${ruim}/pesquisa-icp`)).text(), html);
+  const texto = await textoCom(ruim, { Host: "pesquisa.valida.com.br" });
+  assert.ok(!texto.includes("javascript"));
+  assertOrigem(texto, "https://pesquisa.valida.com.br");
 });
+
+test("sem SITE_URL: origem vem do Host (http para localhost/127.0.0.1, https para o resto)", async () => {
+  const appUrl = await listen(createServerApp({ rootDirectory: await pastaOg(), metaPixelId: "off" }));
+  const { port } = new URL(appUrl);
+  assertOrigem(await (await fetch(`${appUrl}/pesquisa-icp`)).text(), `http://127.0.0.1:${port}`);
+  assertOrigem(await textoCom(appUrl, { Host: "localhost:3000" }), "http://localhost:3000");
+  assertOrigem(await textoCom(appUrl, { Host: "Pesquisa.Exemplo.com.br" }), "https://pesquisa.exemplo.com.br");
+  // Proxy (Railway): X-Forwarded-Host (primeiro valor) e X-Forwarded-Proto.
+  assertOrigem(await textoCom(appUrl, { Host: "interno:8080", "X-Forwarded-Host": "pesquisa.ev.com.br, proxy.interno", "X-Forwarded-Proto": "https" }), "https://pesquisa.ev.com.br");
+  assertOrigem(await textoCom(appUrl, { Host: "pesquisa.ev.com.br", "X-Forwarded-Proto": "http,https" }), "http://pesquisa.ev.com.br");
+  // Proto que não é exatamente http/https é ignorado.
+  assertOrigem(await textoCom(appUrl, { Host: "pesquisa.ev.com.br", "X-Forwarded-Proto": "javascript" }), "https://pesquisa.ev.com.br");
+});
+
+test("sem SITE_URL: Host malicioso não entra na página (sem og:url/canonical, imagem relativa)", async () => {
+  const appUrl = await listen(createServerApp({ rootDirectory: await pastaOg(), metaPixelId: "off" }));
+  const maliciosos = ['evil.com"><script>alert(1)</script>', "evil.com<x", "evil .com", "user@evil.com", "evil.com/caminho", "evil.com'x", "evil.com:porta"];
+  for (const host of maliciosos) {
+    assert.equal(origemDaRequisicao({ host }), "", host);
+    assert.equal(origemDaRequisicao({ host: "ok.com", "x-forwarded-host": host }), "", `xfh ${host}`);
+    const texto = await textoCom(appUrl, { Host: "boa.com.br", "X-Forwarded-Host": host });
+    assert.equal(texto, HTML_OG, host);
+  }
+});
+
+test("sem SITE_URL: dois Hosts seguidos não se misturam no cache (Host forjado não envenena ninguém)", async () => {
+  const appUrl = await listen(createServerApp({ rootDirectory: await pastaOg(), metaPixelId: "off" }));
+  for (const encoding of ["identity", "gzip", "br"]) {
+    const ler = async (host) => {
+      const r = await rawGet(appUrl, "/pesquisa-icp", { Host: host, "Accept-Encoding": encoding });
+      if (encoding === "gzip") return gunzipSync(r.body).toString("utf8");
+      if (encoding === "br") return brotliDecompressSync(r.body).toString("utf8");
+      return r.body.toString("utf8");
+    };
+    assertOrigem(await ler("atacante.com"), "https://atacante.com");
+    const legitimo = await ler("pesquisa.ev.com.br");
+    assertOrigem(legitimo, "https://pesquisa.ev.com.br");
+    assert.ok(!legitimo.includes("atacante"), encoding);
+    assertOrigem(await ler("atacante.com"), "https://atacante.com");
+  }
+  // Mil Hosts diferentes não fazem o cache crescer sem limite: a página certa continua saindo.
+  for (let i = 0; i < 250; i += 1) await ler250(appUrl, `h${i}.com`);
+  assertOrigem(await textoCom(appUrl, { Host: "pesquisa.ev.com.br" }), "https://pesquisa.ev.com.br");
+});
+
+async function ler250(appUrl, host) {
+  const r = await rawGet(appUrl, "/pesquisa-icp", { Host: host, "Accept-Encoding": "identity" });
+  assert.ok(r.body.toString("utf8").includes(`https://${host}/pesquisa-icp`));
+}
 
 test("/pesquisa-icp e /pesquisa-icp/ servem a pesquisa com Pixel, CSP e cabeçalhos de segurança", async () => {
   const appUrl = await listen(createServerApp({ rootDirectory: root }));
@@ -311,7 +375,9 @@ test("META_PIXEL_ID: outro id é respeitado, 'off' e valor estranho desligam", a
     const appUrl = await listen(createServerApp({ rootDirectory: root, metaPixelId }));
     const html = await (await fetch(`${appUrl}/pesquisa-icp`)).text();
     assert.doesNotMatch(html, /fbq|facebook/, JSON.stringify(metaPixelId));
-    assert.equal(html, HTML_PESQUISA);
+    // Sem SITE_URL entram og:url/canonical da origem da requisição; fora isso, o arquivo intacto.
+    const origem = `${appUrl}/pesquisa-icp`;
+    assert.equal(html, HTML_PESQUISA.replace("</head>", `<meta property="og:url" content="${origem}" />\n<link rel="canonical" href="${origem}" />\n</head>`));
   }
 });
 
@@ -598,12 +664,12 @@ test("evento: falha do banco → 502 sem vazar detalhe", async () => {
   assert.equal(falha.status, 502);
 });
 
-test("evento: rate limit de 60/min por IP, pelo último X-Forwarded-For", async () => {
+test("evento: rate limit de 240/min por IP, pelo último X-Forwarded-For", async () => {
   const { server } = app();
   const appUrl = await listen(server);
   const corpo = { visitante_id: VISITANTE, evento: "visita" };
 
-  for (let i = 0; i < 60; i += 1) {
+  for (let i = 0; i < 240; i += 1) {
     // O primeiro item do XFF é escrito pelo cliente: trocá-lo a cada vez não burla o limite.
     const response = await postJson(appUrl, "/api/pesquisa/evento", corpo, { "X-Forwarded-For": `10.0.0.${i}, 200.1.1.1` });
     assert.equal(response.status, 200, `requisição ${i + 1}`);
@@ -623,7 +689,7 @@ test("evento: a janela do rate limit anda com o relógio injetado", async () => 
   const appUrl = await listen(server);
   const corpo = { visitante_id: VISITANTE, evento: "visita" };
 
-  for (let i = 0; i < 60; i += 1) await postJson(appUrl, "/api/pesquisa/evento", corpo);
+  for (let i = 0; i < 240; i += 1) await postJson(appUrl, "/api/pesquisa/evento", corpo);
   assert.equal((await postJson(appUrl, "/api/pesquisa/evento", corpo)).status, 429);
   agora += 61_000;
   assert.equal((await postJson(appUrl, "/api/pesquisa/evento", corpo)).status, 200);
@@ -976,7 +1042,7 @@ test("salvar: banco fora ou resposta estranha → 502", async () => {
   }
 });
 
-test("salvar: 415, 413 e rate limit de 120/min", async () => {
+test("salvar: 415, 413 e rate limit de 600/min", async () => {
   const { server } = app();
   const appUrl = await listen(server);
 
@@ -987,7 +1053,7 @@ test("salvar: 415, 413 e rate limit de 120/min", async () => {
   assert.equal(grande.status, 413);
 
   // As duas acima já contaram? A de 415 não (recusada antes do limite); a de 413 sim.
-  for (let i = 0; i < 119; i += 1) {
+  for (let i = 0; i < 599; i += 1) {
     const response = await postJson(appUrl, "/api/pesquisa/salvar", corpoSalvar());
     assert.equal(response.status, 200, `requisição ${i + 2}`);
   }
@@ -1240,4 +1306,185 @@ test("webhook: linha ausente na resposta do banco cai nos dados da requisição"
   assert.equal(corpo.utm.utm_source, "instagram");
   assert.equal(corpo.concluida_em, "2026-09-21T15:27:00.000Z");
   assert.equal(corpo.iniciada_em, null);
+});
+
+/* ================================================================== reenvio automático ao n8n */
+
+/**
+ * Banco falso para a varredura: GET em pesquisa_respostas devolve `pendentes`; PATCH responde
+ * 204; o webhook decide por `webhook`. Toda chamada fica em `chamadas`.
+ */
+function backendReenvio({ pendentes = [], webhook } = {}) {
+  const chamadas = [];
+  const fetchImpl = async (url, init = {}) => {
+    const endereco = String(url);
+    const chamada = { url: endereco, method: init.method || "GET", headers: init.headers || {}, body: init.body ? JSON.parse(init.body) : undefined };
+    chamadas.push(chamada);
+    if (endereco.startsWith(WEBHOOK_URL)) return webhook ? await webhook(chamada) : jsonResponse({ ok: true });
+    if (chamada.method === "PATCH") return new Response(null, { status: 204 });
+    if (endereco.includes("/rest/v1/pesquisa_respostas?")) return jsonResponse(typeof pendentes === "function" ? await pendentes(chamada) : pendentes);
+    return jsonResponse({ message: "rota inesperada no teste" }, 404);
+  };
+  return { chamadas, fetchImpl };
+}
+
+test("reenvio: busca só as pendentes (filtros PostgREST), manda o MESMO payload do envio normal e marca só no 2xx", async () => {
+  const agora = Date.parse("2026-09-21T16:00:00Z");
+  const outra = linhaFinalizada({ id: "2c8b4e1a-7d3f-4a5b-9c6d-0e1f2a3b4c5d", nome: "Ana Souza", whatsapp_digits: "21998765432" });
+  let entregas = 0;
+  const backend = backendReenvio({
+    pendentes: [linhaFinalizada(), outra],
+    webhook: (chamada) => {
+      entregas += 1;
+      return chamada.body.sessao_id === SESSAO ? jsonResponse({ ok: true }) : jsonResponse({}, 502);
+    }
+  });
+  const server = createServerApp({ rootDirectory: root, supabaseUrl: SUPABASE_URL, supabaseKey: SUPABASE_KEY, webhookUrl: WEBHOOK_URL, fetchImpl: backend.fetchImpl, now: () => agora, reenvio: { atrasoInicialMs: 60_000, intervaloMs: 60_000 } });
+  servers.push(server);
+  assert.ok(server.reenvio);
+
+  const resultado = await server.reenvio.executar();
+  assert.deepEqual(resultado, { pendentes: 2, entregues: 1 });
+
+  const [busca] = backend.chamadas;
+  assert.equal(busca.method, "GET");
+  const u = new URL(busca.url);
+  assert.equal(u.pathname, "/rest/v1/pesquisa_respostas");
+  assert.equal(busca.headers.apikey, SUPABASE_KEY);
+  assert.equal(u.searchParams.get("select"), "*");
+  assert.equal(u.searchParams.get("pesquisa"), "eq.icp-escola-ev");
+  assert.equal(u.searchParams.get("webhook_enviado_em"), "is.null");
+  assert.equal(
+    u.searchParams.get("or"),
+    "(and(finalizado_em.gte.2026-09-14T16:00:00.000Z,finalizado_em.lte.2026-09-21T15:58:00.000Z)," +
+      "and(finalizado_em.is.null,status.eq.concluida,concluido_em.gte.2026-09-14T16:00:00.000Z,atualizado_em.lte.2026-09-21T15:30:00.000Z))"
+  );
+  assert.equal(u.searchParams.get("order"), "criado_em.asc");
+  assert.equal(u.searchParams.get("limit"), "25");
+
+  assert.equal(entregas, 2);
+  const avisos = backend.chamadas.filter((c) => c.url === WEBHOOK_URL);
+  // Idêntico ao que o envio normal monta a partir da mesma linha.
+  const esperado = montarPayloadWebhook({ linha: linhaFinalizada(), id: SESSAO, contato: {}, respostas: {}, rastreio: {}, agora });
+  assert.deepEqual(avisos[0].body, esperado);
+  assert.equal(avisos[0].body.evento, "pesquisa_concluida");
+  assert.equal(avisos[0].body.lead.whatsapp_internacional, "5511912345678");
+  assert.equal(avisos[0].body.perguntas.length, 33);
+  assert.equal(avisos[0].headers.apikey, undefined);
+
+  const marcas = backend.chamadas.filter((c) => c.method === "PATCH");
+  assert.equal(marcas.length, 1, "PATCH só para a que o n8n confirmou");
+  assert.equal(marcas[0].url, `${SUPABASE_URL}/rest/v1/pesquisa_respostas?id=eq.${SESSAO}`);
+  assert.deepEqual(marcas[0].body, { webhook_enviado_em: "2026-09-21T16:00:00.000Z" });
+});
+
+test("reenvio: payload igual ao do envio imediato (mesma linha, mesmo relógio)", async () => {
+  const agora = Date.parse("2026-09-21T15:27:00Z");
+  const imediato = createFakeBackend({ rpc: { pesquisa_salvar: respostaFinalizou() } });
+  const appUrl = await listen(app({ backend: imediato, webhookUrl: WEBHOOK_URL, now: () => agora }).server);
+  await postJson(appUrl, "/api/pesquisa/salvar", corpoSalvar({ respostas: respostasCompletasCuidador(), pergunta_atual: "fim" }));
+  await aguardar(() => avisosDe(imediato).length === 1);
+
+  const backend = backendReenvio({ pendentes: [linhaFinalizada()] });
+  const server = createServerApp({ rootDirectory: root, supabaseUrl: SUPABASE_URL, supabaseKey: SUPABASE_KEY, webhookUrl: WEBHOOK_URL, fetchImpl: backend.fetchImpl, now: () => agora, reenvio: true });
+  servers.push(server);
+  await server.reenvio.executar();
+  assert.deepEqual(backend.chamadas.find((c) => c.url === WEBHOOK_URL).body, avisosDe(imediato)[0].body);
+});
+
+test("reenvio: não sobrepõe execuções; falha na busca só loga", async () => {
+  let liberar;
+  let buscas = 0;
+  const backend = backendReenvio({
+    pendentes: () => {
+      buscas += 1;
+      return new Promise((resolve) => {
+        liberar = () => resolve([]);
+      });
+    }
+  });
+  const server = createServerApp({ rootDirectory: root, supabaseUrl: SUPABASE_URL, supabaseKey: SUPABASE_KEY, webhookUrl: WEBHOOK_URL, fetchImpl: backend.fetchImpl, reenvio: true });
+  servers.push(server);
+  const a = server.reenvio.executar();
+  const b = server.reenvio.executar();
+  assert.equal(a, b);
+  await aguardar(() => typeof liberar === "function");
+  liberar();
+  await a;
+  assert.equal(buscas, 1);
+
+  const falha = backendReenvio({ pendentes: () => { throw new Error("banco fora"); } });
+  const s2 = createServerApp({ rootDirectory: root, supabaseUrl: SUPABASE_URL, supabaseKey: SUPABASE_KEY, webhookUrl: WEBHOOK_URL, fetchImpl: falha.fetchImpl, reenvio: true });
+  servers.push(s2);
+  assert.deepEqual(await s2.reenvio.executar(), { pendentes: 0, entregues: 0 });
+});
+
+test("reenvio: timers — roda depois do atraso inicial e a cada intervalo; para ao fechar o servidor", async () => {
+  const backend = backendReenvio({ pendentes: [] });
+  const server = createServerApp({ rootDirectory: root, supabaseUrl: SUPABASE_URL, supabaseKey: SUPABASE_KEY, webhookUrl: WEBHOOK_URL, fetchImpl: backend.fetchImpl, reenvio: { atrasoInicialMs: 20, intervaloMs: 30 } });
+  await listen(server);
+  assert.equal(backend.chamadas.length, 0);
+  await aguardar(() => backend.chamadas.length >= 3);
+  await new Promise((resolve) => {
+    server.closeAllConnections?.();
+    server.close(resolve);
+  });
+  servers.splice(servers.indexOf(server), 1);
+  const depois = backend.chamadas.length;
+  await esperar(100);
+  assert.equal(backend.chamadas.length, depois, "nada roda depois do close");
+});
+
+test("reenvio: desligado por padrão, sem webhook ('off'/vazio) ou sem Supabase", async () => {
+  const backend = backendReenvio({ pendentes: [linhaFinalizada()] });
+  const base = { rootDirectory: root, supabaseUrl: SUPABASE_URL, supabaseKey: SUPABASE_KEY, webhookUrl: WEBHOOK_URL, fetchImpl: backend.fetchImpl };
+  const casos = [
+    { ...base },
+    { ...base, reenvio: { atrasoInicialMs: 1, intervaloMs: 5 }, webhookUrl: "off" },
+    { ...base, reenvio: { atrasoInicialMs: 1, intervaloMs: 5 }, webhookUrl: "" },
+    { ...base, reenvio: { atrasoInicialMs: 1, intervaloMs: 5 }, supabaseUrl: "" }
+  ];
+  for (const opcoes of casos) {
+    const server = createServerApp(opcoes);
+    assert.equal(server.reenvio, null);
+    await listen(server);
+  }
+  await esperar(60);
+  assert.equal(backend.chamadas.length, 0);
+  // O processo de verdade liga (reenvio: true) e para no SIGTERM.
+  const fonte = await import("node:fs/promises").then((fs) => fs.readFile(new URL("../server.mjs", import.meta.url), "utf8"));
+  assert.match(fonte, /metaPixelId,\n\s+reenvio: true\n\s+\}\);/);
+  assert.match(fonte, /process\.on\("SIGTERM", \(\) => \{\n\s+server\.reenvio\?\.parar\(\);/);
+});
+
+/* ======================= concluída sem chegar à tela de fim (achado D1) */
+
+test("webhook: se a varredura já mandou a tentativa (concluída e parada nas abertas), chegar ao fim depois não manda de novo", async () => {
+  const backend = createFakeBackend({
+    rpc: { pesquisa_salvar: respostaFinalizou({ linha: linhaFinalizada({ webhook_enviado_em: "2026-09-21T16:00:00+00:00" }) }) }
+  });
+  const { server } = app({ backend, webhookUrl: WEBHOOK_URL });
+  const appUrl = await listen(server);
+  const response = await postJson(appUrl, "/api/pesquisa/salvar", corpoSalvar({ seq: 40, respostas: respostasCompletasCuidador(), pergunta_atual: "fim" }));
+  assert.equal(response.status, 200);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(avisosDe(backend).length, 0);
+});
+
+test("reenvio: concluída que não chegou à tela de fim vai com concluida_em = concluido_em", async () => {
+  const agora = Date.parse("2026-09-21T16:00:00Z");
+  const backend = backendReenvio({ pendentes: [linhaFinalizada({ finalizado_em: null })] });
+  const server = createServerApp({ rootDirectory: root, supabaseUrl: SUPABASE_URL, supabaseKey: SUPABASE_KEY, webhookUrl: WEBHOOK_URL, fetchImpl: backend.fetchImpl, now: () => agora, reenvio: true });
+  servers.push(server);
+  assert.deepEqual(await server.reenvio.executar(), { pendentes: 1, entregues: 1 });
+  const [aviso] = backend.chamadas.filter((c) => c.url === WEBHOOK_URL);
+  assert.equal(aviso.body.concluida_em, "2026-09-21T15:26:40.000Z");
+  assert.equal(aviso.body.sessao_id, SESSAO);
+});
+
+test("contato: o nome é gravado com maiúsculas certas, seja como for digitado", async () => {
+  const { validarContato } = await import("../server.mjs");
+  const r = validarContato({ nome: "MARIA DA SILVA", whatsapp: "(11) 91234-5678", email: "Maria@Gmail.com" });
+  assert.equal(r.contato.nome, "Maria da Silva");
+  assert.equal(r.contato.email, "maria@gmail.com");
 });

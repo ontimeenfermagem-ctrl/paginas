@@ -1073,7 +1073,7 @@ test("g) painel com todo mundo: números exatos, quadros, cruzamento, abertas, t
 
   // Tráfego por origem: instagram (Joana), whatsapp (Carla), bio (visitante), (sem utm) o resto.
   const trafego = await page.$$eval("[data-trafego] tbody tr", (trs) =>
-    Object.fromEntries(trs.map((tr) => [tr.querySelector("th").textContent.trim(), Array.from(tr.querySelectorAll("td")).slice(0, 3).map((td) => td.textContent.trim())]))
+    Object.fromEntries(trs.map((tr) => [tr.querySelector("th").textContent.trim(), Array.from(tr.querySelectorAll("td")).slice(0, 3).map((td) => (td.firstChild?.textContent || "").trim())]))
   );
   assert.deepEqual(trafego.instagram, ["1", "1", "1"]);
   assert.deepEqual(trafego.whatsapp, ["1", "1", "1"]);
