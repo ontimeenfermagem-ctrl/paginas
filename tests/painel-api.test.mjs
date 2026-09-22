@@ -168,6 +168,7 @@ const ROTAS_DE_DADOS = [
   "/api/painel/respostas",
   "/api/painel/abertas?chaves=sonho",
   "/api/painel/cruzamento?linha=perfil&coluna=renda_atual",
+  "/api/painel/paginas",
   "/api/painel/exportar.csv"
 ];
 
@@ -473,7 +474,9 @@ test("filtros inválidos → 422 invalid_filters, sem ir ao banco", async () => 
     "/api/painel/cruzamento?linha=perfil&coluna=idade&desde=x",
     "/api/painel/exportar.csv?tentativas=algumas",
     "/api/painel/exportar.csv?status=x",
-    "/api/painel/exportar.csv?desde=x"
+    "/api/painel/exportar.csv?desde=x",
+    "/api/painel/paginas?desde=ontem",
+    "/api/painel/paginas?ate=2026-13-45"
   ]) {
     const response = await get(rota);
     assert.equal(response.status, 422, rota);
@@ -491,13 +494,55 @@ test("banco fora ou resposta fora do formato → 502 database_unavailable", asyn
     ["/api/painel/cruzamento?linha=perfil&coluna=idade", createFakeBackend({ rpc: { pesquisa_cruzamento: () => jsonResponse({}, 401) } })],
     ["/api/painel/respostas", createFakeBackend({ tabelas: { pesquisa_pessoas: () => jsonResponse({ message: "x" }, 500) } })],
     ["/api/painel/respostas", createFakeBackend({ tabelas: { pesquisa_pessoas: () => jsonResponse({ nao: "lista" }) } })],
-    ["/api/painel/exportar.csv", createFakeBackend({ tabelas: { pesquisa_pessoas: () => jsonResponse({ message: "x" }, 503) } })]
+    ["/api/painel/exportar.csv", createFakeBackend({ tabelas: { pesquisa_pessoas: () => jsonResponse({ message: "x" }, 503) } })],
+    ["/api/painel/paginas", createFakeBackend({ rpc: { paginas_resumo: () => jsonResponse({ message: "x" }, 500) } })],
+    ["/api/painel/paginas", createFakeBackend({ rpc: { paginas_resumo: [] } })],
+    ["/api/painel/paginas", createFakeBackend({ rpc: { paginas_resumo: { paginas: "nao-e-lista" } } })],
+    ["/api/painel/paginas", createFakeBackend({ rpc: { paginas_resumo: () => Promise.reject(new Error("timeout")) } })]
   ]) {
     const { get } = await logado({ backend });
     const response = await get(rota);
     assert.equal(response.status, 502, rota);
     assert.deepEqual(await response.json(), { ok: false, error: "database_unavailable" });
   }
+});
+
+/* ================================================================== páginas de obrigado */
+
+test("paginas: chama paginas_resumo com o período e o mapa perfil → página do obrigado-config", async () => {
+  const agora = Date.parse("2026-09-21T18:00:00Z");
+  const PAGINAS = [
+    { pagina: "afericao", visitas: 3, visitantes: 2, cliques: 1, clicaram: 1, atribuidas: 4, por_perfil: [], por_origem: [], por_dia: [] },
+    { pagina: "cuidador", visitas: 0, visitantes: 0, cliques: 0, clicaram: 0, atribuidas: 0, por_perfil: [], por_origem: [], por_dia: [] },
+    { pagina: "evento_outubro", visitas: 0, visitantes: 0, cliques: 0, clicaram: 0, atribuidas: 0, por_perfil: [], por_origem: [], por_dia: [] }
+  ];
+  const backend = createFakeBackend({ rpc: { paginas_resumo: { paginas: PAGINAS } } });
+  const { get } = await logado({ backend, now: () => agora });
+
+  const response = await get("/api/painel/paginas?desde=2026-09-14T03:00:00.000Z&ate=2026-09-21T03:00:00Z");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await response.json(), { ok: true, paginas: PAGINAS, gerado_em: "2026-09-21T18:00:00.000Z" });
+
+  const chamada = backend.chamadas.find((item) => item.caminho === "/rest/v1/rpc/paginas_resumo");
+  assert.equal(chamada.method, "POST");
+  assert.equal(chamada.headers.apikey, SUPABASE_KEY);
+  assert.deepEqual(chamada.body, {
+    p_desde: "2026-09-14T03:00:00.000Z",
+    p_ate: "2026-09-21T03:00:00.000Z",
+    p_mapa: {
+      "Auxiliar ou antiga atendente de enfermagem": "afericao",
+      "Cuidador(a)": "cuidador",
+      "Técnico(a) de enfermagem": "evento_outubro",
+      "Enfermeiro(a)": "evento_outubro"
+    }
+  });
+
+  // Sem período: null nos dois. Perfil, situação e busca não existem nesta rota (e não quebram).
+  await get("/api/painel/paginas?perfil=Cuidador(a)&busca=maria");
+  const semPeriodo = backend.chamadas.filter((item) => item.caminho === "/rest/v1/rpc/paginas_resumo").at(-1);
+  assert.equal(semPeriodo.body.p_desde, null);
+  assert.equal(semPeriodo.body.p_ate, null);
 });
 
 /* ================================================================== respostas (lista de pessoas) */
@@ -693,6 +738,8 @@ test("CSV: cabeçalhos HTTP, BOM, separador ';', CRLF e colunas na ordem do cont
     "whatsapp",
     "whatsapp_internacional",
     "email",
+    "perfil_codigo",
+    "pagina_obrigado",
     "1. Perfil profissional",
     "2. Idade",
     "3. Estado",
@@ -756,6 +803,31 @@ test("CSV: cabeçalhos HTTP, BOM, separador ';', CRLF e colunas na ordem do cont
   assert.equal(primeira.length, esperado.length);
   assert.equal(primeira[esperado.indexOf("criado_em")], "21/09/2026 11:05");
   assert.equal(primeira[esperado.indexOf("parou_em")], "10. Maior dificuldade");
+  assert.equal(primeira[esperado.indexOf("perfil_codigo")], "cuidador");
+  assert.equal(primeira[esperado.indexOf("pagina_obrigado")], "cuidador");
+});
+
+test("CSV: perfil_codigo e pagina_obrigado de cada perfil; Técnico e Enfermeiro na mesma página, com códigos diferentes", async () => {
+  const perfis = [
+    ["Auxiliar ou antiga atendente de enfermagem", "auxiliar_atendente", "afericao"],
+    ["Cuidador(a)", "cuidador", "cuidador"],
+    ["Técnico(a) de enfermagem", "tecnico_enfermagem", "evento_outubro"],
+    ["Enfermeiro(a)", "enfermeiro", "evento_outubro"],
+    // Sem perfil ainda, ou um perfil que saiu da pesquisa (rascunho antigo): colunas vazias.
+    [null, "", ""],
+    ["Estudante da área da saúde", "", ""]
+  ];
+  const linhas = perfis.map(([perfil], indice) => linhaPessoa(indice + 1, { perfil, respostas: perfil ? { perfil } : {} }));
+  const backend = createFakeBackend({ tabelas: { pesquisa_pessoas: () => ({ linhas }) } });
+  const { get } = await logado({ backend });
+  const [cabecalho, ...corpo] = lerCsv(await (await get("/api/painel/exportar.csv")).text());
+  const coluna = (linha, nome) => linha[cabecalho.indexOf(nome)];
+  assert.equal(cabecalho.indexOf("perfil_codigo"), cabecalho.indexOf("email") + 1);
+  assert.equal(cabecalho.indexOf("pagina_obrigado"), cabecalho.indexOf("email") + 2);
+  perfis.forEach(([perfil, codigo, pagina], indice) => {
+    assert.equal(coluna(corpo[indice], "perfil_codigo"), codigo, String(perfil));
+    assert.equal(coluna(corpo[indice], "pagina_obrigado"), pagina, String(perfil));
+  });
 });
 
 test("CSV: valores — múltipla com ' | ', frase, região, tempo, fórmula neutralizada", async () => {

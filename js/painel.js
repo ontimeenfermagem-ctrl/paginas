@@ -23,6 +23,8 @@
   "use strict";
 
   const EV = window.EVPesquisa;
+  // As páginas de obrigado (js/obrigado-config.js). Sem ele, só a aba delas avisa do problema.
+  const OBR = window.EVObrigado || null;
   const FUSO = "America/Sao_Paulo";
   const LIMITE_LISTA = 50;
   const LIMITE_ABERTAS = 30;
@@ -61,12 +63,17 @@
    * HTML + as rotas /api/painel/<id>/... dela; a da pesquisa não precisa ser reescrita.
    * As funções da pesquisa são ligadas mais abaixo, quando existem.
    */
+  // `filtrar` = o período da barra mudou (vale para todas as páginas).
   const PAGINAS = [
-    { id: "pesquisa-icp", nome: "Pesquisa ICP", rota: "/pesquisa-icp", entrar: null, atualizar: null, sair: null }
+    { id: "pesquisa-icp", nome: "Pesquisa ICP", rota: "/pesquisa-icp", entrar: null, atualizar: null, sair: null, filtrar: null },
+    { id: "obrigado", nome: "Páginas de obrigado", rota: "/obrigado-*", entrar: null, atualizar: null, sair: null, filtrar: null }
   ];
   let paginaAtual = PAGINAS[0];
 
   function pintarPaginas() {
+    // Perfil, busca e situação só existem na pesquisa: nas outras abas a barra fica só com o período.
+    const filtros = $("[data-filtros]");
+    if (filtros) filtros.dataset.paginaAtiva = paginaAtual.id;
     const faixa = $("[data-paginas]");
     if (!faixa) return;
     faixa.innerHTML = PAGINAS.map((pagina) => {
@@ -87,7 +94,14 @@
     if (!pagina || pagina === paginaAtual) return;
     paginaAtual = pagina;
     pintarPaginas();
+    escreverUrl();
+    pintarAtualizado();
     if (typeof pagina.entrar === "function") pagina.entrar();
+  }
+
+  /** O período mudou: a página aberta recarrega com ele (as outras, quando forem abertas). */
+  function aplicarPeriodo() {
+    if (typeof paginaAtual.filtrar === "function") paginaAtual.filtrar();
   }
 
   /* ================================================================== */
@@ -553,6 +567,8 @@
 
   function lerUrl() {
     const params = new URLSearchParams(window.location.search);
+    const pagina = PAGINAS.find((item) => item.id === params.get("pagina"));
+    if (pagina) paginaAtual = pagina;
     const periodo = params.get("periodo");
     if (periodo && Object.prototype.hasOwnProperty.call(PERIODOS, periodo)) state.periodo = periodo;
     if (state.periodo === "personalizado") {
@@ -575,6 +591,7 @@
   /** Filtro vira query string: o link pode ser mandado para outra pessoa e recarregado. */
   function escreverUrl() {
     const params = new URLSearchParams();
+    if (paginaAtual !== PAGINAS[0]) params.set("pagina", paginaAtual.id);
     if (state.periodo !== "tudo") params.set("periodo", state.periodo);
     if (state.periodo === "personalizado") {
       params.set("de", state.de);
@@ -597,7 +614,7 @@
   /* ================================================================== */
 
   // Sequências separadas por bloco: a resposta antiga de um bloco nunca sobrescreve a nova.
-  const seq = { resumo: 0, lista: 0, cruz: 0, abertas: 0 };
+  const seq = { resumo: 0, lista: 0, cruz: 0, abertas: 0, obrigado: 0 };
   let emVoo = 0;
 
   function ocupado(delta) {
@@ -744,9 +761,11 @@
     pintarTrafego();
   }
 
+  // A barra é de todas as páginas: mostra a hora dos números da página aberta.
   function pintarAtualizado() {
     const alvo = $("[data-atualizado]");
-    alvo.textContent = state.geradoEm ? `Atualizado às ${hora(state.geradoEm)}` : "—";
+    const gerado = paginaAtual.id === "obrigado" ? obr.geradoEm : state.geradoEm;
+    alvo.textContent = gerado ? `Atualizado às ${hora(gerado)}` : "—";
   }
 
   /* ------------------------------------------------------------ Filtros */
@@ -2253,6 +2272,13 @@
     </article>`;
   }
 
+  /** Para qual página de obrigado o perfil da pessoa leva (quem não terminou ainda vai ao terminar). */
+  function paginaObrigadoTexto(item) {
+    const pagina = OBR && item.perfil ? OBR.paginaDoPerfil(item.perfil) : null;
+    if (!pagina) return "";
+    return `${pagina.nome} (${pagina.rota})${item.finalizado_em ? "" : " · vai para ela ao terminar"}`;
+  }
+
   /** Texto de uma resposta para leitura humana, com o complemento do "Outro". */
   function valorLegivel(pergunta, respostas) {
     if (pergunta.tipo === "frase") {
@@ -2311,6 +2337,7 @@
       ["Última resposta", dataHora(item.ultima_resposta_em)],
       ["Concluiu em", item.concluido_em ? dataHora(item.concluido_em) : ""],
       ["Chegou à tela final em", item.finalizado_em ? dataHora(item.finalizado_em) : ""],
+      ["Página de obrigado", paginaObrigadoTexto(item)],
       [
         "Enviado ao n8n",
         item.webhook_enviado_em
@@ -2431,7 +2458,8 @@
     state.periodo = periodo;
     $("[data-datas-erro]").textContent = "";
     escreverUrl();
-    carregarTudo();
+    pintarFiltros();
+    aplicarPeriodo();
   });
 
   $("[data-datas]").addEventListener("submit", (evento) => {
@@ -2452,7 +2480,8 @@
     state.de = de;
     state.ate = ate;
     escreverUrl();
-    carregarTudo();
+    pintarFiltros();
+    aplicarPeriodo();
   });
 
   function trocarPerfil(chave) {
@@ -2535,6 +2564,7 @@
     else if (acao === "lista") carregarLista({ reiniciar: true });
     else if (acao === "cruzamento") carregarCruzamento();
     else if (acao === "abertas") carregarAbertas({ reiniciar: !state.abertas.itens.length });
+    else if (acao === "obrigado") carregarObrigado();
     else if (acao.startsWith("outro:")) carregarOutro(acao.slice(6));
   });
 
@@ -2567,13 +2597,318 @@
   });
 
   /* ================================================================== */
+  /* Páginas de obrigado                                                  */
+  /* ================================================================== */
+
+  /*
+   * Uma aba para as 3 páginas /obrigado-* (js/obrigado-config.js). Números de
+   * /api/painel/paginas (SQL paginas_resumo, no período da barra): pesquisas concluídas
+   * atribuídas à página pelo perfil → pessoas que chegaram → pessoas que clicaram no grupo.
+   * Nada de dado pessoal aqui: os eventos das páginas não têm nome, WhatsApp nem e-mail.
+   */
+  const obr = { dados: null, erro: 0, pronto: false, geradoEm: "", diasTodos: new Set() };
+  // "Por dia" mostra as duas últimas semanas; o resto abre num clique (período "Tudo" tem meses).
+  const DIAS_VISIVEIS = 14;
+
+  function limparObrigado() {
+    obr.dados = null;
+    obr.erro = 0;
+    obr.pronto = false;
+    obr.geradoEm = "";
+    obr.diasTodos.clear();
+    seq.obrigado++;
+  }
+
+  async function carregarObrigado() {
+    const alvo = $("[data-obrigado]");
+    const secao = $("[data-obrigado-secao]");
+    const status = $("[data-obrigado-status]");
+    if (!OBR) {
+      redesenhar(
+        alvo,
+        `<div class="erro" role="alert"><strong>Não foi possível carregar a configuração das páginas de obrigado.</strong><span>Recarregue a página. Se continuar, confira se o arquivo js/obrigado-config.js foi publicado.</span></div>`
+      );
+      return;
+    }
+
+    const minha = ++seq.obrigado;
+    const params = new URLSearchParams();
+    const { desde, ate } = intervalo();
+    if (desde) params.set("desde", desde);
+    if (ate) params.set("ate", ate);
+
+    secao.setAttribute("aria-busy", "true");
+    // Esqueleto só na primeira vez; nas recargas o desenho anterior fica esmaecido.
+    if (!obr.pronto) redesenhar(alvo, `<div class="obr-lista">${OBR.LISTA.map(() => `<div class="cartao">${esqueleto(7)}</div>`).join("")}</div>`);
+    status.textContent = "Carregando...";
+    delete status.dataset.estado;
+    ocupado(1);
+    const resposta = await api(`/api/painel/paginas${params.toString() ? `?${params}` : ""}`);
+    ocupado(-1);
+    if (minha !== seq.obrigado) return;
+    secao.removeAttribute("aria-busy");
+
+    if (resposta.status === 401) {
+      sessaoExpirou();
+      return;
+    }
+    if (!resposta.ok || !Array.isArray(resposta.body.paginas)) {
+      // Sem dado bom, os números de outro período não podem ficar na tela.
+      obr.dados = null;
+      obr.erro = resposta.status || 0;
+      obr.pronto = false;
+      status.dataset.estado = "erro";
+      status.textContent = mensagemErro(obr.erro);
+      pintarObrigado();
+      return;
+    }
+
+    obr.dados = resposta.body.paginas;
+    obr.erro = 0;
+    obr.pronto = true;
+    obr.geradoEm = resposta.body.gerado_em || new Date().toISOString();
+    status.textContent = "";
+    pintarObrigado();
+  }
+
+  /** "<b>80%</b> das 100 ..." com a base dita por extenso; sem base, diz por que não há porcentagem. */
+  function taxaComBase(parte, base, textoBase, semBase) {
+    if (!num(base)) return escapeHtml(semBase);
+    return `<strong>${pct(parte, base)}</strong> ${escapeHtml(textoBase.replace("{n}", n(base)))}`;
+  }
+
+  function linkDoGrupoHtml(pagina) {
+    if (OBR.linkValido(pagina.link)) {
+      const curto = String(pagina.link).replace(/^https:\/\//, "");
+      return `<p class="obr-grupo"><span>Grupo:</span> <a href="${escapeHtml(pagina.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(
+        curto
+      )}<span class="visualmente-oculto"> (abre o WhatsApp)</span></a></p>`;
+    }
+    return `<p class="obr-grupo obr-sem-link" data-sem-link><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24"><path d="M12 8v5m0 3.5v.5M10.3 3.9 2.6 17.4A2 2 0 0 0 4.3 20.4h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span><strong>Link do grupo ainda não configurado.</strong> A página não mostra botão quebrado: avisa que o link chega pelo WhatsApp. Cole o convite em js/obrigado-config.js.</span></p>`;
+  }
+
+  function funilObrigadoHtml(pagina, linha) {
+    const atribuidas = num(linha.atribuidas);
+    const visitantes = num(linha.visitantes);
+    const clicaram = num(linha.clicaram);
+    const perfis = Array.from(pagina.perfis).map((perfil) => perfilCurto(perfil).toLowerCase()).join(" e ");
+    const etapas = [
+      {
+        chave: "atribuidas",
+        rotulo: "Pesquisas concluídas atribuídas",
+        sub: `base: quem terminou a pesquisa como ${escapeHtml(perfis)} e foi levado para esta página`,
+        valor: atribuidas
+      },
+      {
+        chave: "visitantes",
+        rotulo: "Chegaram à página",
+        sub: `${taxaComBase(visitantes, atribuidas, "das {n} pesquisas concluídas atribuídas", "sem pesquisa concluída atribuída no período")} · ${escapeHtml(plural(linha.visitas, "visita", "visitas"))} no total`,
+        valor: visitantes
+      },
+      {
+        chave: "clicaram",
+        rotulo: "Clicaram no grupo",
+        sub: `${taxaComBase(clicaram, visitantes, "das {n} pessoas que chegaram", "ninguém chegou à página no período")}${
+          atribuidas ? ` · ${pct(clicaram, atribuidas)} das concluídas` : ""
+        } · ${escapeHtml(plural(linha.cliques, "clique", "cliques"))} no total`,
+        valor: clicaram,
+        fim: true
+      }
+    ];
+    const topo = Math.max(1, ...etapas.map((etapa) => etapa.valor));
+    const itens = etapas
+      .map(
+        (etapa) => `<li class="linha-barra${etapa.fim ? " fim" : ""}${etapa.valor ? "" : " zero"}" data-etapa="${etapa.chave}">
+          <span class="rotulo">${escapeHtml(etapa.rotulo)}<small>${etapa.sub}</small></span>
+          <span class="trilho" role="img" aria-label="${escapeHtml(`${etapa.rotulo}: ${n(etapa.valor)}`)}"><span style="width:${((etapa.valor / topo) * 100).toFixed(2)}%"></span></span>
+          <span class="num"><strong>${n(etapa.valor)}</strong></span>
+        </li>`
+      )
+      .join("");
+    const notas = [];
+    if (visitantes > atribuidas) {
+      notas.push(
+        "Chegou mais gente do que as pesquisas atribuídas no período: quem abriu o link de novo em outro aparelho, recebeu o link direto ou terminou a pesquisa antes do período escolhido."
+      );
+    }
+    notas.push("Pessoas únicas pelo aparelho: recarregar a página ou clicar duas vezes não conta de novo.");
+    return `<ol class="funil obr-funil">${itens}</ol><p class="nota">${notas.map(escapeHtml).join(" ")}</p>`;
+  }
+
+  /** Linhas por perfil: os perfis da página primeiro (ordem do config), depois outros e "sem perfil". */
+  function linhasPorPerfil(pagina, linha) {
+    const dados = Array.isArray(linha.por_perfil) ? linha.por_perfil : [];
+    const porPerfil = new Map(dados.map((item) => [item.perfil == null ? null : String(item.perfil), item]));
+    const ordem = Array.from(pagina.perfis);
+    for (const item of dados) {
+      const chave = item.perfil == null ? null : String(item.perfil);
+      if (chave !== null && !ordem.includes(chave)) ordem.push(chave);
+    }
+    if (porPerfil.has(null)) ordem.push(null);
+    return ordem.map((perfil) => {
+      const item = porPerfil.get(perfil) || {};
+      return {
+        rotulo: perfil === null ? "Sem perfil (abriu o link direto)" : perfilCurto(perfil),
+        daPagina: perfil !== null && pagina.perfis.includes(perfil),
+        atribuidas: num(item.atribuidas),
+        visitantes: num(item.visitantes),
+        clicaram: num(item.clicaram)
+      };
+    });
+  }
+
+  function clicaramCelula(clicaram, visitantes) {
+    return `${n(clicaram)}${visitantes ? `<span class="taxa-inline"> · ${pct(clicaram, visitantes)}</span>` : ""}`;
+  }
+
+  function divisoesObrigadoHtml(pagina, linha) {
+    const perfis = linhasPorPerfil(pagina, linha);
+    const tabelaPerfis = `<div class="tabela-rolagem"><table>
+      <caption>${
+        pagina.perfis.length > 1
+          ? `${escapeHtml(Array.from(pagina.perfis).map(perfilCurto).join(" e "))} dividem esta página, mas contam separados.`
+          : "Pelo perfil respondido na pesquisa."
+      }</caption>
+      <thead><tr><th scope="col">Perfil</th><th scope="col" class="n">Concluídas</th><th scope="col" class="n">Chegaram</th><th scope="col" class="n">Clicaram</th></tr></thead>
+      <tbody>${perfis
+        .map(
+          (item) => `<tr${item.daPagina ? "" : ' class="fora-da-pagina"'}><th scope="row">${escapeHtml(item.rotulo)}</th><td class="n">${
+            item.daPagina ? n(item.atribuidas) : "—"
+          }</td><td class="n">${n(item.visitantes)}</td><td class="n">${clicaramCelula(item.clicaram, item.visitantes)}</td></tr>`
+        )
+        .join("")}</tbody>
+    </table></div>`;
+
+    const origens = (Array.isArray(linha.por_origem) ? linha.por_origem : []).map((item) => ({
+      rotulo: String(item.utm_source == null ? "(sem utm)" : item.utm_source),
+      visitantes: num(item.visitantes),
+      clicaram: num(item.clicaram)
+    }));
+    const tabelaOrigens = origens.length
+      ? `<div class="tabela-rolagem"><table>
+      <caption>“(sem utm)” = chegou sem parâmetro de campanha.</caption>
+      <thead><tr><th scope="col">Origem</th><th scope="col" class="n">Chegaram</th><th scope="col" class="n">Clicaram</th></tr></thead>
+      <tbody>${origens
+        .map((item) => `<tr><th scope="row">${escapeHtml(item.rotulo)}</th><td class="n">${n(item.visitantes)}</td><td class="n">${clicaramCelula(item.clicaram, item.visitantes)}</td></tr>`)
+        .join("")}</tbody>
+    </table></div>`
+      : vazioHtml("Sem acessos neste período.", "");
+
+    // Mais recente primeiro: quem abre o painel quer ver hoje e ontem sem rolar.
+    const dias = (Array.isArray(linha.por_dia) ? linha.por_dia : [])
+      .map((item) => ({ dia: String(item.dia).slice(0, 10), visitantes: num(item.visitantes), clicaram: num(item.clicaram) }))
+      .filter((item) => ymdValido(item.dia))
+      .sort((a, b) => b.dia.localeCompare(a.dia));
+    const todos = obr.diasTodos.has(pagina.id);
+    const mostrados = todos ? dias : dias.slice(0, DIAS_VISIVEIS);
+    const botaoDias =
+      dias.length > DIAS_VISIVEIS
+        ? `<button type="button" class="botao-texto obr-mais-dias" data-obr-dias="${escapeHtml(pagina.id)}" data-foco="obr-dias-${escapeHtml(pagina.id)}" aria-expanded="${todos}">${
+            todos ? `Mostrar só os ${DIAS_VISIVEIS} mais recentes` : `Ver todos os ${n(dias.length)} dias`
+          }</button>`
+        : "";
+    const tabelaDias = dias.length
+      ? `<div class="tabela-rolagem"><table>
+      <caption>Horário de Brasília${dias.length > mostrados.length ? ` · os ${DIAS_VISIVEIS} dias mais recentes de ${n(dias.length)}` : ""}.</caption>
+      <thead><tr><th scope="col">Dia</th><th scope="col" class="n">Chegaram</th><th scope="col" class="n">Clicaram</th></tr></thead>
+      <tbody>${mostrados
+        .map(
+          (item) => `<tr><th scope="row">${escapeHtml(`${dataCurta(item.dia)} · ${diaSemana(item.dia)}`)}</th><td class="n">${n(item.visitantes)}</td><td class="n">${clicaramCelula(
+            item.clicaram,
+            item.visitantes
+          )}</td></tr>`
+        )
+        .join("")}</tbody>
+    </table></div>${botaoDias}`
+      : vazioHtml("Sem acessos neste período.", "");
+
+    return `<div class="obr-divisoes">
+      <div class="obr-divisao" data-divisao="perfil"><h4>Por perfil</h4>${tabelaPerfis}</div>
+      <div class="obr-divisao" data-divisao="origem"><h4>Por origem</h4>${tabelaOrigens}</div>
+      <div class="obr-divisao" data-divisao="dia"><h4>Por dia</h4>${tabelaDias}</div>
+    </div>`;
+  }
+
+  function cartaoObrigadoHtml(pagina, linha) {
+    const perfis = Array.from(pagina.perfis).map((perfil) => perfilCurto(perfil)).join(" · ");
+    const vazia = !num(linha.atribuidas) && !num(linha.visitas) && !num(linha.cliques);
+    const corpo = vazia
+      ? vazioHtml(
+          state.periodo === "tudo" ? "Ninguém passou por esta página ainda." : "Ninguém passou por esta página neste período.",
+          "Ela recebe quem termina a pesquisa com um destes perfis. Os números aparecem aqui assim que a primeira pessoa chegar."
+        )
+      : `${funilObrigadoHtml(pagina, linha)}${divisoesObrigadoHtml(pagina, linha)}`;
+    return `<article class="cartao obr-cartao" data-obrigado-pagina="${escapeHtml(pagina.id)}" aria-labelledby="obr-${escapeHtml(pagina.id)}">
+      <header class="obr-cabeca">
+        <div class="obr-titulo">
+          <h3 id="obr-${escapeHtml(pagina.id)}">${escapeHtml(pagina.nome)}</h3>
+          <p class="obr-meta"><span class="obr-rota">${escapeHtml(pagina.rota)}</span><span class="obr-perfis">${escapeHtml(perfis)}</span></p>
+        </div>
+        ${linkDoGrupoHtml(pagina)}
+      </header>
+      ${corpo}
+    </article>`;
+  }
+
+  $("[data-obrigado]").addEventListener("click", (evento) => {
+    const botao = evento.target instanceof Element ? evento.target.closest("[data-obr-dias]") : null;
+    if (!botao || !obr.dados) return;
+    const id = botao.dataset.obrDias;
+    if (obr.diasTodos.has(id)) obr.diasTodos.delete(id);
+    else obr.diasTodos.add(id);
+    state.focoDepois = `obr-dias-${id}`;
+    pintarObrigado();
+  });
+
+  function pintarObrigado() {
+    const alvo = $("[data-obrigado]");
+    $("[data-obrigado-periodo]").textContent = obr.geradoEm && obr.dados ? `${rotuloPeriodo()} · atualizado às ${hora(obr.geradoEm)}` : rotuloPeriodo();
+    pintarAtualizado();
+    if (!obr.dados) {
+      redesenhar(alvo, erroHtml(obr.erro, "obrigado", "repetir-obrigado"));
+      return;
+    }
+    const porId = new Map(obr.dados.filter((linha) => linha && typeof linha === "object").map((linha) => [String(linha.pagina), linha]));
+    const linhas = OBR.LISTA.map((pagina) => porId.get(pagina.id) || {});
+    const semNada = linhas.every((linha) => !num(linha.atribuidas) && !num(linha.visitas) && !num(linha.cliques));
+    const total = linhas.reduce(
+      (soma, linha) => ({ atribuidas: soma.atribuidas + num(linha.atribuidas), visitantes: soma.visitantes + num(linha.visitantes), clicaram: soma.clicaram + num(linha.clicaram) }),
+      { atribuidas: 0, visitantes: 0, clicaram: 0 }
+    );
+    const topo = semNada
+      ? `<div class="vazio-geral obr-vazio" data-obrigado-vazio>
+          <img src="/img/ev-icone-color.png" alt="" width="64" height="64">
+          <h3>${state.periodo === "tudo" ? "Ninguém chegou às páginas de obrigado ainda" : "Ninguém chegou às páginas de obrigado neste período"}</h3>
+          <p>${
+            state.periodo === "tudo"
+              ? "Quem terminar a pesquisa é levado para a página do perfil dela, e os números aparecem aqui."
+              : "Tente um período maior, ou “Tudo”."
+          }</p>
+        </div>`
+      : `<ul class="placar obr-placar" aria-label="Todas as páginas de obrigado somadas">
+          <li><span class="rotulo">Pesquisas concluídas</span><span class="valor">${n(total.atribuidas)}</span><span class="detalhe">levadas a uma das páginas</span></li>
+          <li><span class="rotulo">Chegaram às páginas</span><span class="valor">${n(total.visitantes)}</span><span class="detalhe"><strong>${pct(total.visitantes, total.atribuidas)}</strong> das concluídas</span></li>
+          <li class="destaque"><span class="rotulo">Clicaram no grupo</span><span class="valor">${n(total.clicaram)}</span><span class="detalhe"><strong>${pct(total.clicaram, total.visitantes)}</strong> de quem chegou</span></li>
+        </ul>`;
+    redesenhar(alvo, `${topo}<div class="obr-lista">${OBR.LISTA.map((pagina, indice) => cartaoObrigadoHtml(pagina, linhas[indice])).join("")}</div>`);
+  }
+
+  /* ================================================================== */
   /* Registro da pesquisa na faixa de páginas                             */
   /* ================================================================== */
 
   Object.assign(PAGINAS[0], {
     entrar: () => carregarTudo(),
     atualizar: (opcoes) => atualizar(opcoes),
-    sair: () => limparDados()
+    sair: () => limparDados(),
+    filtrar: () => carregarTudo()
+  });
+
+  Object.assign(PAGINAS[1], {
+    entrar: () => carregarObrigado(),
+    atualizar: () => carregarObrigado(),
+    sair: () => limparObrigado(),
+    filtrar: () => carregarObrigado()
   });
 
   $("[data-paginas]").addEventListener("click", (evento) => {
@@ -2595,9 +2930,9 @@
   /* Início                                                               */
   /* ================================================================== */
 
+  lerUrl();
   pintarPaginas();
   montarSelects();
-  lerUrl();
   pintarFiltros();
   atualizarCsv();
   ligarFaixasRolaveis();

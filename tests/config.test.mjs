@@ -11,6 +11,10 @@
  * 13). A lista abaixo continua IGUAL ao documento, com "Outro", e o teste compara o config com o
  * documento MENOS "Outro" — assim fica registrado o que o cliente tirou, e mais nada pode sumir.
  *
+ * "Estudante da área da saúde": também está no documento (pergunta 1), mas o cliente decidiu depois
+ * que a pesquisa tem só 4 perfis — cada um leva a uma página de obrigado (js/obrigado-config.js).
+ * Mesma regra do "Outro": a lista abaixo continua igual ao documento, e o teste tira o Estudante.
+ *
  * O config roda no MESMO realm do teste (runInThisContext): assim o deepStrictEqual compara só
  * conteúdo, sem tropeçar em protótipo de outro contexto.
  */
@@ -28,6 +32,7 @@ const AUXILIAR = "Auxiliar ou antiga atendente de enfermagem";
 const CUIDADOR = "Cuidador(a)";
 const TECNICO = "Técnico(a) de enfermagem";
 const ENFERMEIRO = "Enfermeiro(a)";
+// Saiu da pergunta 1 por decisão do cliente: um rascunho velho com ele não abre bloco nenhum.
 const ESTUDANTE = "Estudante da área da saúde";
 
 // Tipos do documento → tipos do config. "Resposta longa" é "texto"; a 31 ("Complete a frase",
@@ -75,8 +80,17 @@ const DOCUMENTO = [
   { numero: "D2", tipo: "unica", perfil: ENFERMEIRO, texto: "Qual caminho profissional mais interessa a você hoje?", opcoes: ["Assistência", "Gestão ou liderança", "Home care", "Educação ou treinamentos", "Empreendedorismo", "Especialização", "Atendimento particular", "Ainda estou decidindo"] }
 ];
 
-// O documento MENOS "Outro" (decisão do cliente): é isto que o config tem que ter.
-const ESPERADO = DOCUMENTO.map((item) => (item.opcoes ? { ...item, opcoes: item.opcoes.filter((opcao) => opcao !== "Outro") } : item));
+// O documento MENOS "Outro" e, na pergunta 1, MENOS "Estudante" (decisões do cliente): é isto que o
+// config tem que ter.
+const REMOVIDAS_DA_1 = ["Estudante da área da saúde"];
+const ESPERADO = DOCUMENTO.map((item) =>
+  item.opcoes
+    ? {
+        ...item,
+        opcoes: item.opcoes.filter((opcao) => opcao !== "Outro" && !(item.numero === "1" && REMOVIDAS_DA_1.includes(opcao)))
+      }
+    : item
+);
 
 // As 12 perguntas em que o documento tinha "Outro".
 const COM_OUTRO_NO_DOCUMENTO = ["1", "8", "10", "11", "13", "14", "21", "25", "26", "27", "B2", "C2"];
@@ -135,7 +149,7 @@ test("as 39 perguntas do documento, na ordem, com número, enunciado e tipo exat
   }
 });
 
-test("todas as alternativas batem com o documento (menos \"Outro\"), letra por letra e na ordem", () => {
+test("todas as alternativas batem com o documento (menos \"Outro\" e, na 1, menos \"Estudante\"), letra por letra e na ordem", () => {
   for (const [indice, esperada] of ESPERADO.entries()) {
     const pergunta = P.PERGUNTAS[indice];
     if (esperada.opcoes) {
@@ -159,10 +173,10 @@ test("sem \"Outro\" em pergunta nenhuma (decisão do cliente): nem alternativa, 
     }
     assert.ok(!P.chavesDaPergunta(pergunta).some((chave) => chave.endsWith("_outro")), pergunta.numero);
   }
-  // As 12 perderam só o "Outro": uma alternativa a menos cada, e nenhuma outra pergunta mudou.
+  // As 12 perderam só o "Outro" (a 1 também o "Estudante"), e nenhuma outra pergunta mudou.
   for (const [indice, item] of DOCUMENTO.entries()) {
     if (!item.opcoes) continue;
-    const perdeu = COM_OUTRO_NO_DOCUMENTO.includes(item.numero) ? 1 : 0;
+    const perdeu = (COM_OUTRO_NO_DOCUMENTO.includes(item.numero) ? 1 : 0) + (item.numero === "1" ? REMOVIDAS_DA_1.length : 0);
     assert.equal(P.PERGUNTAS[indice].opcoes.length, item.opcoes.length - perdeu, item.numero);
   }
 });
@@ -207,8 +221,8 @@ test("condicionais: blocos A a D só para o perfil do documento; o resto aparece
   assert.deepEqual(ids(CUIDADOR).slice(31), ["B1", "B2"]);
   assert.deepEqual(ids(TECNICO).slice(31), ["C1", "C2"]);
   assert.deepEqual(ids(ENFERMEIRO).slice(31), ["D1", "D2"]);
+  // Perfil que não existe mais (o antigo "Outro" ou "Estudante" de um rascunho velho) não abre bloco nenhum.
   assert.equal(ids(ESTUDANTE).length, 31);
-  // Perfil que não existe (ex.: o antigo "Outro" de um rascunho velho) não abre bloco nenhum.
   assert.equal(ids("Outro").length, 31);
   assert.equal(P.perguntasVisiveis({}).length, 31);
 });
@@ -225,9 +239,8 @@ test("etapas: as 9 da estrutura sugerida, cada pergunta no bloco certo", () => {
   for (const pergunta of P.PERGUNTAS) {
     assert.equal(pergunta.etapa, etapaEsperada(pergunta.numero), pergunta.numero);
   }
-  // Estudante não tem bloco específico: a etapa 9 some, e a barra diz "de 8".
-  assert.equal(P.etapasVisiveis({ perfil: ESTUDANTE }).length, 8);
-  assert.equal(P.etapasVisiveis({ perfil: TECNICO }).length, 9);
+  // Os 4 perfis têm bloco específico: a barra diz "de 9" para todo mundo.
+  for (const perfil of Object.values(P.PERFIL)) assert.equal(P.etapasVisiveis({ perfil }).length, 9, perfil);
 });
 
 test("obrigatoriedade: principais obrigatórias, abertas opcionais (boas práticas do documento)", () => {
@@ -237,7 +250,7 @@ test("obrigatoriedade: principais obrigatórias, abertas opcionais (boas prátic
   }
 });
 
-test("estrutura: ids e chaves únicos, exclusivas dentro das alternativas, os 5 perfis", () => {
+test("estrutura: ids e chaves únicos, exclusivas dentro das alternativas, os 4 perfis", () => {
   const ids = P.PERGUNTAS.map((pergunta) => pergunta.id);
   assert.equal(new Set(ids).size, ids.length);
 
@@ -263,7 +276,20 @@ test("estrutura: ids e chaves únicos, exclusivas dentro das alternativas, os 5 
   }
 
   assert.deepEqual(Object.values(P.PERFIL), ESPERADO[0].opcoes);
-  assert.deepEqual(Object.keys(P.PERFIL), ["auxiliar", "cuidador", "tecnico", "enfermeiro", "estudante"]);
+  assert.deepEqual(Object.keys(P.PERFIL), ["auxiliar", "cuidador", "tecnico", "enfermeiro"]);
+  // Código interno e etiqueta de CRM de cada perfil (documento das páginas de obrigado).
+  assert.deepEqual(P.PERFIL_CODIGO, {
+    [AUXILIAR]: "auxiliar_atendente",
+    [CUIDADOR]: "cuidador",
+    [TECNICO]: "tecnico_enfermagem",
+    [ENFERMEIRO]: "enfermeiro"
+  });
+  assert.deepEqual(P.PERFIL_SEGMENTO, {
+    [AUXILIAR]: "PERFIL_AUXILIAR_ATENDENTE",
+    [CUIDADOR]: "PERFIL_CUIDADOR",
+    [TECNICO]: "PERFIL_TECNICO",
+    [ENFERMEIRO]: "PERFIL_ENFERMEIRO"
+  });
   assert.deepEqual(Object.keys(P.PERFIL_CURTO), Object.values(P.PERFIL));
   assert.deepEqual(Object.keys(P.PERFIL_NA_FRASE), Object.values(P.PERFIL));
   assert.deepEqual(
@@ -412,9 +438,10 @@ test("progresso: vazio, completo por perfil, abertas não impedem os 100%", () =
     const completo = P.progresso(respostasCompletas(perfil));
     assert.deepEqual(completo, { total: 33, obrigatorias: 30, respondidas: 30, obrigatoriasRespondidas: 30, percentual: 100, completa: true }, perfil);
   }
-  const estudante = P.progresso(respostasCompletas(ESTUDANTE));
-  assert.equal(estudante.completa, true);
-  assert.equal(estudante.total, 31);
+  // "Estudante" de um rascunho antigo: o perfil some na sanitização, e a tentativa não completa.
+  const estudante = P.sanitizar(respostasCompletas(ESTUDANTE));
+  assert.equal(estudante.perfil, undefined);
+  assert.equal(P.progresso(estudante).completa, false);
 
   // Abertas contam como respondidas, mas não são necessárias.
   const comAbertas = P.progresso({ ...respostasCompletas(CUIDADOR), sonho: "Ter minha clínica", frase_bloqueio: "falta dinheiro" });
@@ -477,4 +504,36 @@ test("o config é imutável: ninguém altera pergunta em tempo de execução", (
   assert.ok(P.PERGUNTAS.every((pergunta) => Object.isFrozen(pergunta)));
   assert.equal(P.ID, "icp-escola-ev");
   assert.equal(typeof P.VERSAO, "string");
+});
+
+/* ----------------------------------------------------------- páginas de obrigado */
+
+test("obrigado-config: os 4 perfis caem em exatamente uma das 3 páginas; Técnico e Enfermeiro dividem a do evento", () => {
+  vm.runInThisContext(readFileSync(new URL("../js/obrigado-config.js", import.meta.url), "utf8"), { filename: "js/obrigado-config.js" });
+  const O = globalThis.EVObrigado;
+  assert.ok(Object.isFrozen(O));
+  assert.deepEqual(
+    O.LISTA.map((pagina) => [pagina.id, pagina.rota, pagina.grupo]),
+    [
+      ["afericao", "/obrigado-afericao", "afericao"],
+      ["cuidador", "/obrigado-cuidador", "cuidador"],
+      ["evento_outubro", "/obrigado-evento-outubro", "evento_outubro"]
+    ]
+  );
+  for (const perfil of Object.values(P.PERFIL)) {
+    assert.equal(O.LISTA.filter((pagina) => pagina.perfis.includes(perfil)).length, 1, perfil);
+  }
+  assert.equal(O.paginaDoPerfil(AUXILIAR).id, "afericao");
+  assert.equal(O.paginaDoPerfil(CUIDADOR).id, "cuidador");
+  assert.equal(O.paginaDoPerfil(TECNICO).id, "evento_outubro");
+  assert.equal(O.paginaDoPerfil(ENFERMEIRO).id, "evento_outubro");
+  assert.equal(O.paginaDoPerfil(ESTUDANTE), null);
+  assert.equal(O.paginaDoPerfil(undefined), null);
+  // Mesma página, códigos de CRM separados.
+  assert.notEqual(P.PERFIL_CODIGO[TECNICO], P.PERFIL_CODIGO[ENFERMEIRO]);
+  assert.equal(O.paginaDaRota("/obrigado-cuidador/").id, "cuidador");
+  assert.equal(O.paginaDaRota("/obrigado-x"), null);
+  assert.equal(O.linkValido("https://chat.whatsapp.com/AbC123"), true);
+  assert.equal(O.linkValido("javascript:alert(1)"), false);
+  assert.equal(O.linkValido(""), false);
 });

@@ -1,4 +1,5 @@
--- Banco da pesquisa de ICP da Escola Enfermagem de Valor (formulário /pesquisa + painel /painel).
+-- Banco da pesquisa de ICP da Escola Enfermagem de Valor (formulário /pesquisa-icp, as 3 páginas de
+-- obrigado /obrigado-* e o painel /painel).
 --
 -- COMO RODAR: Supabase > SQL Editor > New query > cole o arquivo INTEIRO > Run.
 -- O arquivo é idempotente: rodar de novo (por exemplo, depois de atualizar o repositório) não apaga
@@ -1006,6 +1007,233 @@ grant execute on function public.pesquisa_salvar(jsonb) to service_role;
 grant execute on function public.pesquisa_painel(timestamptz, timestamptz, text, text[], text, text, text) to service_role;
 grant execute on function public.pesquisa_cruzamento(text, text, timestamptz, timestamptz, text, text, text, text) to service_role;
 grant execute on function public.pesquisa_abertas(text[], timestamptz, timestamptz, text, int, int, text, text, text) to service_role;
+
+
+-- ============================================================================================
+-- 5. Páginas de obrigado (/obrigado-afericao, /obrigado-cuidador, /obrigado-evento-outubro)
+--
+-- Quem termina a pesquisa é levado para UMA das três páginas, pelo perfil (js/obrigado-config.js).
+-- pagina_eventos guarda uma linha por EVENTO: 'visita' (a página abriu) e 'clique_grupo' (clicou em
+-- "Entrar no grupo"). Sem dado pessoal: ids do aparelho e da tentativa, o perfil (Técnico e
+-- Enfermeiro dividem a página do evento, mas são contados separados) e a origem do tráfego.
+-- Mesmas barreiras das tabelas da pesquisa: RLS sem política + revoke de anon/authenticated.
+--
+-- Este bloco é autossuficiente: pode ser colado sozinho num banco que já tem as seções 1 a 4.
+-- ============================================================================================
+create table if not exists public.pagina_eventos (
+  id bigint generated always as identity primary key,
+  criado_em timestamptz not null default now(),
+  -- id da página em js/obrigado-config.js ('afericao' | 'cuidador' | 'evento_outubro'). O servidor
+  -- só aceita as páginas que existem; aqui fica só o formato, para página nova não pedir SQL novo.
+  pagina text not null check (pagina ~ '^[a-z0-9_]{1,60}$'),
+  evento text not null check (evento in ('visita', 'clique_grupo')),
+  visitante_id uuid,                                 -- o mesmo id de aparelho da pesquisa_visitas
+  sessao_id uuid,                                    -- a tentativa (pesquisa_respostas.id), se veio
+  perfil text,                                       -- rótulo da pergunta 1, como gravado na pesquisa
+  page_url text,
+  referrer text,
+  utm_source text,
+  utm_medium text,
+  utm_campaign text,
+  utm_content text,
+  utm_term text,
+  fbclid text,
+  gclid text,
+  dispositivo text                                   -- 'mobile' | 'tablet' | 'desktop'
+);
+
+-- O painel sempre lê uma página num período.
+create index if not exists pagina_eventos_pagina_criado_em_idx
+  on public.pagina_eventos (pagina, criado_em desc);
+
+alter table public.pagina_eventos enable row level security;
+revoke all on table public.pagina_eventos from public, anon, authenticated;
+grant select, insert, update, delete on table public.pagina_eventos to service_role;
+-- A sequência do id também nasce com grant para anon no Supabase: fora.
+revoke all on sequence public.pagina_eventos_id_seq from public, anon, authenticated;
+grant usage, select on sequence public.pagina_eventos_id_seq to service_role;
+
+
+-- --------------------------------------------------------------------------------------------
+-- pagina_registrar_evento: grava um evento de página de obrigado. `p` já vem validado pelo
+-- servidor ({pagina, evento, visitante_id, sessao_id, perfil, page_url, referrer, utm_*, fbclid,
+-- gclid, dispositivo}); aqui a regra é só não gravar lixo: texto vazio vira null e um id que não é
+-- uuid vira null em vez de derrubar a gravação.
+-- --------------------------------------------------------------------------------------------
+create or replace function public.pagina_registrar_evento(p jsonb)
+returns void
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  d jsonb := case when jsonb_typeof(p) = 'object' then p else '{}'::jsonb end;
+  v_pagina text := nullif(btrim(d ->> 'pagina'), '');
+  v_evento text := nullif(btrim(d ->> 'evento'), '');
+  v_visitante text := nullif(btrim(d ->> 'visitante_id'), '');
+  v_sessao text := nullif(btrim(d ->> 'sessao_id'), '');
+  uuid_re constant text := '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
+begin
+  if v_pagina is null then
+    raise exception 'pagina_registrar_evento: página obrigatória' using errcode = '22023';
+  end if;
+  if v_evento is null or v_evento not in ('visita', 'clique_grupo') then
+    raise exception 'pagina_registrar_evento: evento inválido (%)', v_evento using errcode = '22023';
+  end if;
+
+  insert into public.pagina_eventos (
+    pagina, evento, visitante_id, sessao_id, perfil,
+    page_url, referrer, utm_source, utm_medium, utm_campaign, utm_content, utm_term,
+    fbclid, gclid, dispositivo
+  ) values (
+    v_pagina,
+    v_evento,
+    case when v_visitante ~ uuid_re then v_visitante::uuid end,
+    case when v_sessao ~ uuid_re then v_sessao::uuid end,
+    nullif(btrim(d ->> 'perfil'), ''),
+    nullif(btrim(d ->> 'page_url'), ''),
+    nullif(btrim(d ->> 'referrer'), ''),
+    nullif(btrim(d ->> 'utm_source'), ''),
+    nullif(btrim(d ->> 'utm_medium'), ''),
+    nullif(btrim(d ->> 'utm_campaign'), ''),
+    nullif(btrim(d ->> 'utm_content'), ''),
+    nullif(btrim(d ->> 'utm_term'), ''),
+    nullif(btrim(d ->> 'fbclid'), ''),
+    nullif(btrim(d ->> 'gclid'), ''),
+    nullif(btrim(d ->> 'dispositivo'), '')
+  );
+end;
+$$;
+
+
+-- --------------------------------------------------------------------------------------------
+-- paginas_resumo: os números das páginas de obrigado para o painel, contados sobre o período
+-- inteiro. Eventos entram por criado_em em [p_desde, p_ate).
+--
+--   p_mapa      = {rótulo do perfil: id da página}, montado pelo servidor a partir de
+--                 js/obrigado-config.js. As páginas da resposta são os valores do mapa — sempre
+--                 todas, mesmo sem nenhum evento (zeros e listas vazias).
+--   visitas     = eventos 'visita' (recarregar conta de novo)
+--   visitantes  = quem abriu, sem repetir: o id do aparelho; evento sem id conta como uma pessoa
+--                 ('evento-' || id), para ninguém sumir da conta
+--   cliques     = eventos 'clique_grupo'; clicaram = quem clicou, sem repetir (mesma chave)
+--   atribuidas  = pessoas (pesquisa_pessoas, uma por WhatsApp) desta pesquisa que CHEGARAM à tela
+--                 de fim no período (finalizado_em) e cujo perfil leva a esta página — é quem foi
+--                 redirecionado para ela
+--   por_perfil  = visitantes, clicaram e atribuidas por perfil (null = abriu sem perfil, ex.: link
+--                 direto); por_origem = por utm_source ('(sem utm)' quando vazio, as 30 maiores);
+--                 por_dia = por dia no fuso de São Paulo
+-- --------------------------------------------------------------------------------------------
+create or replace function public.paginas_resumo(
+  p_desde timestamptz default null,
+  p_ate timestamptz default null,
+  p_mapa jsonb default '{}'::jsonb
+)
+returns json
+language sql
+stable
+security invoker
+set search_path = public
+as $$
+  with
+  mapa as (
+    select m.key as perfil, btrim(m.value #>> '{}') as pagina
+    from jsonb_each(case when jsonb_typeof(p_mapa) = 'object' then p_mapa else '{}'::jsonb end) as m
+    where jsonb_typeof(m.value) = 'string'
+      and btrim(m.value #>> '{}') <> ''
+  ),
+  paginas as (
+    select distinct pagina from mapa
+  ),
+  eventos as materialized (
+    select e.pagina,
+           e.evento,
+           e.perfil,
+           coalesce(e.visitante_id::text, 'evento-' || e.id) as quem,
+           coalesce(nullif(btrim(e.utm_source), ''), '(sem utm)') as origem,
+           (e.criado_em at time zone 'America/Sao_Paulo')::date as dia
+    from public.pagina_eventos as e
+    where e.pagina in (select pagina from paginas)
+      and (p_desde is null or e.criado_em >= p_desde)
+      and (p_ate is null or e.criado_em < p_ate)
+  ),
+  atribuidas as materialized (
+    select m.pagina, p.perfil
+    from public.pesquisa_pessoas as p
+    join mapa as m on m.perfil = p.perfil
+    where p.pesquisa = 'icp-escola-ev'
+      and p.finalizado_em is not null
+      and (p_desde is null or p.finalizado_em >= p_desde)
+      and (p_ate is null or p.finalizado_em < p_ate)
+  )
+  select json_build_object('paginas', coalesce((
+    select json_agg(json_build_object(
+      'pagina', pg.pagina,
+      'visitas', t.visitas,
+      'visitantes', t.visitantes,
+      'cliques', t.cliques,
+      'clicaram', t.clicaram,
+      'atribuidas', (select count(*)::int from atribuidas as a where a.pagina = pg.pagina),
+      'por_perfil', (
+        select coalesce(json_agg(json_build_object('perfil', x.perfil, 'visitantes', x.visitantes,
+                                                   'clicaram', x.clicaram, 'atribuidas', x.atribuidas)
+                                 order by x.visitantes desc, x.atribuidas desc, x.perfil collate "C" nulls last), '[]'::json)
+        from (
+          select u.perfil,
+                 count(distinct u.quem) filter (where u.evento = 'visita')::int as visitantes,
+                 count(distinct u.quem) filter (where u.evento = 'clique_grupo')::int as clicaram,
+                 count(*) filter (where u.evento is null)::int as atribuidas
+          from (
+            select e.perfil, e.evento, e.quem from eventos as e where e.pagina = pg.pagina
+            union all
+            select a.perfil, null, null from atribuidas as a where a.pagina = pg.pagina
+          ) as u
+          group by u.perfil
+        ) as x
+      ),
+      'por_origem', (
+        select coalesce(json_agg(json_build_object('utm_source', x.origem, 'visitantes', x.visitantes, 'clicaram', x.clicaram)
+                                 order by x.visitantes desc, x.clicaram desc, x.origem collate "C"), '[]'::json)
+        from (
+          select e.origem,
+                 count(distinct e.quem) filter (where e.evento = 'visita')::int as visitantes,
+                 count(distinct e.quem) filter (where e.evento = 'clique_grupo')::int as clicaram
+          from eventos as e
+          where e.pagina = pg.pagina
+          group by e.origem
+          order by 2 desc, 3 desc, e.origem collate "C"
+          limit 30
+        ) as x
+      ),
+      'por_dia', (
+        select coalesce(json_agg(json_build_object('dia', x.dia, 'visitantes', x.visitantes, 'clicaram', x.clicaram)
+                                 order by x.dia), '[]'::json)
+        from (
+          select e.dia,
+                 count(distinct e.quem) filter (where e.evento = 'visita')::int as visitantes,
+                 count(distinct e.quem) filter (where e.evento = 'clique_grupo')::int as clicaram
+          from eventos as e
+          where e.pagina = pg.pagina
+          group by e.dia
+        ) as x
+      )
+    ) order by array_position(array['afericao', 'cuidador', 'evento_outubro'], pg.pagina) nulls last, pg.pagina collate "C")
+    from paginas as pg
+    cross join lateral (
+      select count(*) filter (where e.evento = 'visita')::int as visitas,
+             count(distinct e.quem) filter (where e.evento = 'visita')::int as visitantes,
+             count(*) filter (where e.evento = 'clique_grupo')::int as cliques,
+             count(distinct e.quem) filter (where e.evento = 'clique_grupo')::int as clicaram
+      from eventos as e
+      where e.pagina = pg.pagina
+    ) as t
+  ), '[]'::json));
+$$;
+
+revoke all on function public.pagina_registrar_evento(jsonb) from public, anon, authenticated;
+revoke all on function public.paginas_resumo(timestamptz, timestamptz, jsonb) from public, anon, authenticated;
+grant execute on function public.pagina_registrar_evento(jsonb) to service_role;
+grant execute on function public.paginas_resumo(timestamptz, timestamptz, jsonb) to service_role;
 
 -- Sem isto, as rotas novas do /rest/v1 respondem 404 até o PostgREST reler o esquema sozinho — e o
 -- formulário passaria os primeiros minutos sem gravar nada.

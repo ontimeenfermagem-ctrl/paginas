@@ -33,6 +33,8 @@ const SCREENS = process.env.E2E_SCREENS || "";
 const contexto = {};
 vm.runInNewContext(readFileSync(path.join(RAIZ, "js", "pesquisa-config.js"), "utf8"), contexto);
 const EV = contexto.EVPesquisa;
+vm.runInNewContext(readFileSync(path.join(RAIZ, "js", "obrigado-config.js"), "utf8"), contexto);
+const EV_OBRIGADO = contexto.EVObrigado;
 const PERGUNTAS_TOTAL = EV.PERGUNTAS.length; // 39; "fim" = 40
 
 const PAINEL_EMAIL = "equipe@escola-teste.com.br";
@@ -175,11 +177,11 @@ const ROSA = {
   }
 };
 
-// Beatriz, estudante: pula as três abertas e não tem etapa 9.
+// Beatriz, auxiliar/antiga atendente: pula as três abertas e cai na página da aula de aferição.
 const BEATRIZ = {
   contato: { nome: "Beatriz Lima", whatsapp: "(11) 94567-1234", digits: "11945671234", email: "bia.lima@usp.br" },
   respostas: {
-    perfil: "Estudante da área da saúde",
+    perfil: "Auxiliar ou antiga atendente de enfermagem",
     idade: "Até 24 anos",
     estado: "São Paulo",
     localidade: "Capital",
@@ -206,7 +208,9 @@ const BEATRIZ = {
     fontes_informacao: ["Instagram", "TikTok"],
     tipos_conteudo: ["Salários e oportunidades", "Empregos"],
     como_conheceu: "TikTok",
-    tempo_acompanha: "Menos de 1 mês"
+    tempo_acompanha: "Menos de 1 mês",
+    auxiliar_situacao: "Gostaria de me tornar técnico(a) de enfermagem",
+    auxiliar_documentos: "Tenho alguns documentos"
   }
 };
 
@@ -328,6 +332,13 @@ async function esperarTela(page, id) {
     id,
     { timeout: 10_000 }
   );
+}
+
+/** Ao terminar, o formulário vai sozinho para a página de obrigado do perfil (js/obrigado-config.js). */
+async function esperarObrigado(page, rota) {
+  await page.waitForURL((url) => url.pathname === rota, { timeout: 15_000 });
+  await page.waitForSelector("#ob-titulo");
+  return new URL(page.url());
 }
 
 async function esperarTrocar(page, anterior) {
@@ -542,11 +553,11 @@ test("a) técnica: redirect com UTM, erros e sugestão no contato, todas as perg
   await foto(page, "04-pergunta-unica-fala-etapa");
 
   const ganchos = {
-    // Pergunta 1: só os 5 perfis concretos.
+    // Pergunta 1: só os 4 perfis (sem "Outro" nem "Estudante", decisões do cliente).
     perfil: async (p) => {
       const valores = await p.$$eval("#tela-pergunta .opcao", (botoes) => botoes.map((b) => b.dataset.valor));
       assert.deepEqual(valores, Object.values(EV.PERFIL));
-      assert.equal(valores.length, 5);
+      assert.equal(valores.length, 4);
     },
     // Exclusiva: marcar "Nada me impede" desmarca as outras, e marcar outra desmarca ela.
     objecoes: async (p) => {
@@ -581,9 +592,12 @@ test("a) técnica: redirect com UTM, erros e sugestão no contato, todas as perg
     }
   };
   await responderCaminho(page, JOANA.respostas, { ganchos });
-  await esperarTela(page, "fim");
-  assert.equal(await page.textContent("#fim-saudacao"), "Muito obrigada, Joana!");
-  await foto(page, "11-fim");
+  const chegada = await esperarObrigado(page, "/obrigado-evento-outubro");
+  // As UTMs vão junto no redirecionamento.
+  assert.equal(chegada.searchParams.get("utm_source"), "instagram");
+  assert.equal(chegada.searchParams.get("utm_campaign"), "icp-teste");
+  assert.match(await page.textContent("#ob-titulo"), /Joana/);
+  await foto(page, "11-obrigado-evento");
 
   const [linha] = await aguardar("Joana finalizada no banco", async () => {
     const l = await tentativas(JOANA.contato.digits);
@@ -592,9 +606,9 @@ test("a) técnica: redirect com UTM, erros e sugestão no contato, todas as perg
   ids.joana = linha.id;
   ids.joanaVisitante = linha.visitante_id;
 
-  // Recarregar no fim: abre direto no obrigado e NÃO manda um segundo aviso ao n8n.
-  await page.reload();
-  await esperarTela(page, "fim");
+  // Voltar à pesquisa depois de concluir: vai direto para o obrigado e NÃO manda um segundo aviso ao n8n.
+  await page.goto(`${base}/pesquisa-icp`);
+  await esperarObrigado(page, "/obrigado-evento-outubro");
   await esperar(800);
   await ctx.close();
 });
@@ -707,7 +721,7 @@ test("c) auxiliar volta até a pergunta 1, troca para enfermeira e conclui; bloc
   await opcao(page, "Enfermeiro(a)").click();
   await esperarTela(page, "enfermeiro_interesse");
   await responderCaminho(page, ROSA.respostas, { desde: "enfermeiro_interesse" });
-  await esperarTela(page, "fim");
+  await esperarObrigado(page, "/obrigado-evento-outubro");
 
   const [l] = await aguardar("Rosa finalizada", async () => {
     const linhas = await tentativas(ROSA.contato.digits);
@@ -724,10 +738,10 @@ test("c) auxiliar volta até a pergunta 1, troca para enfermeira e conclui; bloc
 });
 
 /* ------------------------------------------------------------------------------------------ */
-/* d) Beatriz, estudante: e-mail recusado pelo servidor, pula as abertas                        */
+/* d) Beatriz, auxiliar: e-mail recusado pelo servidor, pula as abertas                         */
 /* ------------------------------------------------------------------------------------------ */
 
-test("d) estudante: e-mail de domínio inexistente é recusado pelo servidor; pula as abertas e termina sem etapa 9", async () => {
+test("d) auxiliar: e-mail de domínio inexistente é recusado pelo servidor; pula as abertas e vai para a aula de aferição", async () => {
   const { ctx, page } = await celular();
   await abrirEComecar(page, "/pesquisa-icp");
   await preencherContato(page, { nome: BEATRIZ.contato.nome, whatsappDigitado: "11945671234", email: `bia.lima@${DOMINIO_INEXISTENTE}` });
@@ -740,7 +754,7 @@ test("d) estudante: e-mail de domínio inexistente é recusado pelo servidor; pu
   await page.click("#botao-contato");
   await esperarTela(page, "perfil");
   await responderCaminho(page, BEATRIZ.respostas);
-  await esperarTela(page, "fim");
+  await esperarObrigado(page, "/obrigado-afericao");
 
   const [l] = await aguardar("Beatriz finalizada", async () => {
     const linhas = await tentativas(BEATRIZ.contato.digits);
@@ -750,8 +764,8 @@ test("d) estudante: e-mail de domínio inexistente é recusado pelo servidor; pu
   ids.beatriz = l.id;
   assert.deepEqual(l.respostas, BEATRIZ.respostas);
   assert.equal(l.status, "concluida");
-  assert.equal(l.total_perguntas, "31");
-  assert.equal(l.etapa_max, "8", "estudante não tem etapa 9");
+  assert.equal(l.total_perguntas, "33");
+  assert.equal(l.etapa_max, "9");
   assert.equal(l.pergunta_max, "fim");
   assert.equal(l.email, "bia.lima@usp.br");
 });
@@ -869,7 +883,7 @@ test("e) mesma cuidadora em outro aparelho (mesmo WhatsApp) conclui: 1 pessoa, 2
   await preencherContato(page, { nome: CARLA_2.contato.nome, whatsappDigitado: "21998765432", email: CARLA_2.contato.email });
   await esperarTela(page, "perfil");
   await responderCaminho(page, CARLA_2.respostas);
-  await esperarTela(page, "fim");
+  await esperarObrigado(page, "/obrigado-cuidador");
   const linhas = await aguardar("Carla 2 finalizada", async () => {
     const l = await tentativas(CARLA_CONTATO.digits);
     return l.length === 2 && l[1].finalizado_em && l[1].webhook_enviado_em ? l : null;
@@ -937,8 +951,18 @@ test("n8n: um aviso 'pesquisa_concluida' por tentativa finalizada, nenhum para q
   assert.equal(porId.tecnico_objetivo.resposta_texto, "Trabalhar em hospital");
   assert.equal(porId.tecnico_objetivo.etapa_titulo, "Perguntas específicas do seu perfil");
 
+  // Código interno, etiqueta de CRM e página de obrigado atribuída (técnico e enfermeiro dividem a
+  // página, mas continuam separados no código e na etiqueta).
+  assert.equal(joana.perfil_codigo, "tecnico_enfermagem");
+  assert.equal(joana.segmento, "PERFIL_TECNICO");
+  assert.equal(joana.pagina_obrigado.id, "evento_outubro");
+  assert.equal(joana.pagina_obrigado.rota, "/obrigado-evento-outubro");
+
   const beatriz = recebidos.find((r) => r.corpo.sessao_id === ids.beatriz).corpo;
-  assert.equal(beatriz.perguntas.length, 31);
+  assert.equal(beatriz.perguntas.length, 33);
+  assert.equal(beatriz.perfil_codigo, "auxiliar_atendente");
+  assert.equal(beatriz.segmento, "PERFIL_AUXILIAR_ATENDENTE");
+  assert.equal(beatriz.pagina_obrigado.id, "afericao");
   const sonho = beatriz.perguntas.find((p) => p.id === "sonho");
   assert.equal(sonho.resposta, null);
   assert.equal(sonho.resposta_texto, "");
@@ -946,10 +970,33 @@ test("n8n: um aviso 'pesquisa_concluida' por tentativa finalizada, nenhum para q
   const rosa = recebidos.find((r) => r.corpo.sessao_id === ids.rosa).corpo;
   assert.ok(!rosa.perguntas.some((p) => p.id.startsWith("auxiliar_")));
   assert.ok(rosa.perguntas.some((p) => p.id === "enfermeiro_caminho"));
+  assert.equal(rosa.perfil_codigo, "enfermeiro");
+  assert.equal(rosa.segmento, "PERFIL_ENFERMEIRO");
+  assert.equal(rosa.pagina_obrigado.id, "evento_outubro");
 
   const carla = recebidos.find((r) => r.corpo.sessao_id === ids.carla2).corpo;
   assert.equal(carla.utm.utm_source, "whatsapp");
   assert.equal(carla.lead.email, "carla.m@gmail.com");
+  assert.equal(carla.perfil_codigo, "cuidador");
+  assert.equal(carla.pagina_obrigado.id, "cuidador");
+});
+
+test("páginas de obrigado: cada pessoa que terminou registrou a visita na SUA página, com perfil e sessão", async () => {
+  const eventos = await aguardar("visitas das páginas de obrigado", async () => {
+    const linhas = await stack.sql("select pagina, evento, perfil, sessao_id::text as sessao_id, utm_source from public.pagina_eventos where evento = 'visita' order by criado_em");
+    return linhas.length >= 5 ? linhas : null;
+  });
+  const porSessao = (id) => eventos.filter((e) => e.sessao_id === id);
+  assert.deepEqual(porSessao(ids.joana).map((e) => e.pagina)[0], "evento_outubro");
+  assert.equal(porSessao(ids.joana)[0].perfil, "Técnico(a) de enfermagem");
+  assert.equal(porSessao(ids.joana)[0].utm_source, "instagram");
+  assert.equal(porSessao(ids.rosa)[0].pagina, "evento_outubro");
+  assert.equal(porSessao(ids.rosa)[0].perfil, "Enfermeiro(a)");
+  assert.equal(porSessao(ids.beatriz)[0].pagina, "afericao");
+  assert.equal(porSessao(ids.carla2)[0].pagina, "cuidador");
+  // Nenhuma página de outro segmento foi aberta por ninguém.
+  const erradas = eventos.filter((e) => e.perfil && EV_OBRIGADO.paginaDoPerfil(e.perfil).id !== e.pagina);
+  assert.deepEqual(erradas, []);
 });
 
 /* ------------------------------------------------------------------------------------------ */
@@ -1022,7 +1069,7 @@ test("g) painel com todo mundo: números exatos, quadros, cruzamento, abertas, t
 
   // ICP por perfil: um cartão por perfil com gente.
   const cartoes = await page.$$eval("[data-icp] [data-icp-perfil]", (els) => els.map((el) => el.dataset.icpPerfil).sort());
-  assert.deepEqual(cartoes, ["cuidador", "enfermeiro", "estudante", "tecnico"]);
+  assert.deepEqual(cartoes, ["auxiliar", "cuidador", "enfermeiro", "tecnico"]);
   const tecnico = await page.textContent("[data-icp-perfil='tecnico']");
   assert.match(tecnico, /1 pessoa/);
   assert.match(tecnico, /Pernambuco/);
@@ -1048,10 +1095,10 @@ test("g) painel com todo mundo: números exatos, quadros, cruzamento, abertas, t
   assert.equal((await clinica.locator(".num span").textContent()).trim(), "25%");
   assert.equal(await page.locator("[data-outro]").count(), 0);
   assert.doesNotMatch(await page.textContent("[data-perguntas]"), /escreveram em Outro/);
-  // Abas de perfil: Todos + os 5 perfis.
+  // Abas de perfil: Todos + os 4 perfis.
   assert.deepEqual(
     await page.$$eval("[data-perfis] [data-perfil]", (abas) => abas.map((a) => a.dataset.perfil)),
-    ["", "auxiliar", "cuidador", "tecnico", "enfermeiro", "estudante"]
+    ["", "auxiliar", "cuidador", "tecnico", "enfermeiro"]
   );
 
   // Cruzamento padrão perfil × renda atual.

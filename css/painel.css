@@ -2632,3 +2632,210 @@ summary.icp-cabeca::after {
     background: CanvasText;
   }
 }
+
+/* ------------------------------------------------------------ Páginas de obrigado */
+
+/* O período vale para todas as abas da faixa; perfil, busca e situação só existem na pesquisa. */
+.filtros[data-pagina-ativa]:not([data-pagina-ativa="pesquisa-icp"]) [data-so-pesquisa] {
+  display: none !important;
+}
+
+.secao-obrigado {
+  margin-top: 1.25rem;
+}
+
+.obrigado,
+.obr-lista {
+  display: grid;
+  gap: 1rem;
+}
+
+.placar.obr-placar {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.obr-placar li {
+  padding: 0.75rem 0.8rem;
+}
+
+.obr-vazio {
+  margin-top: 0;
+}
+
+.obr-vazio h3 {
+  font-size: 1.2rem;
+}
+
+.obr-cartao {
+  display: grid;
+  margin-top: 0;
+  gap: 1rem;
+}
+
+.obr-cartao .nota {
+  margin-top: 0;
+}
+
+.obr-cabeca {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem 1rem;
+}
+
+.obr-titulo {
+  min-width: 0;
+}
+
+.obr-titulo h3 {
+  font-size: 1.15rem;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.obr-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 0.35rem;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+  gap: 0.3rem 0.6rem;
+}
+
+.obr-rota {
+  padding: 0.05rem 0.55rem;
+  border-radius: 999px;
+  background: var(--parchment-deep);
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+}
+
+.obr-grupo {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: flex-start;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+  gap: 0.4rem;
+}
+
+.obr-grupo a {
+  min-width: 0;
+  color: var(--ember);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.obr-sem-link {
+  max-width: 30rem;
+  flex: 1 1 260px;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--gold) 60%, var(--border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--gold-soft) 45%, var(--parchment-soft));
+  color: var(--ink);
+  line-height: 1.4;
+}
+
+.obr-sem-link svg {
+  flex: none;
+  margin-top: 0.15rem;
+  color: #7d6331;
+}
+
+.obr-sem-link strong {
+  display: block;
+}
+
+.obr-divisoes {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.obr-divisao {
+  min-width: 0;
+}
+
+.obr-divisao h4 {
+  margin-bottom: 0.45rem;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.obr-divisao .vazio {
+  padding: 1rem;
+}
+
+/* Tabelas estreitas (três lado a lado no computador, uma por vez no celular): células mais justas
+   para Perfil + três números caberem sem rolagem. */
+.obr-divisao th,
+.obr-divisao td {
+  padding: 0.5rem 0.5rem;
+}
+
+.obr-divisao thead th {
+  white-space: normal;
+}
+
+.obr-divisao td.n .taxa-inline {
+  display: block;
+  font-size: 0.78rem;
+}
+
+.obr-mais-dias {
+  margin-top: 0.5rem;
+}
+
+.taxa-inline {
+  color: var(--ink-soft);
+  font-size: 0.85em;
+}
+
+tr.fora-da-pagina th,
+tr.fora-da-pagina td {
+  color: var(--ink-soft);
+}
+
+@media (min-width: 1080px) {
+  .obr-divisoes {
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 719px) {
+  .obr-placar li {
+    padding: 0.65rem 0.6rem;
+  }
+
+  /* Perfil + três números numa tela de 390px sem rolagem lateral. */
+  .obr-divisao table {
+    font-size: 0.8rem;
+  }
+
+  .obr-divisao th,
+  .obr-divisao td {
+    padding: 0.45rem 0.3rem;
+  }
+
+  .obr-divisao th:first-child,
+  .obr-divisao td:first-child {
+    padding-left: 0.55rem;
+  }
+
+  .obr-divisao thead th {
+    font-size: 0.72rem;
+  }
+
+  .obr-placar .valor {
+    font-size: 1.45rem;
+  }
+}

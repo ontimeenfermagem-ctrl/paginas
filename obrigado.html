@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!--
+      Uma página só para as 3 rotas de obrigado (/obrigado-afericao, /obrigado-cuidador,
+      /obrigado-evento-outubro). O js/obrigado.js lê a rota e monta o conteúdo a partir do
+      js/obrigado-config.js — texto, botão e link do grupo moram lá, não aqui.
+    -->
+    <title>Obrigado | Escola Enfermagem de Valor</title>
+    <meta name="description" content="Pesquisa concluída. O seu próximo passo com a Escola Enfermagem de Valor." />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="theme-color" content="#f4ebdd" />
+    <meta name="format-detection" content="telephone=no" />
+
+    <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/img/apple-touch-icon.png" />
+    <link rel="preload" href="/fonts/parkinsans-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/css/obrigado.css" />
+
+    <script src="/js/pesquisa-config.js" defer></script>
+    <script src="/js/obrigado-config.js" defer></script>
+    <script src="/js/obrigado.js" defer></script>
+  </head>
+  <body class="grao">
+    <a class="pular-link" href="#conteudo">Pular para o conteúdo</a>
+
+    <main id="conteudo" class="palco">
+      <!-- ============================================================ A página do segmento -->
+      <article class="ob" id="ob-pagina" aria-labelledby="ob-titulo" hidden>
+        <header class="ob-cabeca">
+          <img class="ob-logo" src="/img/ev-logo-color.png" alt="Escola Enfermagem de Valor" width="414" height="252" />
+          <p class="eyebrow" id="ob-eyebrow"></p>
+          <h1 class="ob-titulo" id="ob-titulo" tabindex="-1"></h1>
+          <p class="ob-sub" id="ob-sub"></p>
+        </header>
+
+        <!-- O botão vem logo depois do texto: no celular ele precisa aparecer sem rolar. -->
+        <div class="ob-acao">
+          <a class="botao-whats pulsa" id="ob-cta" data-cta="topo" href="#" target="_blank" rel="noopener" hidden>
+            <svg class="botao-whats-icone" viewBox="0 0 24 24" width="30" height="30" aria-hidden="true" focusable="false">
+              <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413z" />
+            </svg>
+            <span class="botao-whats-texto" data-cta-texto></span>
+          </a>
+          <p class="ob-nota" id="ob-nota" hidden>Abre direto no seu WhatsApp</p>
+
+          <!-- Link do grupo ainda não configurado: nada de botão quebrado, um aviso gentil. -->
+          <p class="ob-aviso" id="ob-aviso" hidden>
+            <span class="ob-aviso-icone" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="24" height="24" focusable="false">
+                <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413z" />
+              </svg>
+            </span>
+            <span>O link do grupo chega no seu WhatsApp em instantes.</span>
+          </p>
+        </div>
+
+        <section class="ob-cartao" aria-labelledby="ob-intro">
+          <h2 class="ob-intro" id="ob-intro"></h2>
+          <ul class="ob-topicos" id="ob-topicos"></ul>
+          <a class="botao-whats" id="ob-cta-fim" data-cta="fim" href="#" target="_blank" rel="noopener" hidden>
+            <svg class="botao-whats-icone" viewBox="0 0 24 24" width="30" height="30" aria-hidden="true" focusable="false">
+              <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413z" />
+            </svg>
+            <span class="botao-whats-texto" data-cta-texto></span>
+          </a>
+        </section>
+      </article>
+
+      <!-- ============================================================ Rota desconhecida -->
+      <section class="ob ob-perdida" id="ob-desconhecida" aria-labelledby="ob-desconhecida-titulo" hidden>
+        <img class="ob-logo" src="/img/ev-logo-color.png" alt="Escola Enfermagem de Valor" width="414" height="252" />
+        <h1 class="ob-titulo" id="ob-desconhecida-titulo" tabindex="-1">Não encontramos esta página</h1>
+        <p class="ob-sub">Se você ainda não respondeu a pesquisa da Escola Enfermagem de Valor, é só tocar no botão abaixo.</p>
+        <div class="ob-acao">
+          <a class="botao botao-principal" href="/pesquisa-icp">Ir para a pesquisa</a>
+        </div>
+      </section>
+
+      <noscript>
+        <div class="sem-js">
+          <img src="/img/ev-logo-color.png" alt="Escola Enfermagem de Valor" width="207" height="126" />
+          <h1>Pesquisa concluída! 💜</h1>
+          <p>
+            Para ver o seu próximo passo, esta página precisa do JavaScript do navegador. Se você abriu pelo Instagram
+            ou WhatsApp, toque nos três pontinhos e escolha “Abrir no navegador”.
+          </p>
+        </div>
+      </noscript>
+    </main>
+
+    <footer class="ob-rodape" id="ob-rodape" hidden>
+      <p class="ob-rodape-marca">Escola Enfermagem de Valor</p>
+      <a class="link-discreto" href="/pesquisa-icp?nova=1">Responder a pesquisa como outra pessoa</a>
+    </footer>
+  </body>
+</html>

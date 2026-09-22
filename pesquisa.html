@@ -42,6 +42,7 @@
 
     <script src="/js/lead-rules.js" defer></script>
     <script src="/js/pesquisa-config.js" defer></script>
+    <script src="/js/obrigado-config.js" defer></script>
     <script src="/js/pesquisa.js" defer></script>
   </head>
   <body class="grao">
@@ -249,9 +250,13 @@
           pra sua realidade.
         </p>
         <div class="filete" aria-hidden="true"></div>
-        <p class="fim-fechar">Você já pode fechar esta página.</p>
+        <!-- Com página de obrigado (o normal), esta tela só aparece de passagem até o redirecionamento. -->
+        <p class="fim-abrindo" id="fim-abrindo" role="status" hidden>
+          <span class="fim-abrindo-roda" aria-hidden="true"></span>
+          <span>Abrindo o seu próximo passo…</span>
+        </p>
+        <p class="fim-fechar" id="fim-fechar">Você já pode fechar esta página.</p>
         <img class="fim-logo" src="/img/ev-logo-color.png" alt="Escola Enfermagem de Valor" width="414" height="252" loading="lazy" />
-        <button type="button" class="link-discreto" id="botao-outra-pessoa">Responder como outra pessoa</button>
       </section>
 
       <noscript>

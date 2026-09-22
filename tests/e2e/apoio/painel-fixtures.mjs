@@ -1,20 +1,25 @@
 // Apoio da suíte tests/e2e/painel.e2e.mjs.
 //
-// Gera um conjunto realista e determinístico (semente fixa) de visitantes e pessoas e reproduz, em
-// JS, o que as funções SQL devolvem (pesquisa_painel, pesquisa_cruzamento, pesquisa_abertas) e a
-// view pesquisa_pessoas para /respostas. Usa o EVPesquisa de verdade (via vm). As funções SQL em
-// si são provadas contra o Postgres em sql.e2e.mjs; aqui o assunto é a TELA do painel.
+// Gera um conjunto realista e determinístico (semente fixa) de visitantes, pessoas e eventos das
+// páginas de obrigado e reproduz, em JS, o que as funções SQL devolvem (pesquisa_painel,
+// pesquisa_cruzamento, pesquisa_abertas, paginas_resumo) e a view pesquisa_pessoas para
+// /respostas. Usa o EVPesquisa e o EVObrigado de verdade (via vm, no mesmo contexto, como no
+// navegador). As funções SQL em si são provadas contra o Postgres em sql.e2e.mjs; aqui o assunto é
+// a TELA do painel.
 //
-// Só perfis e alternativas concretas: nenhuma pergunta tem "Outro" (decisão do cliente).
+// Só os 4 perfis e alternativas concretas: nenhuma pergunta tem "Outro", e "Estudante" saiu
+// (decisões do cliente).
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
 const RAIZ = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const ctx = {};
-vm.runInNewContext(fs.readFileSync(path.join(RAIZ, "js", "pesquisa-config.js"), "utf8"), ctx);
+const ctx = vm.createContext({});
+vm.runInContext(fs.readFileSync(path.join(RAIZ, "js", "pesquisa-config.js"), "utf8"), ctx);
+vm.runInContext(fs.readFileSync(path.join(RAIZ, "js", "obrigado-config.js"), "utf8"), ctx);
 export const EV = ctx.EVPesquisa;
+export const OBR = ctx.EVObrigado;
 
 function rng(seed) {
   let s = seed >>> 0;
@@ -86,8 +91,7 @@ const PERFIL_PESOS = [
   ["tecnico", 30],
   ["cuidador", 22],
   ["auxiliar", 15],
-  ["enfermeiro", 13],
-  ["estudante", 12]
+  ["enfermeiro", 13]
 ];
 
 export function gerar({ seed = 7, pessoas: totalPessoas = 800, agora = new Date() } = {}) {
@@ -130,7 +134,7 @@ export function gerar({ seed = 7, pessoas: totalPessoas = 800, agora = new Date(
     visitantes.push({ visitante_id: `v-extra-${i}`, criado_em: criado, visitas: 1 + (r() < 0.3 ? 1 + Math.floor(r() * 3) : 0), comecou_em: r() < 0.35 ? criado : null, ...rastreio(), dispositivo: disp() });
   }
 
-  const seguranca = { tecnico: 4.5, cuidador: 6, auxiliar: 5, enfermeiro: 7, estudante: 4 };
+  const seguranca = { tecnico: 4.5, cuidador: 6, auxiliar: 5, enfermeiro: 7 };
   for (let i = 0; i < totalPessoas; i++) {
     const chavePerfil = pesado(PERFIL_PESOS);
     const perfil = EV.PERFIL[chavePerfil];
@@ -156,7 +160,7 @@ export function gerar({ seed = 7, pessoas: totalPessoas = 800, agora = new Date(
       tempos[p.id] = 3 + Math.floor(r() * 35);
       if (p.tipo === "unica" || p.tipo === "lista") {
         let opcoes = p.opcoes;
-        let pico = { idade: chavePerfil === "estudante" ? 0 : chavePerfil === "tecnico" ? 2 : 3, renda_atual: chavePerfil === "enfermeiro" ? 3 : 1, disposicao_investimento: 2, maior_investimento: 2 }[p.id];
+        let pico = { idade: chavePerfil === "tecnico" ? 2 : 3, renda_atual: chavePerfil === "enfermeiro" ? 3 : 1, disposicao_investimento: 2, maior_investimento: 2 }[p.id];
         if (pico === undefined) pico = Math.floor(r() * opcoes.length);
         let v = p.id === "estado" ? pesado(opcoes.map((o) => [o, { "São Paulo": 22, "Minas Gerais": 11, "Rio de Janeiro": 9, Bahia: 8, Pernambuco: 5, Ceará: 5, Paraná: 5, "Rio Grande do Sul": 4, Goiás: 3, Pará: 3 }[o] || 1])) : comPico(opcoes, pico);
         bruto[p.id] = v;
@@ -206,6 +210,8 @@ export function gerar({ seed = 7, pessoas: totalPessoas = 800, agora = new Date(
       atualizado_em: concluido || criado,
       ultima_resposta_em: concluido || criado,
       concluido_em: concluido,
+      // Quem completou chegou à tela de fim (e foi levado à página de obrigado) na mesma hora.
+      finalizado_em: concluido,
       status: prog.completa ? "concluida" : "em_andamento",
       seq: 10,
       nome,
@@ -241,7 +247,35 @@ export function gerar({ seed = 7, pessoas: totalPessoas = 800, agora = new Date(
   // Uma pessoa com nome malicioso para testar escape.
   respostas[3].nome = `<img src=x onerror="window.__xss=1">Joana "Teste" & Cia`;
   respostas[3].respostas = { ...respostas[3].respostas };
-  return { visitantes, pessoas: respostas };
+
+  // Páginas de obrigado: semente própria, para não mexer na sequência das pessoas acima. ~82% de
+  // quem terminou chega à página (1 em 5 recarrega), ~60% de quem chegou clica no grupo (às vezes
+  // duas vezes); mais uns acessos diretos, sem perfil, alguns sem id de aparelho.
+  const r2 = rng(seed + 101);
+  const eventos = [];
+  let idEvento = 0;
+  const evento = (dados) => eventos.push({ id: ++idEvento, ...dados });
+  for (const p of respostas) {
+    const pagina = p.finalizado_em ? OBR.paginaDoPerfil(p.perfil) : null;
+    if (!pagina || r2() > 0.82) continue;
+    const base = new Date(p.finalizado_em).getTime();
+    const quando = (segundos) => new Date(Math.min(base + segundos * 1000, agoraMs - 500)).toISOString();
+    const comum = { pagina: pagina.id, visitante_id: p.visitante_id, perfil: p.perfil, utm_source: p.utm_source, dispositivo: p.dispositivo };
+    evento({ ...comum, evento: "visita", criado_em: quando(2) });
+    if (r2() < 0.2) evento({ ...comum, evento: "visita", criado_em: quando(90) });
+    if (r2() < 0.6) {
+      evento({ ...comum, evento: "clique_grupo", criado_em: quando(20) });
+      if (r2() < 0.15) evento({ ...comum, evento: "clique_grupo", criado_em: quando(25) });
+    }
+  }
+  for (let i = 0; i < 24; i++) {
+    const pagina = OBR.LISTA[i % OBR.LISTA.length];
+    const criado = carimbo(Math.floor(r2() * 10));
+    const comum = { pagina: pagina.id, visitante_id: i % 4 === 0 ? null : `v-direto-${i}`, perfil: null, utm_source: i % 3 === 0 ? "whatsapp" : null, dispositivo: "mobile" };
+    evento({ ...comum, evento: "visita", criado_em: criado });
+    if (i % 2 === 0) evento({ ...comum, evento: "clique_grupo", criado_em: criado });
+  }
+  return { visitantes, pessoas: respostas, eventos };
 }
 
 /* ------------------------------------------------------------------ Agregados (espelho do SQL) */
@@ -431,4 +465,57 @@ export function lista(dados, filtros, { status, busca, limite = 100, offset = 0 
   let { pessoas } = recorte(dados, { ...filtros, status: status ?? filtros.status, busca: busca ?? filtros.busca });
   pessoas = pessoas.slice().sort((a, b) => b.criado_em.localeCompare(a.criado_em) || b.id.localeCompare(a.id));
   return { total: pessoas.length, itens: pessoas.slice(offset, offset + limite) };
+}
+
+/**
+ * Espelho de paginas_resumo(p_desde, p_ate, p_mapa): uma entrada por página de obrigado, na ordem
+ * do config, com zeros e listas vazias quando ninguém passou por ela.
+ */
+export function paginas(dados, { desde, ate } = {}) {
+  const mapa = new Map();
+  for (const pagina of OBR.LISTA) for (const perfil of pagina.perfis) mapa.set(perfil, pagina.id);
+  const eventos = (dados.eventos || []).filter((e) => noRecorte(e.criado_em, desde, ate));
+  const atribuidas = dados.pessoas.filter((p) => p.finalizado_em && noRecorte(p.finalizado_em, desde, ate) && mapa.has(p.perfil));
+  const quem = (e) => e.visitante_id ?? `evento-${e.id}`;
+  const distintos = (lista) => new Set(lista.map(quem)).size;
+  const agrupar = (lista, chave) => {
+    const grupos = new Map();
+    for (const item of lista) {
+      const k = chave(item);
+      if (!grupos.has(k)) grupos.set(k, []);
+      grupos.get(k).push(item);
+    }
+    return grupos;
+  };
+  return Array.from(OBR.LISTA, (pagina) => {
+    const ev = eventos.filter((e) => e.pagina === pagina.id);
+    const visitas = ev.filter((e) => e.evento === "visita");
+    const cliques = ev.filter((e) => e.evento === "clique_grupo");
+    const atr = atribuidas.filter((p) => mapa.get(p.perfil) === pagina.id);
+    const perfis = new Set([...ev.map((e) => e.perfil ?? null), ...atr.map((p) => p.perfil)]);
+    return {
+      pagina: pagina.id,
+      visitas: visitas.length,
+      visitantes: distintos(visitas),
+      cliques: cliques.length,
+      clicaram: distintos(cliques),
+      atribuidas: atr.length,
+      por_perfil: Array.from(perfis, (perfil) => ({
+        perfil,
+        visitantes: distintos(visitas.filter((e) => (e.perfil ?? null) === perfil)),
+        clicaram: distintos(cliques.filter((e) => (e.perfil ?? null) === perfil)),
+        atribuidas: atr.filter((p) => p.perfil === perfil).length
+      })).sort((a, b) => b.visitantes - a.visitantes),
+      por_origem: Array.from(agrupar(ev, (e) => (e.utm_source && String(e.utm_source).trim()) || "(sem utm)"), ([utm_source, lista]) => ({
+        utm_source,
+        visitantes: distintos(lista.filter((e) => e.evento === "visita")),
+        clicaram: distintos(lista.filter((e) => e.evento === "clique_grupo"))
+      })).sort((a, b) => b.visitantes - a.visitantes || b.clicaram - a.clicaram),
+      por_dia: Array.from(agrupar(ev, (e) => diaSP(e.criado_em)), ([dia, lista]) => ({
+        dia,
+        visitantes: distintos(lista.filter((e) => e.evento === "visita")),
+        clicaram: distintos(lista.filter((e) => e.evento === "clique_grupo"))
+      })).sort((a, b) => a.dia.localeCompare(b.dia))
+    };
+  });
 }

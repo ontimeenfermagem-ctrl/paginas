@@ -1429,6 +1429,352 @@ describe("view pesquisa_planilha", () => {
   });
 });
 
+/* ------------------------------------------------------------------------------------------ */
+/* Páginas de obrigado: pagina_eventos, pagina_registrar_evento, paginas_resumo                */
+/* ------------------------------------------------------------------------------------------ */
+
+const AUX = "Auxiliar ou antiga atendente de enfermagem";
+// O mapa que o servidor manda (js/obrigado-config.js): perfil → página. Chaves fora de ordem de
+// propósito — a resposta sai sempre em afericao, cuidador, evento_outubro.
+const MAPA = {
+  "Enfermeiro(a)": "evento_outubro",
+  "Cuidador(a)": "cuidador",
+  [AUX]: "afericao",
+  "Técnico(a) de enfermagem": "evento_outubro"
+};
+
+/** pagina_registrar_evento devolve void: o PostgREST responde 204. */
+async function registrarPagina(p) {
+  const r = await rpc("pagina_registrar_evento", { p });
+  assert.equal(r.status, 204, `pagina_registrar_evento respondeu ${r.status}: ${JSON.stringify(r.json)}`);
+}
+
+async function limparEventos() {
+  await stack.sql("truncate table public.pagina_eventos restart identity");
+}
+
+async function eventosGravados() {
+  return await stack.sql(
+    "select pagina, evento, visitante_id, sessao_id, perfil, page_url, referrer, utm_source, utm_medium, utm_campaign, utm_content, utm_term, fbclid, gclid, dispositivo from public.pagina_eventos order by id"
+  );
+}
+
+describe("páginas de obrigado: instalação e segurança", () => {
+  test("tabela, índice, RLS sem política, funções invoker com search_path; o arquivo roda de novo sem perder evento", async () => {
+    await limparEventos();
+    assert.equal((await rpc("pagina_registrar_evento", { p: { pagina: "cuidador", evento: "visita" } })).status, 204);
+
+    await stack.aplicarSql();
+    await stack.aplicarSql();
+
+    const [contagem] = await stack.sql("select count(*) as n from public.pagina_eventos");
+    assert.equal(contagem.n, "1");
+    const [objetos] = await stack.sql(`
+      select
+        (select count(*) from pg_proc where pronamespace = 'public'::regnamespace and proname in ('pagina_registrar_evento', 'paginas_resumo')) as funcoes,
+        (select count(*) from pg_indexes where schemaname = 'public' and tablename = 'pagina_eventos') as indices,
+        (select relrowsecurity::text from pg_class where oid = 'public.pagina_eventos'::regclass) as rls,
+        (select count(*) from pg_policies where tablename = 'pagina_eventos') as politicas
+    `);
+    assert.deepEqual(objetos, { funcoes: "2", indices: "2", rls: "true", politicas: "0" });
+
+    const funcoes = await stack.sql(`
+      select proname, prosecdef::text as definer, array_to_string(proconfig, ',') as config, pg_get_function_identity_arguments(oid) as args
+      from pg_proc where pronamespace = 'public'::regnamespace and proname in ('pagina_registrar_evento', 'paginas_resumo') order by proname
+    `);
+    assert.deepEqual(funcoes, [
+      { proname: "pagina_registrar_evento", definer: "false", config: "search_path=public", args: "p jsonb" },
+      { proname: "paginas_resumo", definer: "false", config: "search_path=public", args: "p_desde timestamp with time zone, p_ate timestamp with time zone, p_mapa jsonb" }
+    ]);
+
+    // A rota nova já responde pelo PostgREST depois de reaplicado (notify pgrst).
+    const resumo = await rpcOk("paginas_resumo", { p_mapa: MAPA });
+    assert.equal(resumo.paginas.length, 3);
+  });
+
+  for (const papel of ["anon", "authenticated"]) {
+    test(`${papel}: não lê, não escreve e não executa nada das páginas de obrigado`, async () => {
+      await limparEventos();
+      await registrarPagina({ pagina: "afericao", evento: "visita", perfil: AUX });
+      const chave = papel === "anon" ? stack.anonKey : stack.authenticatedKey;
+
+      const leitura = await chamar("GET", "pagina_eventos?select=*", { chave });
+      assert.ok([401, 403].includes(leitura.status), `${papel} GET -> ${leitura.status}`);
+      assert.ok(!Array.isArray(leitura.json));
+      const escrita = await chamar("POST", "pagina_eventos", { chave, corpo: { pagina: "afericao", evento: "visita" } });
+      assert.ok([401, 403].includes(escrita.status), `${papel} POST -> ${escrita.status}`);
+      const apagar = await chamar("DELETE", "pagina_eventos?pagina=neq.x", { chave });
+      assert.ok([401, 403].includes(apagar.status), `${papel} DELETE -> ${apagar.status}`);
+
+      for (const [funcao, corpo] of [
+        ["pagina_registrar_evento", { p: { pagina: "afericao", evento: "visita" } }],
+        ["paginas_resumo", { p_mapa: MAPA }]
+      ]) {
+        const r = await rpc(funcao, corpo, { chave });
+        assert.ok([401, 403, 404].includes(r.status), `${papel} rpc/${funcao} -> ${r.status} ${JSON.stringify(r.json)}`);
+      }
+      const [contagem] = await stack.sql("select count(*) as n from public.pagina_eventos");
+      assert.equal(contagem.n, "1");
+    });
+  }
+
+  test("privilégios no catálogo: só service_role (tabela, sequência do id e as duas funções)", async () => {
+    const [p] = await stack.sql(`
+      select
+        bool_or(has_table_privilege(papel, 'public.pagina_eventos', 'select,insert,update,delete,truncate,references,trigger'))::text as tabela,
+        bool_or(has_sequence_privilege(papel, 'public.pagina_eventos_id_seq', 'usage,select,update'))::text as sequencia,
+        bool_or(has_function_privilege(papel, 'public.pagina_registrar_evento(jsonb)', 'execute')
+             or has_function_privilege(papel, 'public.paginas_resumo(timestamptz,timestamptz,jsonb)', 'execute'))::text as funcoes
+      from unnest(array['anon', 'authenticated', 'public']) as papel
+    `);
+    assert.deepEqual(p, { tabela: "false", sequencia: "false", funcoes: "false" });
+    const [s] = await stack.sql(`
+      select has_table_privilege('service_role', 'public.pagina_eventos', 'select,insert')::text as tabela,
+             has_function_privilege('service_role', 'public.pagina_registrar_evento(jsonb)', 'execute')::text as registrar,
+             has_function_privilege('service_role', 'public.paginas_resumo(timestamptz,timestamptz,jsonb)', 'execute')::text as resumo
+    `);
+    assert.deepEqual(s, { tabela: "true", registrar: "true", resumo: "true" });
+  });
+});
+
+describe("pagina_registrar_evento", () => {
+  before(() => limparEventos());
+
+  test("grava um evento por chamada, com texto aparado, vazio virando null e uuid inválido virando null", async () => {
+    const visitante = randomUUID();
+    const sessao = randomUUID();
+    assert.equal(
+      (
+        await rpc("pagina_registrar_evento", {
+          p: {
+            pagina: "evento_outubro",
+            evento: "visita",
+            visitante_id: visitante,
+            sessao_id: sessao,
+            perfil: "  Técnico(a) de enfermagem ",
+            page_url: " https://x/obrigado-evento-outubro?utm_source=meta ",
+            referrer: "",
+            utm_source: "meta",
+            utm_medium: "   ",
+            utm_campaign: "outubro",
+            utm_content: null,
+            utm_term: "t",
+            fbclid: "fb",
+            gclid: "",
+            dispositivo: "mobile"
+          }
+        })
+      ).status,
+      204
+    );
+    await registrarPagina({ pagina: "evento_outubro", evento: "clique_grupo", visitante_id: "nao-e-uuid", sessao_id: "  ", perfil: "" });
+    await registrarPagina({ pagina: "evento_outubro", evento: "visita", visitante_id: visitante });
+
+    const linhas = await eventosGravados();
+    assert.deepEqual(linhas, [
+      {
+        pagina: "evento_outubro",
+        evento: "visita",
+        visitante_id: visitante,
+        sessao_id: sessao,
+        perfil: "Técnico(a) de enfermagem",
+        page_url: "https://x/obrigado-evento-outubro?utm_source=meta",
+        referrer: null,
+        utm_source: "meta",
+        utm_medium: null,
+        utm_campaign: "outubro",
+        utm_content: null,
+        utm_term: "t",
+        fbclid: "fb",
+        gclid: null,
+        dispositivo: "mobile"
+      },
+      { pagina: "evento_outubro", evento: "clique_grupo", visitante_id: null, sessao_id: null, perfil: null, page_url: null, referrer: null, utm_source: null, utm_medium: null, utm_campaign: null, utm_content: null, utm_term: null, fbclid: null, gclid: null, dispositivo: null },
+      { pagina: "evento_outubro", evento: "visita", visitante_id: visitante, sessao_id: null, perfil: null, page_url: null, referrer: null, utm_source: null, utm_medium: null, utm_campaign: null, utm_content: null, utm_term: null, fbclid: null, gclid: null, dispositivo: null }
+    ]);
+    const [datas] = await stack.sql("select bool_and(criado_em > now() - interval '1 minute')::text as agora from public.pagina_eventos");
+    assert.equal(datas.agora, "true");
+  });
+
+  test("página ausente, evento fora da lista ou página com formato estranho: erro e nada gravado", async () => {
+    await limparEventos();
+    for (const p of [
+      {},
+      { evento: "visita" },
+      { pagina: "  ", evento: "visita" },
+      { pagina: "afericao" },
+      { pagina: "afericao", evento: "inicio" },
+      { pagina: "afericao", evento: "VISITA" },
+      { pagina: "Afericao; drop table x", evento: "visita" },
+      { pagina: "a".repeat(61), evento: "visita" }
+    ]) {
+      const r = await rpc("pagina_registrar_evento", { p });
+      assert.ok(r.status >= 400 && r.status < 500, `${JSON.stringify(p)} -> ${r.status}`);
+    }
+    const r = await rpc("pagina_registrar_evento", { p: null });
+    assert.ok(r.status >= 400 && r.status < 500, `p null -> ${r.status}`);
+    const [contagem] = await stack.sql("select count(*) as n from public.pagina_eventos");
+    assert.equal(contagem.n, "0");
+  });
+});
+
+// Conjunto das páginas de obrigado (UTC; Brasília = UTC-3):
+//   T1 = 20/09 12:00Z (20/09 09:00 BR)   T2 = 21/09 02:30Z (20/09 23:30 BR!)   T3 = 21/09 15:00Z (21/09 12:00 BR)
+//
+// Eventos:
+//   e1 afericao  visita  A     aux    instagram  T1
+//   e2 afericao  visita  A     aux    instagram  T1+1min   (recarregou: visita a mais, mesma pessoa)
+//   e3 afericao  clique  A     aux    instagram  T1+2min
+//   e4 afericao  visita  —     —      —          T3        (link direto, sem id: conta como uma pessoa)
+//   e5 afericao  clique  —     —      —          T3        (outra "pessoa": evento-<id>)
+//   e6 evento    visita  B     tec    facebook   T2
+//   e7 evento    visita  C     enf    "  "       T3        (utm em branco → "(sem utm)")
+//   e8 evento    clique  B     tec    facebook   T2+1min   (ainda 20/09 em Brasília)
+//   e9 evento    clique  B     tec    facebook   T3        (clicou de novo no dia seguinte)
+//   e10 outra_pagina visita D  —      —          T3        (página fora do mapa: não aparece)
+//
+// Pessoas (finalizado_em = chegou à tela de fim e foi levada à página):
+//   P1 aux  T1 · P2 aux sem finalizar · P3 tec T2 + P7 tec T2 (mesmo WhatsApp: uma pessoa só) ·
+//   P4 tec T3 · P5 enf T3 · P6 cuidador 01/08 · P8 tec T3 de OUTRA pesquisa · P9 "Estudante" T3
+//
+// Período inteiro, à mão:
+//   afericao        visitas 3 (e1,e2,e4) · visitantes 2 (A, e4) · cliques 2 · clicaram 2 (A, e5) · atribuídas 1 (P1)
+//   cuidador        tudo zero de evento · atribuídas 1 (P6)
+//   evento_outubro  visitas 2 · visitantes 2 (B, C) · cliques 2 · clicaram 1 (B) · atribuídas 3 (P3/P7, P4, P5)
+const T1 = "2026-09-20T12:00:00Z";
+const T2 = "2026-09-21T02:30:00Z";
+const T3 = "2026-09-21T15:00:00Z";
+const VA = "aaaaaaaa-0000-4000-8000-000000000001";
+const VB = "bbbbbbbb-0000-4000-8000-000000000002";
+const VC = "cccccccc-0000-4000-8000-000000000003";
+const VD = "dddddddd-0000-4000-8000-000000000004";
+
+async function semearObrigado() {
+  await stack.reset();
+  await limparEventos();
+  const mais = (iso, minutos) => new Date(Date.parse(iso) + minutos * 60_000).toISOString();
+  await inserir("pagina_eventos", [
+    { pagina: "afericao", evento: "visita", visitante_id: VA, perfil: AUX, utm_source: "instagram", criado_em: T1 },
+    { pagina: "afericao", evento: "visita", visitante_id: VA, perfil: AUX, utm_source: "instagram", criado_em: mais(T1, 1) },
+    { pagina: "afericao", evento: "clique_grupo", visitante_id: VA, perfil: AUX, utm_source: "instagram", criado_em: mais(T1, 2) },
+    { pagina: "afericao", evento: "visita", visitante_id: null, perfil: null, utm_source: null, criado_em: T3 },
+    { pagina: "afericao", evento: "clique_grupo", visitante_id: null, perfil: null, utm_source: null, criado_em: T3 },
+    { pagina: "evento_outubro", evento: "visita", visitante_id: VB, perfil: TEC, utm_source: "facebook", criado_em: T2 },
+    { pagina: "evento_outubro", evento: "visita", visitante_id: VC, perfil: ENF, utm_source: "  ", criado_em: T3 },
+    { pagina: "evento_outubro", evento: "clique_grupo", visitante_id: VB, perfil: TEC, utm_source: "facebook", criado_em: mais(T2, 1) },
+    { pagina: "evento_outubro", evento: "clique_grupo", visitante_id: VB, perfil: TEC, utm_source: "facebook", criado_em: T3 },
+    { pagina: "outra_pagina", evento: "visita", visitante_id: VD, perfil: null, utm_source: null, criado_em: T3 }
+  ]);
+
+  const pessoa = async (digits, perfil, finalizado, extra = {}) => {
+    const id = randomUUID();
+    await rpcOk("pesquisa_salvar", {
+      p: payload({ id, whatsapp_digits: digits, perfil, respostas: { perfil }, completa: Boolean(finalizado), finalizou: Boolean(finalizado), ...extra })
+    });
+    if (finalizado) await stack.sql(`update public.pesquisa_respostas set finalizado_em = ${lit(finalizado)} where id = '${id}' returning 1 as ok`);
+    return id;
+  };
+  await pessoa("11900000001", AUX, T1);
+  await pessoa("11900000002", AUX, null);
+  await pessoa("11900000003", TEC, T2);
+  await pessoa("11900000003", TEC, T2);
+  await pessoa("11900000004", TEC, T3);
+  await pessoa("11900000005", ENF, T3);
+  await pessoa("11900000006", CUID, "2026-08-01T15:00:00Z");
+  await pessoa("11900000008", TEC, T3, { pesquisa: "outra-pesquisa" });
+  await pessoa("11900000009", "Estudante da área da saúde", T3);
+}
+
+const ZERO = (pagina, extra = {}) => ({ pagina, visitas: 0, visitantes: 0, cliques: 0, clicaram: 0, atribuidas: 0, por_perfil: [], por_origem: [], por_dia: [], ...extra });
+
+describe("paginas_resumo", () => {
+  test("banco vazio: as 3 páginas do mapa, em ordem, com zeros e listas vazias; mapa vazio = nenhuma página", async () => {
+    await stack.reset();
+    await limparEventos();
+    assert.deepEqual(await rpcOk("paginas_resumo", { p_mapa: MAPA }), { paginas: [ZERO("afericao"), ZERO("cuidador"), ZERO("evento_outubro")] });
+    assert.deepEqual(await rpcOk("paginas_resumo", {}), { paginas: [] });
+    assert.deepEqual(await rpcOk("paginas_resumo", { p_mapa: [] }), { paginas: [] });
+  });
+
+  test("período inteiro: todos os campos, calculados à mão", async () => {
+    await semearObrigado();
+    const r = await rpcOk("paginas_resumo", { p_mapa: MAPA });
+    assert.deepEqual(r, {
+      paginas: [
+        {
+          pagina: "afericao",
+          visitas: 3,
+          visitantes: 2,
+          cliques: 2,
+          clicaram: 2,
+          atribuidas: 1,
+          por_perfil: [
+            { perfil: AUX, visitantes: 1, clicaram: 1, atribuidas: 1 },
+            { perfil: null, visitantes: 1, clicaram: 1, atribuidas: 0 }
+          ],
+          por_origem: [
+            { utm_source: "(sem utm)", visitantes: 1, clicaram: 1 },
+            { utm_source: "instagram", visitantes: 1, clicaram: 1 }
+          ],
+          por_dia: [
+            { dia: "2026-09-20", visitantes: 1, clicaram: 1 },
+            { dia: "2026-09-21", visitantes: 1, clicaram: 1 }
+          ]
+        },
+        ZERO("cuidador", { atribuidas: 1, por_perfil: [{ perfil: CUID, visitantes: 0, clicaram: 0, atribuidas: 1 }] }),
+        {
+          pagina: "evento_outubro",
+          visitas: 2,
+          visitantes: 2,
+          cliques: 2,
+          clicaram: 1,
+          atribuidas: 3,
+          // Técnico e Enfermeiro na mesma página, contados separados.
+          por_perfil: [
+            { perfil: TEC, visitantes: 1, clicaram: 1, atribuidas: 2 },
+            { perfil: ENF, visitantes: 1, clicaram: 0, atribuidas: 1 }
+          ],
+          por_origem: [
+            { utm_source: "facebook", visitantes: 1, clicaram: 1 },
+            { utm_source: "(sem utm)", visitantes: 1, clicaram: 0 }
+          ],
+          // T2 (02:30Z) e o clique de T2+1min são 20/09 em Brasília; o clique de T3 é 21/09.
+          por_dia: [
+            { dia: "2026-09-20", visitantes: 1, clicaram: 1 },
+            { dia: "2026-09-21", visitantes: 1, clicaram: 1 }
+          ]
+        }
+      ]
+    });
+  });
+
+  test("período: desde inclusivo e até exclusivo, nos eventos (criado_em) e nas atribuídas (finalizado_em)", async () => {
+    await semearObrigado();
+    const inicio21 = "2026-09-21T03:00:00Z"; // 21/09 00:00 em Brasília
+    const desde = await rpcOk("paginas_resumo", { p_desde: inicio21, p_mapa: MAPA });
+    const [a, c, e] = desde.paginas;
+    assert.deepEqual([a.pagina, a.visitas, a.visitantes, a.cliques, a.clicaram, a.atribuidas], ["afericao", 1, 1, 1, 1, 0]);
+    assert.deepEqual([c.pagina, c.atribuidas, c.por_perfil], ["cuidador", 0, []]);
+    assert.deepEqual([e.pagina, e.visitas, e.visitantes, e.cliques, e.clicaram, e.atribuidas], ["evento_outubro", 1, 1, 1, 1, 2]);
+    assert.deepEqual(e.por_perfil, [
+      { perfil: ENF, visitantes: 1, clicaram: 0, atribuidas: 1 },
+      { perfil: TEC, visitantes: 0, clicaram: 1, atribuidas: 1 }
+    ]);
+    assert.deepEqual(e.por_dia, [{ dia: "2026-09-21", visitantes: 1, clicaram: 1 }]);
+
+    const ate = await rpcOk("paginas_resumo", { p_ate: inicio21, p_mapa: MAPA });
+    const [a2, , e2] = ate.paginas;
+    assert.deepEqual([a2.visitas, a2.visitantes, a2.cliques, a2.clicaram, a2.atribuidas], [2, 1, 1, 1, 1]);
+    assert.deepEqual([e2.visitas, e2.visitantes, e2.cliques, e2.clicaram, e2.atribuidas], [1, 1, 1, 1, 1]);
+
+    // Exatamente no instante do evento: desde inclui, até exclui.
+    const noInstante = await rpcOk("paginas_resumo", { p_desde: T1, p_ate: new Date(Date.parse(T1) + 60_000).toISOString(), p_mapa: MAPA });
+    assert.deepEqual([noInstante.paginas[0].visitas, noInstante.paginas[0].cliques, noInstante.paginas[0].atribuidas], [1, 0, 1]);
+    await limparEventos();
+    await stack.reset();
+  });
+});
+
 describe("desempenho", () => {
   test("painel, cruzamento e abertas com 20 mil tentativas respondem rápido", async () => {
     await stack.reset();
@@ -1441,9 +1787,9 @@ describe("desempenho", () => {
       )
       select gen_random_uuid(), '1.0', 'Pessoa ' || n, '(11) 9' || lpad((n % 16000)::text, 4, '0') || '-0000',
              '119' || lpad((n % 16000)::text, 8, '0'), 'p' || n || '@gmail.com',
-             (array['Cuidador(a)', 'Técnico(a) de enfermagem', 'Enfermeiro(a)', 'Estudante da área da saúde'])[1 + n % 4],
+             (array['Cuidador(a)', 'Técnico(a) de enfermagem', 'Enfermeiro(a)', 'Auxiliar ou antiga atendente de enfermagem'])[1 + n % 4],
              jsonb_build_object(
-               'perfil', (array['Cuidador(a)', 'Técnico(a) de enfermagem', 'Enfermeiro(a)', 'Estudante da área da saúde'])[1 + n % 4],
+               'perfil', (array['Cuidador(a)', 'Técnico(a) de enfermagem', 'Enfermeiro(a)', 'Auxiliar ou antiga atendente de enfermagem'])[1 + n % 4],
                'idade', (array['Até 24 anos', '25 a 34 anos', '35 a 44 anos', '45 a 54 anos'])[1 + n % 4],
                'estado', (array['São Paulo', 'Bahia', 'Minas Gerais'])[1 + n % 3],
                'ambientes', jsonb_build_array('Hospital', (array['Clínica', 'Home care'])[1 + n % 2]),

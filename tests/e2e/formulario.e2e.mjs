@@ -1,9 +1,10 @@
 // O formulário /pesquisa-icp no Chromium, tela por tela, com a API interceptada no navegador.
 //
 // O fluxo.e2e.mjs prova o caminho feliz contra o banco de verdade; aqui ficam as regras da TELA,
-// que precisam simular respostas difíceis do servidor (422, 5xx, rede caída, lentidão): os 5
-// perfis até o fim, cada tipo de pergunta, voltar e trocar o perfil, retomar, fila de
-// salvamento, teclado, movimento reduzido, Pixel e nenhuma rolagem horizontal de 320px a 1280px.
+// que precisam simular respostas difíceis do servidor (422, 5xx, rede caída, lentidão): os 4
+// perfis até o fim e o redirecionamento para a página de obrigado de cada um (com as UTMs), cada
+// tipo de pergunta, voltar e trocar o perfil, retomar, fila de salvamento, teclado, movimento
+// reduzido, Pixel e nenhuma rolagem horizontal de 320px a 1280px.
 //
 //   node --test tests/e2e/formulario.e2e.mjs      (precisa só do Playwright; sem Docker)
 import { after, before, test } from "node:test";
@@ -14,14 +15,17 @@ import {
   assert,
   CONTATO,
   esperar,
+  esperarObrigado,
   esperarTrocar,
   interceptar,
   lerRascunho,
   novaPagina,
+  O,
   P,
   perguntaAtual,
   preencherContato,
   responder,
+  responderAte,
   responderAteOFim,
   subirServidor
 } from "./apoio/formulario.mjs";
@@ -58,7 +62,8 @@ function caso(nome, fn, opts = {}) {
   });
 }
 
-const URLQ = "/pesquisa-icp?utm_source=instagram&utm_medium=stories&utm_campaign=icp-set&fbclid=abc123";
+const QUERY = "utm_source=instagram&utm_medium=stories&utm_campaign=icp-set&fbclid=abc123";
+const URLQ = `/pesquisa-icp?${QUERY}`;
 
 async function comecar(page, q = URLQ) {
   await page.goto(base + q);
@@ -67,34 +72,57 @@ async function comecar(page, q = URLQ) {
   await page.waitForSelector("#tela-pergunta:not([hidden])");
 }
 
+/** Espera `fn()` devolver algo verdadeiro (registros de rede chegam um pouco depois). */
+async function ate(fn, timeout = 4000) {
+  const limite = Date.now() + timeout;
+  for (;;) {
+    const valor = fn();
+    if (valor) return valor;
+    if (Date.now() > limite) throw new Error("não aconteceu a tempo: " + fn);
+    await esperar(40);
+  }
+}
+
 function conferirSeqs(reg) {
   const seqs = reg.salvar.map((c) => c.seq);
   for (let i = 1; i < seqs.length; i += 1) assert.ok(seqs[i] > seqs[i - 1], "seq crescente " + seqs.join(","));
 }
 
-/* ------------------------------------------------------------------ os 5 perfis */
+/* ------------------------------------------------------------------ os 4 perfis */
 
 const BLOCO = {
   auxiliar: ["auxiliar_situacao", "auxiliar_documentos"],
   cuidador: ["cuidador_realidade", "cuidador_dificuldade"],
   tecnico: ["tecnico_momento", "tecnico_objetivo"],
-  enfermeiro: ["enfermeiro_interesse", "enfermeiro_caminho"],
-  estudante: []
+  enfermeiro: ["enfermeiro_interesse", "enfermeiro_caminho"]
 };
 
-test("os perfis testados são exatamente os 5 do config (sem \"Outro\")", () => {
+/** Para onde cada perfil vai ao concluir (regra do cliente: técnico e enfermeiro dividem a página). */
+const OBRIGADO = {
+  auxiliar: "/obrigado-afericao",
+  cuidador: "/obrigado-cuidador",
+  tecnico: "/obrigado-evento-outubro",
+  enfermeiro: "/obrigado-evento-outubro"
+};
+
+test("os perfis testados são exatamente os 4 do config (sem \"Outro\" nem \"Estudante\")", () => {
   assert.deepEqual(Object.keys(BLOCO), Object.keys(P.PERFIL));
+  assert.deepEqual(Object.keys(OBRIGADO), Object.keys(P.PERFIL));
+  for (const [chave, rota] of Object.entries(OBRIGADO)) assert.equal(O.paginaDoPerfil(P.PERFIL[chave]).rota, rota);
 });
 
 for (const chave of Object.keys(BLOCO)) {
-  caso(`perfil completo: ${chave}`, async (page, reg) => {
+  caso(`perfil completo: ${chave} → ${OBRIGADO[chave]} com as UTMs`, async (page, reg) => {
     await comecar(page);
     const perfil = P.PERFIL[chave];
     const vistos = await responderAteOFim(page, { perfil });
     const etapa9 = vistos.filter((id) => P.perguntaPorId(id).etapa === 9);
     assert.deepEqual(etapa9, BLOCO[chave]);
     assert.equal(vistos.length, 31 + BLOCO[chave].length);
-    await esperar(400);
+    // Redireciona sozinho, com as UTMs e o fbclid da URL, e sem deixar a pesquisa no histórico.
+    const chegada = await esperarObrigado(page, OBRIGADO[chave]);
+    assert.equal(chegada.search, `?${QUERY}`);
+    assert.equal(await page.textContent("#ob-titulo"), O.paginaDoPerfil(perfil).headline.replace("!", ", Maria!"));
     const ultimo = reg.salvar[reg.salvar.length - 1];
     assert.equal(ultimo.pergunta_atual, "fim");
     assert.equal(ultimo.respostas.perfil, perfil);
@@ -117,12 +145,26 @@ for (const chave of Object.keys(BLOCO)) {
       ["visita", "inicio"]
     );
     assert.equal(reg.evento[0].utm_source, "instagram");
-    assert.equal(await page.textContent("#fim-saudacao"), "Muito obrigada, Maria!");
     const r = await lerRascunho(page);
     assert.equal(r.concluida, true);
-    assert.equal(r.pendente, false);
+    assert.equal(r.pendente, false, "o último salvamento foi confirmado antes de sair");
+    // A página de obrigado registra a visita dela, com o perfil e a sessão desta resposta.
+    const visita = await ate(() => reg.pagina.find((e) => e.evento === "visita"));
+    assert.equal(visita.pagina, O.paginaDoPerfil(perfil).id);
+    assert.equal(visita.perfil, perfil);
+    assert.equal(visita.sessao_id, r.id);
+    assert.equal(visita.utm_campaign, "icp-set");
   });
 }
+
+caso("\"voltar\" na página de obrigado sai do site (não recarrega a pesquisa)", async (page) => {
+  await page.goto("about:blank");
+  await comecar(page);
+  await responderAteOFim(page, { perfil: P.PERFIL.cuidador });
+  await esperarObrigado(page, "/obrigado-cuidador");
+  await page.goBack();
+  await page.waitForURL("about:blank");
+});
 
 caso("cabeçalho: etapa X de Y muda com o perfil e fala da etapa", async (page) => {
   await comecar(page);
@@ -135,7 +177,7 @@ caso("cabeçalho: etapa X de Y muda com o perfil e fala da etapa", async (page) 
   assert.equal(await page.getAttribute("#barra", "role"), "progressbar");
 });
 
-caso("única: só os 5 perfis, toque avança sozinho, voltar mostra a escolha e o Continuar", async (page, reg) => {
+caso("única: só os 4 perfis, toque avança sozinho, voltar mostra a escolha e o Continuar", async (page, reg) => {
   await comecar(page);
   const valores = await page.$$eval("#tela-pergunta .opcao", (botoes) => botoes.map((b) => b.dataset.valor));
   assert.deepEqual(valores, Object.values(P.PERFIL));
@@ -245,12 +287,13 @@ caso("texto opcional pulado e frase", async (page, reg) => {
   assert.equal(u.respostas.frase_bloqueio, "falta tempo");
 });
 
-caso("voltar e trocar o perfil limpa o bloco antigo", async (page, reg) => {
+caso("voltar e trocar o perfil limpa o bloco antigo (e vai para a página do perfil novo)", async (page, reg) => {
   await comecar(page);
-  await responderAteOFim(page, { perfil: P.PERFIL.tecnico });
+  // Até a última pergunta do bloco do técnico (concluir já redirecionaria para o obrigado).
+  await responderAte(page, "tecnico_objetivo", { perfil: P.PERFIL.tecnico });
   await esperar(300);
   assert.notEqual(reg.salvar[reg.salvar.length - 1].respostas.tecnico_momento, undefined);
-  // Volta do fim até o perfil pelo botão do navegador.
+  // Volta até o perfil pelo botão do navegador.
   for (let i = 0; i < 40; i += 1) {
     if ((await perguntaAtual(page)).id === "perfil") break;
     const antes = (await perguntaAtual(page)).id;
@@ -269,7 +312,7 @@ caso("voltar e trocar o perfil limpa o bloco antigo", async (page, reg) => {
   assert.equal(u.respostas.perfil, P.PERFIL.cuidador);
   await responder(page);
   await responder(page);
-  assert.equal((await perguntaAtual(page)).id, "fim");
+  await esperarObrigado(page, "/obrigado-cuidador");
   conferirSeqs(reg);
 });
 
@@ -353,22 +396,94 @@ caso("começar do zero: nova sessão, contato preenchido", async (page, reg) => 
   assert.equal(novos[0].seq, 1);
 });
 
-caso("já concluída abre no fim; responder como outra pessoa", async (page) => {
+caso("já concluída: reabrir a pesquisa leva direto ao obrigado; ?nova=1 recomeça como outra pessoa", async (page, reg) => {
   await comecar(page);
-  await responderAteOFim(page, { perfil: P.PERFIL.estudante });
-  await page.reload();
-  await page.waitForSelector("#tela-fim:not([hidden])");
-  assert.equal(await page.isVisible("#tela-boasvindas"), false);
-  await page.click("#botao-outra-pessoa");
+  await responderAteOFim(page, { perfil: P.PERFIL.auxiliar });
+  await esperarObrigado(page, "/obrigado-afericao");
+  const salvos = reg.salvar.length;
+  // Reabre pelo link "pelado" (sem UTM): volta para a MESMA página, com as UTMs do primeiro toque.
+  await page.goto(base + "/pesquisa-icp");
+  const chegada = await esperarObrigado(page, "/obrigado-afericao");
+  assert.equal(chegada.search, `?${QUERY}`);
+  assert.equal(reg.salvar.length, salvos, "reabrir não grava de novo");
+  // "Responder a pesquisa como outra pessoa", no rodapé do obrigado.
+  await page.click('a[href="/pesquisa-icp?nova=1"]');
   await page.waitForSelector("#tela-boasvindas:not([hidden])");
+  assert.equal(new URL(page.url()).search, "", "o ?nova=1 sai da URL");
   assert.equal(await page.textContent("#botao-comecar-texto"), "Começar");
   const r = await lerRascunho(page);
   assert.equal(r.contato, null);
   assert.deepEqual(r.respostas, {});
+  assert.equal(r.concluida, false);
   assert.equal(r.rastreio.utm_source, "instagram", "rastreio do aparelho continua");
   await page.click("#botao-comecar");
   assert.equal(await page.inputValue("#campo-nome"), "");
+  // Recarregar não apaga de novo (o parâmetro já saiu).
+  await page.reload();
+  assert.equal((await lerRascunho(page)).id, r.id);
 });
+
+let lentoUsado = false;
+const regLento = [];
+caso(
+  "servidor lento no último salvamento: sai em ~2,5 s mesmo assim, com o estado em keepalive",
+  async (page, reg) => {
+    await comecar(page);
+    await responderAteOFim(page, { perfil: P.PERFIL.cuidador });
+    const antes = Date.now();
+    await esperarObrigado(page, "/obrigado-cuidador");
+    const levou = Date.now() - antes;
+    assert.ok(levou >= 2000 && levou < 6000, `levou ${levou} ms`);
+    await esperar(300);
+    // O salvamento lento (preso no servidor) + o reenvio com keepalive na saída.
+    const fins = regLento.filter((c) => c.pergunta_atual === "fim");
+    assert.ok(fins.length >= 2, `salvamentos de fim: ${fins.length}`);
+    assert.ok(fins[fins.length - 1].seq > fins[0].seq);
+    assert.equal(fins[fins.length - 1].respostas.perfil, P.PERFIL.cuidador);
+  },
+  {
+    modo: {
+      salvar: async (c) => {
+        // Registro na chegada (a resposta do lento nunca é entregue: a página já saiu).
+        regLento.push(c);
+        if (c.pergunta_atual === "fim" && !lentoUsado) {
+          lentoUsado = true;
+          await esperar(6000);
+        }
+        return null;
+      }
+    }
+  }
+);
+
+caso(
+  "422 do contato no último salvamento: não sai da pesquisa, volta ao contato",
+  async (page) => {
+    await comecar(page);
+    // Responde tudo; o fim aparece de passagem e a recusa do servidor leva ao contato.
+    for (let i = 0; i < 60; i += 1) {
+      const { id } = await perguntaAtual(page);
+      if (id === "fim" || id === "contato") break;
+      await responder(page, { perfil: P.PERFIL.enfermeiro });
+    }
+    await page.waitForSelector("#tela-contato:not([hidden])", { timeout: 5000 });
+    assert.equal(await page.textContent("#erro-whatsapp"), "Esse DDD não existe. Confere o número?");
+    await esperar(3000);
+    assert.ok(new URL(page.url()).pathname === "/pesquisa-icp", "não redirecionou");
+    await page.fill("#campo-whatsapp", "");
+    await page.type("#campo-whatsapp", "21912345678");
+    await page.click("#botao-contato");
+    await esperarObrigado(page, "/obrigado-evento-outubro");
+  },
+  {
+    modo: {
+      salvar: (c) =>
+        c.pergunta_atual === "fim" && c.contato.whatsapp.startsWith("(11)")
+          ? { status: 422, json: { ok: false, error: "invalid_contact", campos: { whatsapp: "Esse DDD não existe. Confere o número?" } } }
+          : null
+    }
+  }
+);
 
 caso("botão voltar do navegador: na boas-vindas deixa sair", async (page) => {
   await page.goto("about:blank");
@@ -615,7 +730,9 @@ caso(
   }
 );
 
-caso("pagehide manda keepalive com o pendente", async (page) => {
+caso(
+  "pagehide manda keepalive com o pendente",
+  async (page) => {
   await comecar(page);
   await page.click(`#tela-pergunta .opcao[data-valor="${P.PERFIL.cuidador}"]`);
   await esperarTrocar(page, "perfil");
@@ -630,7 +747,18 @@ caso("pagehide manda keepalive com o pendente", async (page) => {
   await page.locator("#tela-pergunta .opcao").nth(2).click();
   await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
   assert.ok((await page.evaluate(() => window.__keep)) >= 1);
-});
+  },
+  // Servidor sem pressa: o salvamento ainda está em voo no pagehide (sem isso, o teste dependia
+  // de o servidor local responder antes ou depois do evento).
+  {
+    modo: {
+      salvar: async () => {
+        await esperar(400);
+        return null;
+      }
+    }
+  }
+);
 
 caso(
   "teclado: fluxo inteiro sem mouse",
@@ -658,13 +786,12 @@ caso(
     await page.keyboard.press("ArrowDown");
     assert.equal(await page.evaluate(() => document.activeElement.dataset.valor), P.PERFIL.tecnico);
     assert.equal((await perguntaAtual(page)).id, "perfil", "seta não responde");
-    // Setas dão a volta nos 5 perfis: do último vai para o primeiro.
+    // Setas dão a volta nos 4 perfis: do último vai para o primeiro.
     await page.keyboard.press("ArrowDown");
-    await page.keyboard.press("ArrowDown");
-    assert.equal(await page.evaluate(() => document.activeElement.dataset.valor), P.PERFIL.estudante);
+    assert.equal(await page.evaluate(() => document.activeElement.dataset.valor), P.PERFIL.enfermeiro);
     await page.keyboard.press("ArrowDown");
     assert.equal(await page.evaluate(() => document.activeElement.dataset.valor), P.PERFIL.auxiliar);
-    for (let i = 0; i < 3; i += 1) await page.keyboard.press("ArrowUp");
+    for (let i = 0; i < 2; i += 1) await page.keyboard.press("ArrowUp");
     assert.equal(await page.evaluate(() => document.activeElement.dataset.valor), P.PERFIL.tecnico);
     await page.keyboard.press("Space");
     await esperarTrocar(page, "perfil");
@@ -729,19 +856,31 @@ caso("UTM de primeiro toque: a campanha da primeira visita fica inteira (sem mis
   assert.ok(reg.evento.every((e) => e.evento === "visita" && e.visitante_id === reg.evento[0].visitante_id));
 });
 
-caso("pixel: eventos certos quando fbq existe", async (page) => {
+caso("pixel: eventos certos quando fbq existe (inclui pesquisa_icp_concluida com código e página)", async (page) => {
+  // O registro sobrevive à troca de página (o fim redireciona para o obrigado).
+  const px = [];
+  await page.exposeFunction("__registrarPx", (a) => px.push(a));
   await page.addInitScript(() => {
-    window.__px = [];
-    window.fbq = (...a) => window.__px.push(a.slice(0, 3));
+    window.fbq = (...a) => window.__registrarPx(JSON.parse(JSON.stringify(a.slice(0, 3))));
   });
   await comecar(page);
-  await responderAteOFim(page, { perfil: P.PERFIL.estudante });
-  const px = await page.evaluate(() => window.__px);
+  await responderAteOFim(page, { perfil: P.PERFIL.tecnico });
+  await esperarObrigado(page, "/obrigado-evento-outubro");
   const nomes = px.map((a) => a[1]);
   assert.equal(nomes[0], "PesquisaIniciada");
   assert.ok(nomes.includes("Lead"));
-  assert.equal(nomes.filter((n) => n === "PesquisaEtapa").length, 8);
-  assert.deepEqual(px.find((a) => a[1] === "PesquisaConcluida")[2], { perfil: P.PERFIL.estudante });
+  assert.equal(nomes.filter((n) => n === "PesquisaEtapa").length, 9);
+  assert.deepEqual(px.find((a) => a[1] === "PesquisaConcluida")[2], { perfil: P.PERFIL.tecnico });
+  assert.deepEqual(px.find((a) => a[1] === "pesquisa_icp_concluida"), [
+    "trackCustom",
+    "pesquisa_icp_concluida",
+    { perfil: "tecnico_enfermagem", pagina_obrigado: "evento_outubro" }
+  ]);
+  assert.equal(nomes.filter((n) => n === "pesquisa_icp_concluida").length, 1);
+  // Reabrir já concluída não repete a conversão.
+  await page.goto(base + "/pesquisa-icp");
+  await esperarObrigado(page, "/obrigado-evento-outubro");
+  assert.equal(px.filter((a) => a[1] === "pesquisa_icp_concluida").length, 1);
 });
 
 for (const [largura, altura] of [
@@ -767,10 +906,16 @@ for (const [largura, altura] of [
       await page.waitForSelector("#tela-pergunta:not([hidden])");
       for (let i = 0; i < 45; i += 1) {
         const { id } = await perguntaAtual(page);
+        if (id === "fim" || id === "obrigado") {
+          // O fim leva à página de obrigado: ela também não pode rolar para o lado.
+          await esperarObrigado(page, "/obrigado-evento-outubro");
+          await conferir("obrigado");
+          break;
+        }
         await esperar(280);
         await conferir(id);
         // O rodapé fixo não pode cobrir o último controle quando se rola até o fim.
-        if (id !== "fim") {
+        {
           const cobre = await page.evaluate(() => {
             window.scrollTo(0, document.documentElement.scrollHeight);
             const rod = document.getElementById("rodape");
@@ -784,7 +929,6 @@ for (const [largura, altura] of [
           });
           assert.equal(cobre, false, `rodapé cobre conteúdo em ${id}`);
         }
-        if (id === "fim") break;
         await responder(page, { perfil: P.PERFIL.enfermeiro });
       }
       // Alvos de toque ≥ 44px.

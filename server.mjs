@@ -7,8 +7,9 @@
  * só existe aqui no servidor).
  *
  * As regras de negócio NÃO moram aqui: js/pesquisa-config.js (perguntas, sanitização,
- * progresso) e js/lead-rules.js (nome, WhatsApp, e-mail) são os mesmos arquivos que rodam no
- * navegador, carregados com vm. O que a tela aceita é exatamente o que o servidor grava.
+ * progresso), js/obrigado-config.js (as 3 páginas de obrigado e qual perfil cai em qual) e
+ * js/lead-rules.js (nome, WhatsApp, e-mail) são os mesmos arquivos que rodam no navegador,
+ * carregados com vm. O que a tela aceita é exatamente o que o servidor grava.
  */
 import { createHmac, scrypt, timingSafeEqual } from "node:crypto";
 import { Resolver } from "node:dns/promises";
@@ -48,6 +49,7 @@ const FORMATTED_PHONE_PATTERN = /^\(\d{2}\) \d{5}-\d{4}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Uma visita e um clique em "Começar" por carregamento: 60/min cobre IP compartilhado de operadora.
+// As páginas de obrigado (visita e clique no grupo) têm um limite próprio com os mesmos números.
 const EVENTO_RATE_LIMIT_MAX = 240;
 const EVENTO_RATE_LIMIT_WINDOW_MS = 60_000;
 // A pesquisa grava a cada resposta (39 perguntas em ~7 minutos, mais re-tentativas da fila):
@@ -73,6 +75,8 @@ const ABERTAS_PADRAO = 200;
 const EXPORT_PAGE_SIZE = 1_000;
 
 const STATUS_VALIDOS = new Set(["em_andamento", "concluida"]);
+// Eventos das páginas de obrigado: a página abriu, ou a pessoa clicou em "Entrar no grupo".
+const EVENTOS_PAGINA = new Set(["visita", "clique_grupo"]);
 
 // Verificação de domínio do e-mail: pega "maria@gmial.com.br" que passou pela regra de formato.
 const DNS_TIMEOUT_MS = 3_000;
@@ -139,14 +143,9 @@ const PAINEL_PAGE = "/painel.html";
 // redireciona para cá, para nenhum link já compartilhado quebrar.
 const PESQUISA_ROTA = "/pesquisa-icp";
 const PESQUISA_ROTAS_ANTIGAS = new Set(["/pesquisa", "/pesquisa/"]);
-
-const routeAliases = new Map([
-  [PESQUISA_ROTA, PESQUISA_PAGE],
-  [`${PESQUISA_ROTA}/`, PESQUISA_PAGE],
-  ["/painel", PAINEL_PAGE],
-  ["/painel/", PAINEL_PAGE],
-  ["/favicon.ico", "/img/favicon-32.png"]
-]);
+// As 3 páginas de obrigado são UM arquivo (obrigado.html); a rota diz qual delas mostrar. As rotas
+// vêm de js/obrigado-config.js (mais abaixo, em routeAliases).
+const OBRIGADO_PAGE = "/obrigado.html";
 
 const brotliCompressAsync = promisify(brotliCompress);
 const gzipAsync = promisify(gzip);
@@ -159,16 +158,20 @@ const scryptAsync = promisify(scrypt);
 
 // Lidos do diretório DESTE arquivo, e não do rootDirectory: nos testes o estático vem de uma
 // pasta de mentira, mas a regra que valida a gravação tem que ser sempre a de verdade.
-function loadBrowserScript(relativePath, globalName) {
+function loadBrowserScript(relativePath, globalName, context = {}) {
   const source = readFileSync(path.join(moduleDirectory, relativePath), "utf8");
-  const context = {};
-  vm.runInNewContext(source, context, { filename: relativePath });
+  if (!vm.isContext(context)) vm.createContext(context);
+  vm.runInContext(source, context, { filename: relativePath });
   if (!context[globalName]) throw new Error(`${relativePath} não definiu ${globalName}`);
   return context[globalName];
 }
 
 const leadRules = loadBrowserScript("js/lead-rules.js", "EVLeadRules");
-const pesquisa = loadBrowserScript("js/pesquisa-config.js", "EVPesquisa");
+// obrigado-config.js lê EVPesquisa (os rótulos dos perfis): roda no MESMO contexto, depois dele,
+// exatamente como no navegador.
+const contextoPesquisa = {};
+const pesquisa = loadBrowserScript("js/pesquisa-config.js", "EVPesquisa", contextoPesquisa);
+const obrigado = loadBrowserScript("js/obrigado-config.js", "EVObrigado", contextoPesquisa);
 
 const PERGUNTAS = pesquisa.PERGUNTAS;
 const POSICAO_FIM = PERGUNTAS.length + 1;
@@ -179,6 +182,37 @@ const CHAVES_TEXTO_SET = new Set(CHAVES_TEXTO);
 const IDS_ANALISAVEIS = new Set(pesquisa.perguntasAnalisaveis().map((pergunta) => pergunta.id));
 const CHAVES_TEMPO = new Set([...INDICE_PERGUNTA.keys(), "contato"]);
 const DOMINIOS_CONHECIDOS = new Set(leadRules.KNOWN_DOMAINS);
+
+// Páginas de obrigado: id → página, rota pública → arquivo, e o mapa {perfil: id da página} que o
+// painel manda ao SQL para atribuir cada pesquisa concluída à página para onde ela foi.
+const PAGINAS_OBRIGADO = new Map(Array.from(obrigado.LISTA, (pagina) => [pagina.id, pagina]));
+const ROTAS_OBRIGADO = new Set(Array.from(obrigado.LISTA, (pagina) => pagina.rota));
+const MAPA_PERFIL_PAGINA = Object.freeze(
+  Object.fromEntries(Array.from(obrigado.LISTA).flatMap((pagina) => Array.from(pagina.perfis, (perfil) => [perfil, pagina.id])))
+);
+
+const routeAliases = new Map([
+  [PESQUISA_ROTA, PESQUISA_PAGE],
+  [`${PESQUISA_ROTA}/`, PESQUISA_PAGE],
+  ...Array.from(ROTAS_OBRIGADO).flatMap((rota) => [
+    [rota, OBRIGADO_PAGE],
+    [`${rota}/`, OBRIGADO_PAGE]
+  ]),
+  ["/painel", PAINEL_PAGE],
+  ["/painel/", PAINEL_PAGE],
+  ["/favicon.ico", "/img/favicon-32.png"]
+]);
+
+/** Valor de um mapa por perfil (PERFIL_CODIGO, PERFIL_SEGMENTO), sem cair em chave herdada. */
+function valorDoPerfil(mapa, perfil) {
+  return typeof perfil === "string" && Object.prototype.hasOwnProperty.call(mapa, perfil) ? mapa[perfil] : null;
+}
+
+/** A página de obrigado para onde o perfil é levado ao terminar, no formato do aviso ao n8n. */
+function paginaObrigadoDoPerfil(perfil) {
+  const pagina = typeof perfil === "string" ? obrigado.paginaDoPerfil(perfil) : null;
+  return pagina ? { id: pagina.id, rota: pagina.rota, nome: pagina.nome, grupo: pagina.grupo } : null;
+}
 
 /* ------------------------------------------------------------------------------------------ */
 /* Utilidades                                                                                  */
@@ -700,6 +734,7 @@ export function montarPayloadWebhook({ linha, id, contato, respostas, rastreio, 
   const campo = (nome) => textoOuNull(l[nome]) ?? textoOuNull(rastreio?.[nome]);
   const digits = textoOuNull(l.whatsapp_digits) ?? contato.whatsapp_digits;
   const nome = textoOuNull(l.nome) ?? contato.nome;
+  const perfil = typeof resp.perfil === "string" ? resp.perfil : null;
 
   return {
     evento: "pesquisa_concluida",
@@ -716,7 +751,12 @@ export function montarPayloadWebhook({ linha, id, contato, respostas, rastreio, 
       whatsapp_internacional: textoOuNull(l.whatsapp_internacional) ?? `55${digits}`,
       email: textoOuNull(l.email) ?? contato.email
     },
-    perfil: typeof resp.perfil === "string" ? resp.perfil : null,
+    perfil,
+    // Valor interno e etiqueta de CRM do perfil (Técnico e Enfermeiro seguem separados), e a
+    // página de obrigado para onde a pessoa foi levada.
+    perfil_codigo: valorDoPerfil(pesquisa.PERFIL_CODIGO, perfil),
+    segmento: valorDoPerfil(pesquisa.PERFIL_SEGMENTO, perfil),
+    pagina_obrigado: paginaObrigadoDoPerfil(perfil),
     utm: {
       utm_source: campo("utm_source"),
       utm_medium: campo("utm_medium"),
@@ -936,6 +976,53 @@ async function handleEvento(request, response, options) {
     sendJson(response, 200, { ok: true });
   } catch (error) {
     console.error(`Falha ao registrar evento: ${error?.message || "erro"}`);
+    sendJson(response, 502, { ok: false, error: "database_unavailable" });
+  }
+}
+
+/**
+ * Visita e clique no grupo das páginas de obrigado. Sem dado pessoal: só a página, o evento, os
+ * ids do aparelho e da tentativa, o perfil (para separar Técnico de Enfermeiro na página do evento)
+ * e a origem. Página ou evento fora da lista → 422; o resto, se vier estranho, vira null.
+ */
+async function handlePaginaEvento(request, response, options) {
+  if (request.method !== "POST") return methodNotAllowed(response, "POST");
+  if (!acceptsJsonBody(request, response)) return;
+
+  if (!options.allowPaginaEvento(request)) {
+    sendJson(response, 429, { ok: false, error: "too_many_requests" });
+    return;
+  }
+
+  const body = await readObjectBody(request, response);
+  if (!body) return;
+
+  const pagina = typeof body.pagina === "string" && PAGINAS_OBRIGADO.has(body.pagina) ? body.pagina : null;
+  const evento = typeof body.evento === "string" && EVENTOS_PAGINA.has(body.evento) ? body.evento : null;
+  if (!pagina || !evento) {
+    sendJson(response, 422, { ok: false, error: "invalid_event" });
+    return;
+  }
+
+  if (!supabaseEnabled(options)) {
+    sendJson(response, 503, { ok: false, error: "database_not_configured" });
+    return;
+  }
+
+  try {
+    await callRpc(options, "pagina_registrar_evento", {
+      p: {
+        pagina,
+        evento,
+        visitante_id: normalizarUuid(body.visitante_id),
+        sessao_id: normalizarUuid(body.sessao_id),
+        perfil: typeof body.perfil === "string" && PERFIS_VALIDOS.has(body.perfil) ? body.perfil : null,
+        ...normalizarRastreio(body)
+      }
+    });
+    sendJson(response, 200, { ok: true });
+  } catch (error) {
+    console.error(`Falha ao registrar evento da página de obrigado: ${error?.message || "erro"}`);
     sendJson(response, 502, { ok: false, error: "database_unavailable" });
   }
 }
@@ -1193,12 +1280,17 @@ function invalido() {
 }
 
 // Recusar filtro que não faz sentido é melhor do que devolver a base inteira com cara de filtrada.
-function lerFiltrosComuns(params) {
+function lerPeriodo(params) {
   const desdeTexto = safeString(params.get("desde"), 100);
   const ateTexto = safeString(params.get("ate"), 100);
   const desde = isoDateOrNull(desdeTexto);
   const ate = isoDateOrNull(ateTexto);
   if ((desdeTexto && !desde) || (ateTexto && !ate)) invalido();
+  return { desde, ate };
+}
+
+function lerFiltrosComuns(params) {
+  const { desde, ate } = lerPeriodo(params);
 
   const perfilTexto = params.get("perfil");
   const perfil = perfilTexto ? perfilTexto : null;
@@ -1385,6 +1477,21 @@ function handleCruzamento(request, response, options) {
   });
 }
 
+/**
+ * Páginas de obrigado: visitantes, cliques no grupo e pesquisas concluídas atribuídas a cada uma,
+ * no período da barra. Só o período vale aqui: a página não tem nome, situação nem busca.
+ */
+function handlePaginas(request, response, options) {
+  return rotaDoPainel(request, response, options, "as páginas de obrigado", async (params) => {
+    const { desde, ate } = lerPeriodo(params);
+    const resultado = await readObjectResponse(
+      await callRpc(options, "paginas_resumo", { p_desde: desde, p_ate: ate, p_mapa: MAPA_PERFIL_PAGINA })
+    );
+    if (!Array.isArray(resultado.paginas)) throw new Error("supabase_unexpected_shape");
+    return { paginas: resultado.paginas, gerado_em: new Date(options.now()).toISOString() };
+  });
+}
+
 /* ------------------------------------------------------------------------------------------ */
 /* Exportação CSV                                                                              */
 /* ------------------------------------------------------------------------------------------ */
@@ -1438,6 +1545,11 @@ function respostasDaLinha(linha) {
   return isPlainObject(linha.respostas) ? linha.respostas : {};
 }
 
+// A coluna `perfil` espelha respostas.perfil; a resposta vale se a coluna faltar.
+function perfilDaLinha(linha) {
+  return typeof linha.perfil === "string" ? linha.perfil : respostasDaLinha(linha).perfil;
+}
+
 /** As colunas do CSV, na ordem do contrato (SPEC seção 5.3). */
 export const COLUNAS_CSV = (() => {
   const colunas = [
@@ -1451,7 +1563,10 @@ export const COLUNAS_CSV = (() => {
     ["nome", (l) => l.nome],
     ["whatsapp", (l) => l.whatsapp],
     ["whatsapp_internacional", (l) => l.whatsapp_internacional],
-    ["email", (l) => l.email]
+    ["email", (l) => l.email],
+    // Código do perfil (CRM) e a página de obrigado para onde o perfil leva (id de obrigado-config).
+    ["perfil_codigo", (l) => valorDoPerfil(pesquisa.PERFIL_CODIGO, perfilDaLinha(l)) ?? ""],
+    ["pagina_obrigado", (l) => paginaObrigadoDoPerfil(perfilDaLinha(l))?.id ?? ""]
   ];
 
   for (const pergunta of PERGUNTAS) {
@@ -1644,13 +1759,14 @@ function escapeAttr(valor) {
  * com endereço absoluto — o WhatsApp não monta prévia com imagem de caminho relativo. Sem origem
  * válida, a página sai como está no arquivo.
  */
-function metaDoSite(source, siteUrl) {
+function metaDoSite(source, siteUrl, rota = PESQUISA_ROTA) {
   if (!siteUrl) return source;
-  const pagina = `${siteUrl}${PESQUISA_ROTA}`;
-  const imagem = `${siteUrl}/img/og-pesquisa.jpg`;
+  const pagina = `${siteUrl}${rota}`;
+  // Imagem da prévia com caminho relativo ("/img/..."): vira endereço absoluto.
+  const absoluta = (_, antes, caminho, depois) => `${antes}${escapeAttr(`${siteUrl}${caminho}`)}${depois}`;
   return source
-    .replace(/(<meta property="og:image" content=")\/img\/og-pesquisa\.jpg(")/, `$1${escapeAttr(imagem)}$2`)
-    .replace(/(<meta name="twitter:image" content=")\/img\/og-pesquisa\.jpg(")/, `$1${escapeAttr(imagem)}$2`)
+    .replace(/(<meta property="og:image" content=")(\/[^"/][^"]*)(")/, absoluta)
+    .replace(/(<meta name="twitter:image" content=")(\/[^"/][^"]*)(")/, absoluta)
     .replace(
       "</head>",
       `<meta property="og:url" content="${escapeAttr(pagina)}" />\n<link rel="canonical" href="${escapeAttr(pagina)}" />\n</head>`
@@ -1685,10 +1801,11 @@ export function origemDaRequisicao(headers = {}) {
   return `${proto}://${host}`;
 }
 
-// O Pixel entra só na pesquisa. O painel tem dado pessoal na tela: nada de terceiros ali.
-function transformPage(source, pathname, pixelId, siteUrl) {
-  if (pathname !== PESQUISA_PAGE) return source;
-  let saida = metaDoSite(source, siteUrl);
+// O Pixel entra só na pesquisa e nas páginas de obrigado. O painel tem dado pessoal na tela: nada
+// de terceiros ali. `rota` é o endereço público (as 3 páginas de obrigado são o mesmo arquivo).
+function transformPage(source, pathname, pixelId, siteUrl, rota) {
+  if (pathname !== PESQUISA_PAGE && pathname !== OBRIGADO_PAGE) return source;
+  let saida = metaDoSite(source, siteUrl, pathname === OBRIGADO_PAGE ? rota : PESQUISA_ROTA);
   if (pixelId && !saida.includes("fbq('init'")) saida = saida.replace("</head>", `${metaPixelCode(pixelId)}</head>`);
   return saida;
 }
@@ -1710,9 +1827,9 @@ function negotiateEncoding(acceptEncoding) {
   return "identity";
 }
 
-async function buildResponseBody({ filePath, pathname, extension, encoding, pixelId, siteUrl }) {
+async function buildResponseBody({ filePath, pathname, extension, encoding, pixelId, siteUrl, rota }) {
   let data = await readFile(filePath);
-  if (extension === ".html") data = Buffer.from(transformPage(data.toString("utf8"), pathname, pixelId, siteUrl));
+  if (extension === ".html") data = Buffer.from(transformPage(data.toString("utf8"), pathname, pixelId, siteUrl, rota));
 
   if (encoding === "br") {
     return await brotliCompressAsync(data, {
@@ -1736,6 +1853,8 @@ function staticHeaders(pathname, extension) {
   };
 
   const doPainel = PAINEL_PATHS.has(pathname);
+  // Página de obrigado não é porta de entrada: sem índice de busca (quem chega é quem terminou).
+  if (pathname === OBRIGADO_PAGE) headers["X-Robots-Tag"] = "noindex, nofollow, noarchive";
   if (doPainel) {
     // O X-Robots-Tag repete no cabeçalho o que a meta tag diz no HTML. O no-referrer impede que o
     // endereço do painel vaze quando alguém clica, de dentro dele, no WhatsApp de um lead.
@@ -1774,6 +1893,13 @@ async function serveStatic(request, response, config) {
     return;
   }
 
+  // /obrigado* só existe nas rotas das páginas de obrigado: /obrigado.html direto, /obrigado-x ou
+  // /obrigado-cuidador-velho não abrem nada (nem uma página de obrigado sem segmento).
+  if (requestedPath.startsWith("/obrigado") && routeAliases.get(requestedPath) !== OBRIGADO_PAGE) {
+    sendJson(response, 404, { ok: false, error: "not_found" });
+    return;
+  }
+
   const resolvedRoot = path.resolve(config.rootDirectory);
   const filePath = path.resolve(resolvedRoot, `.${routeAliases.get(requestedPath) || requestedPath}`);
   if (!filePath.startsWith(`${resolvedRoot}${path.sep}`)) {
@@ -1785,6 +1911,13 @@ async function serveStatic(request, response, config) {
   const segments = path.relative(resolvedRoot, filePath).split(path.sep);
   const pathname = `/${segments.join("/")}`;
   const extension = path.extname(filePath).toLowerCase();
+
+  // O arquivo das páginas de obrigado só sai pelas rotas dele, qualquer que seja o caminho que
+  // levou até ele (ex.: /js/..%2Fobrigado.html).
+  if (pathname === OBRIGADO_PAGE && routeAliases.get(requestedPath) !== OBRIGADO_PAGE) {
+    sendJson(response, 404, { ok: false, error: "not_found" });
+    return;
+  }
 
   if (
     !contentTypes.has(extension) ||
@@ -1812,14 +1945,18 @@ async function serveStatic(request, response, config) {
 
   if (compressibleExtensions.has(extension)) {
     const encoding = negotiateEncoding(request.headers["accept-encoding"]);
-    // Só a pesquisa depende da origem. Sem SITE_URL ela vem da requisição, e por isso ENTRA NA
-    // CHAVE do cache: um Host forjado só muda a página de quem o forjou, nunca a de outra pessoa.
-    const origem = pathname === PESQUISA_PAGE ? config.siteUrl || origemDaRequisicao(request.headers) : "";
+    // Só a pesquisa e as páginas de obrigado dependem da origem. Sem SITE_URL ela vem da
+    // requisição, e por isso ENTRA NA CHAVE do cache: um Host forjado só muda a página de quem o
+    // forjou, nunca a de outra pessoa. A rota também entra: as 3 páginas de obrigado são o mesmo
+    // arquivo com og:url/canonical diferentes.
+    const comOrigem = pathname === PESQUISA_PAGE || pathname === OBRIGADO_PAGE;
+    const origem = comOrigem ? config.siteUrl || origemDaRequisicao(request.headers) : "";
+    const rota = pathname === OBRIGADO_PAGE ? requestedPath.replace(/\/+$/, "") : "";
     // Cada arquivo é transformado e comprimido uma única vez por versão (mtime + tamanho).
-    const cacheKey = [filePath, fileStats.mtimeMs, fileStats.size, encoding, origem].join("|");
+    const cacheKey = [filePath, fileStats.mtimeMs, fileStats.size, encoding, origem, rota].join("|");
     let body = config.responseBodyCache.get(cacheKey);
     if (!body) {
-      body = buildResponseBody({ filePath, pathname, extension, encoding, pixelId: config.metaPixelId, siteUrl: origem });
+      body = buildResponseBody({ filePath, pathname, extension, encoding, pixelId: config.metaPixelId, siteUrl: origem, rota });
       config.responseBodyCache.set(cacheKey, body);
       body.catch(() => config.responseBodyCache.delete(cacheKey));
       // Teto do cache: com a origem na chave, alguém mandando mil Hosts diferentes não enche a
@@ -1915,6 +2052,7 @@ export function createServerApp({
     checkEmailDomain: createCachedDomainChecker(resolveEmailDomain, agora),
     responseBodyCache: new Map(),
     allowEvento: createRateLimiter({ windowMs: EVENTO_RATE_LIMIT_WINDOW_MS, max: EVENTO_RATE_LIMIT_MAX, now: agora }),
+    allowPaginaEvento: createRateLimiter({ windowMs: EVENTO_RATE_LIMIT_WINDOW_MS, max: EVENTO_RATE_LIMIT_MAX, now: agora }),
     allowSalvar: createRateLimiter({ windowMs: SALVAR_RATE_LIMIT_WINDOW_MS, max: SALVAR_RATE_LIMIT_MAX, now: agora }),
     allowLogin: createRateLimiter({ windowMs: PAINEL_LOGIN_WINDOW_MS, max: PAINEL_LOGIN_MAX, now: agora })
   };
@@ -1922,6 +2060,7 @@ export function createServerApp({
   const rotas = new Map([
     ["/api/pesquisa/evento", handleEvento],
     ["/api/pesquisa/salvar", handleSalvar],
+    ["/api/pagina/evento", handlePaginaEvento],
     ["/api/painel/login", handleLogin],
     ["/api/painel/logout", handleLogout],
     [
@@ -1936,6 +2075,7 @@ export function createServerApp({
     ["/api/painel/respostas", handleRespostas],
     ["/api/painel/abertas", handleAbertas],
     ["/api/painel/cruzamento", handleCruzamento],
+    ["/api/painel/paginas", handlePaginas],
     ["/api/painel/exportar.csv", handleExportarCsv]
   ]);
 

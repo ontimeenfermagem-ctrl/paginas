@@ -16,6 +16,8 @@
   const P = window.EVPesquisa;
   const L = window.EVLeadRules;
   if (!P || !L) return;
+  // Páginas de obrigado (js/obrigado-config.js). Sem elas, a pesquisa termina na tela de fim.
+  const O = window.EVObrigado || null;
 
   /* ================================================================== */
   /* Constantes                                                          */
@@ -39,6 +41,10 @@
   const PAUSA_TEXTO_MS = 1200;
   const BACKOFF_INICIAL_MS = 2000;
   const BACKOFF_TETO_MS = 30000;
+  /** Ao concluir, espera o servidor confirmar o último salvamento até isto antes de sair. */
+  const ESPERA_SALVAR_FIM_MS = 2500;
+  /** Na 1ª conclusão, fica ao menos isto no "obrigada" (o Pixel sai antes da troca de página). */
+  const ESPERA_MINIMA_FIM_MS = 700;
 
   const CAMPOS_RASTREIO = [
     "page_url",
@@ -116,14 +122,6 @@
       window.localStorage.setItem(chave, valor);
     } catch {
       // Cheio ou bloqueado: a pesquisa segue, só não retoma.
-    }
-  }
-
-  function apagarStorage(chave) {
-    try {
-      window.localStorage.removeItem(chave);
-    } catch {
-      // idem
     }
   }
 
@@ -294,6 +292,24 @@
   /* Estado em memória                                                   */
   /* ================================================================== */
 
+  /**
+   * /pesquisa-icp?nova=1 (link "Responder como outra pessoa" da página de obrigado): começa uma
+   * resposta nova neste aparelho. O parâmetro sai da URL já aqui, para não entrar no rastreio e
+   * para um recarregamento não apagar de novo.
+   */
+  function pedidoDeNovaResposta() {
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.get("nova") !== "1") return false;
+      url.searchParams.delete("nova");
+      window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  const NOVA_RESPOSTA = pedidoDeNovaResposta();
   const CARGA = novoUuid(); // identifica as entradas de histórico criadas por este carregamento
   const visitanteId = visitanteDoAparelho();
   let r = carregarRascunho(rastreioDestaVisita());
@@ -303,6 +319,8 @@
   let inicioRegistrado = false;
   const falasVistas = new Set(); // etapas cuja fala já "digitou" nesta visita
   const etapasRastreadas = new Set(); // etapas que já foram ao pixel nesta visita
+  let redirecionado = false; // já saiu para a página de obrigado
+  let saindoParaObrigado = false; // esperando o último salvamento para sair
   let travaAvanco = null; // timer do avanço automático (unica/escala)
   let travaToque = null; // timer que devolve o toque às opções de uma pergunta recém-montada
   let timerTexto = null;
@@ -502,6 +520,7 @@
 
   /** Fechando ou escondendo a página: manda o que falta com keepalive, sem esperar resposta. */
   function despedida() {
+    if (redirecionado) return; // a ida à página de obrigado já mandou o que faltava
     acumularTempo();
     persistir();
     if (!podeSalvar()) return;
@@ -646,6 +665,7 @@
   }
 
   window.addEventListener("popstate", (evento) => {
+    if (redirecionado) return; // desfazendo o histórico a caminho do obrigado (trocarPorObrigado)
     const estado = evento.state || {};
     const n = typeof estado.ev === "number" ? estado.ev : 0;
     const desteCarregamento = estado.k === CARGA;
@@ -740,11 +760,19 @@
     if (ehQuestao || tela === "fim") {
       if (r.pendente || anterior !== tela) agendarSalvamento();
     }
+    let primeiraConclusao = false;
     if (tela === "fim" && !r.fim_rastreado) {
+      primeiraConclusao = true;
       r.fim_rastreado = true;
       persistir();
+      const pagina = paginaDeObrigado();
       pixel("trackCustom", "PesquisaConcluida", { perfil: r.respostas.perfil || "" });
+      pixel("trackCustom", "pesquisa_icp_concluida", {
+        perfil: codigoDoPerfil(),
+        pagina_obrigado: pagina ? pagina.id : ""
+      });
     }
+    if (tela === "fim") sairParaObrigado(primeiraConclusao ? ESPERA_MINIMA_FIM_MS : 0);
   }
 
   function animarEntrada(elemento, direcao) {
@@ -1665,30 +1693,111 @@
   function montarFim() {
     const nome = P.primeiroNome(r.contato && r.contato.nome);
     $("fim-saudacao").textContent = nome ? `Muito obrigada, ${nome}!` : "Muito obrigada!";
+    // Com página de obrigado, esta tela só aparece de passagem: "fechar a página" seria o
+    // conselho errado. A versão completa fica como plano B (perfil sem página).
+    const vaiSair = Boolean(paginaDeObrigado());
+    $("fim-abrindo").hidden = !vaiSair;
+    $("fim-fechar").hidden = vaiSair;
   }
 
-  $("botao-outra-pessoa").addEventListener("click", () => {
-    // Outra pessoa no mesmo aparelho: rascunho zerado, contato em branco. O rastreio (de onde o
-    // aparelho veio) continua, porque é do aparelho e não da pessoa.
-    const rastreio = r.rastreio;
-    apagarStorage(CHAVE_RASCUNHO);
-    r = rascunhoNovo(rastreio, null);
-    persistir();
-    fila.pendente = false;
-    for (const campo of Object.keys(campos)) {
-      campos[campo].value = "";
-      mostrarErro(campo, "");
+  /* ================================================================== */
+  /* Página de obrigado                                                  */
+  /* ================================================================== */
+  // Concluir leva à página do segmento (js/obrigado-config.js), com as UTMs. Antes de sair, o
+  // último salvamento (pergunta_atual "fim") precisa ter sido confirmado; se o servidor demorar,
+  // a pessoa não fica presa: sai mesmo assim, e o estado vai junto com keepalive.
+
+  function paginaDeObrigado() {
+    if (!O) return null;
+    try {
+      return O.paginaDoPerfil(r.respostas.perfil) || null;
+    } catch {
+      return null;
     }
-    whatsappAnterior = "";
-    emailDispensado = "";
-    tentouEnviar = false;
-    sugestao.caixa.hidden = true;
-    falasVistas.clear();
-    inicioRegistrado = false;
-    irPara("boasvindas", { direcao: "tras", historico: "trocar" });
+  }
+
+  function codigoDoPerfil() {
+    const perfil = r.respostas.perfil;
+    return (perfil && P.PERFIL_CODIGO && P.PERFIL_CODIGO[perfil]) || "";
+  }
+
+  /**
+   * UTMs e ids de clique para a página de obrigado: os da URL atual; sem nenhum na URL, o bloco de
+   * primeiro toque do rascunho (inteiro, sem misturar campanhas, como em mesclarRastreio).
+   */
+  function consultaDeOrigem() {
+    let query;
+    try {
+      query = new URLSearchParams(window.location.search);
+    } catch {
+      query = new URLSearchParams();
+    }
+    const daUrl = CAMPOS_CAMPANHA.map((campo) => [campo, textoRastreio(query.get(campo), campo)]);
+    const usar = daUrl.some(([, valor]) => valor)
+      ? daUrl
+      : CAMPOS_CAMPANHA.map((campo) => [campo, textoRastreio(r.rastreio && r.rastreio[campo], campo)]);
+    const saida = new URLSearchParams();
+    for (const [campo, valor] of usar) if (valor) saida.set(campo, valor);
+    const texto = saida.toString();
+    return texto ? `?${texto}` : "";
+  }
+
+  function salvamentoEmDia() {
+    return !podeSalvar() || (!r.pendente && !fila.emVoo && !fila.pendente && !fila.timer);
+  }
+
+  const pausa = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+  /**
+   * Sai para a página de obrigado SEM deixar a pesquisa no "voltar". Cada tela da pesquisa é uma
+   * entrada no histórico; se a página de obrigado entrasse por cima delas, o "voltar" do celular
+   * recarregaria a pesquisa, que (concluída) mandaria de novo para o obrigado — uma armadilha de
+   * dezenas de toques. Então: desfaz as entradas desta visita e SUBSTITUI a primeira pelo obrigado.
+   */
+  function trocarPorObrigado(destino) {
+    let saiu = false;
+    const sair = () => {
+      if (saiu) return;
+      saiu = true;
+      window.removeEventListener("popstate", sair);
+      try {
+        window.location.replace(destino);
+      } catch {
+        window.location.href = destino;
+      }
+    };
+    const n = historicoN;
+    if (n <= 0) return sair();
     historicoN = 0;
-    historicoTrocar();
-  });
+    window.addEventListener("popstate", sair);
+    window.setTimeout(sair, 400); // navegador que não avisa o popstate: sai assim mesmo
+    try {
+      window.history.go(-n);
+    } catch {
+      sair();
+    }
+  }
+
+  async function sairParaObrigado(minimoMs) {
+    const pagina = paginaDeObrigado();
+    if (!pagina || saindoParaObrigado || redirecionado) return;
+    saindoParaObrigado = true;
+    const inicio = Date.now();
+    try {
+      while (!salvamentoEmDia() && Date.now() - inicio < ESPERA_SALVAR_FIM_MS && telaAtual === "fim") await pausa(80);
+      const falta = minimoMs - (Date.now() - inicio);
+      if (falta > 0 && telaAtual === "fim") await pausa(falta);
+      // Voltou uma pergunta, ou o servidor recusou o contato (a fila levou para a tela de contato):
+      // fica. Quando chegar ao fim de novo, esta função roda outra vez.
+      if (telaAtual !== "fim" || r.contato_invalido) return;
+      if (!salvamentoEmDia()) despedida(); // servidor lento ou sem rede: vai com keepalive
+      redirecionado = true;
+      persistir();
+      trocarPorObrigado(pagina.rota + consultaDeOrigem());
+    } finally {
+      saindoParaObrigado = false;
+    }
+  }
 
   /* ================================================================== */
   /* Teclado virtual                                                     */
@@ -1721,6 +1830,13 @@
   /* ================================================================== */
 
   function iniciar() {
+    if (NOVA_RESPOSTA) {
+      // Outra pessoa no mesmo aparelho: o que a anterior ainda não tinha mandado vai agora, e o
+      // rascunho recomeça em branco. O rastreio (de onde o aparelho veio) continua.
+      if (r.pendente && podeSalvar()) postarSalvar(true);
+      r = rascunhoNovo(r.rastreio, null);
+      persistir();
+    }
     historicoTrocar();
     enviarEvento("visita");
 
@@ -1730,6 +1846,8 @@
       enviarFila();
     }
 
+    // Já concluiu neste aparelho: vai de novo para a página de obrigado dela (a tela de fim só
+    // aparece de passagem, ou como plano B se o perfil não tiver página).
     if (r.concluida && r.contato && P.progresso(r.respostas).completa) {
       telaAtual = "fim";
       irPara("fim", { historico: "nenhum" });

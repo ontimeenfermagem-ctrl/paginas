@@ -1291,6 +1291,24 @@ a {
   font-size: 16px;
   font-weight: 600;
 }
+.fim-abrindo {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 600;
+}
+.fim-abrindo-roda {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 3px solid color-mix(in oklab, var(--ember) 22%, transparent);
+  border-top-color: var(--ember);
+  animation: gira 0.8s linear infinite;
+}
 .fim-logo {
   width: 104px;
   height: auto;

@@ -4,7 +4,8 @@
 //
 // As páginas vêm do server.mjs de verdade (CSP, cabeçalhos, allowlist); os números do SQL de
 // verdade são provados em sql.e2e.mjs e no fluxo.e2e.mjs. Aqui: login e seus erros, placar, funil,
-// abas dos 5 perfis, filtros e URL, corrida de respostas, sessão expirada, atualização automática,
+// abas dos 4 perfis, a aba "Páginas de obrigado" (funil por página, % com base, perfis, origem,
+// dia, link do grupo), filtros e URL, corrida de respostas, sessão expirada, atualização automática,
 // lista e "Ver tudo", quadros, cruzamento, abertas, tráfego, copiar ICP, estados vazio/erro/sem
 // rede, celular e desktop, e nenhum erro de JavaScript.
 //
@@ -19,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 import { createServerApp } from "../../server.mjs";
-import { abertas, cruzamento, EV, gerar, lista, painel } from "./apoio/painel-fixtures.mjs";
+import { abertas, cruzamento, EV, gerar, lista, OBR, paginas, painel } from "./apoio/painel-fixtures.mjs";
 
 const RAIZ = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const TELAS = process.env.E2E_SCREENS ? path.join(process.env.E2E_SCREENS, "painel") : "";
@@ -46,7 +47,7 @@ after(async () => {
 });
 
 const DADOS = gerar();
-const VAZIO = { visitantes: [], pessoas: [] };
+const VAZIO = { visitantes: [], pessoas: [], eventos: [] };
 
 // Cada checagem é uma asserção (a primeira que falha derruba o cenário) e é contada: o último
 // teste confere que nenhuma foi pulada.
@@ -102,6 +103,7 @@ function criarMock(page, { dados = DADOS, logado = true } = {}) {
         if (q.status && !["concluida", "em_andamento"].includes(q.status)) return json(422, { ok: false, error: "invalid_filters" });
         const filtros = { desde: q.desde, ate: q.ate, perfil: q.perfil, status: q.status, busca: q.busca };
         if (rota === "resumo") return json(200, { ok: true, resumo: painel(mock.dados, filtros), gerado_em: new Date().toISOString() });
+        if (rota === "paginas") return json(200, { ok: true, paginas: paginas(mock.dados, filtros), gerado_em: new Date().toISOString() });
         if (rota === "cruzamento") {
           const ids = EV.perguntasAnalisaveis().map((p) => p.id);
           if (!ids.includes(q.linha) || !ids.includes(q.coluna) || q.linha === q.coluna) return json(422, { ok: false, error: "invalid_filters" });
@@ -124,7 +126,7 @@ function criarMock(page, { dados = DADOS, logado = true } = {}) {
   return mock;
 }
 
-async function novaPagina(browser, { largura = 1280, altura = 800, logado = true, dados, url = "/painel" } = {}) {
+async function novaPagina(browser, { largura = 1280, altura = 800, logado = true, dados, url = "/painel", antes } = {}) {
   const contexto = await browser.newContext({ viewport: { width: largura, height: altura }, deviceScaleFactor: largura < 500 ? 2 : 1, timezoneId: "America/Sao_Paulo", locale: "pt-BR", permissions: ["clipboard-read", "clipboard-write"] });
   const page = await contexto.newPage();
   const erros = [];
@@ -135,6 +137,7 @@ async function novaPagina(browser, { largura = 1280, altura = 800, logado = true
   });
   const mock = criarMock(page, { dados, logado });
   await mock.instalar();
+  if (antes) await antes(page);
   await page.goto(BASE + url);
   return { page, mock, erros, contexto };
 }
@@ -233,8 +236,8 @@ cenario("painel-completo", async () => {
       confere(detalhe[3].includes(`${Math.round((r.concluidas / r.pessoas) * 100)}%`) && detalhe[3].includes("de quem se identificou"), "% concluídas com base explícita");
       // Abas de perfil com contagem.
       const abas = await page.$$eval("[data-perfil]", (els) => els.map((e) => e.textContent.replace(/\s+/g, " ").trim()));
-      // Todos + os 5 perfis (sem "Outro"), na ordem do config.
-      confere(abas.length === 6 && abas[0].includes("Todos") && abas[0].includes("800"), `abas de perfil: ${abas.join(" / ")}`);
+      // Todos + os 4 perfis (sem "Outro" nem "Estudante"), na ordem do config.
+      confere(abas.length === 5 && abas[0].includes("Todos") && abas[0].includes("800"), `abas de perfil: ${abas.join(" / ")}`);
       const chavesAbas = await page.$$eval("[data-perfis] [data-perfil]", (els) => els.map((e) => e.dataset.perfil));
       confere(JSON.stringify(chavesAbas) === JSON.stringify(["", ...Object.keys(EV.PERFIL)]), `abas na ordem dos perfis (${chavesAbas.join(",")})`);
       const tec = r.perfis.find((p) => p.perfil === EV.PERFIL.tecnico).total;
@@ -250,9 +253,9 @@ cenario("painel-completo", async () => {
       confere(ordem.every((v, i) => i === 0 || v > ordem[i - 1]), "paradas na ordem do questionário");
       const lideres = await page.$$eval("[data-paradas] .linha-barra.lider", (els) => els.length);
       confere(lideres === 3, `3 destaques nas paradas (${lideres})`);
-      // ICP: 5 cartões (um por perfil com gente) — sem "sem perfil".
+      // ICP: 4 cartões (um por perfil com gente) — sem "sem perfil".
       const cartoes = await page.$$eval(".icp-cartao h3", (els) => els.map((e) => e.textContent));
-      confere(JSON.stringify(cartoes) === JSON.stringify(Object.values(EV.PERFIL).map((v) => EV.PERFIL_CURTO[v])), `5 cartões de ICP (${cartoes.join(", ")})`);
+      confere(JSON.stringify(cartoes) === JSON.stringify(Object.values(EV.PERFIL).map((v) => EV.PERFIL_CURTO[v])), `4 cartões de ICP (${cartoes.join(", ")})`);
       // Quadro da idade: todas as alternativas, % de quem respondeu.
       const idade = await page.$$eval("#q-idade .linha-barra", (els) => els.map((e) => e.querySelector(".rotulo").textContent));
       confere(JSON.stringify(idade) === JSON.stringify(EV.perguntaPorId("idade").opcoes), "quadro idade com todas as alternativas na ordem");
@@ -610,6 +613,11 @@ cenario("lista", async () => {
     confere(invisiveis.every((q) => !texto.includes(q.texto)) || invisiveis.every((q) => visiveis.some((v) => v.texto === q.texto)), `${EV.PERFIL_CURTO[perfil]}: condicional de outro perfil não aparece`);
     confere(texto.includes(pessoa.id) && texto.includes("1.0"), `${EV.PERFIL_CURTO[perfil]}: id da sessão e versão`);
     confere(!texto.includes("Outro:"), `${EV.PERFIL_CURTO[perfil]}: nenhuma resposta "Outro: ..."`);
+    const paginaObrigado = OBR.paginaDoPerfil(perfil);
+    confere(
+      texto.includes("Página de obrigado") && texto.includes(`${paginaObrigado.nome} (${paginaObrigado.rota})`) && !texto.includes("ao terminar"),
+      `${EV.PERFIL_CURTO[perfil]}: Ver tudo mostra a página de obrigado (${paginaObrigado.rota})`
+    );
     confere((await page.evaluate(() => document.activeElement && document.activeElement.dataset.foco)) === `ver-${pessoa.id}`, `${EV.PERFIL_CURTO[perfil]}: foco no botão Fechar`);
     const chave = Object.keys(EV.PERFIL).find((k) => EV.PERFIL[k] === perfil);
     await recorte(page, `[data-pessoa="${pessoa.id}"]`, `ver-tudo-${chave}-1280`);
@@ -621,6 +629,10 @@ cenario("lista", async () => {
   await page.click(`[data-ver="${parada.id}"]`);
   const vazias = await page.locator(`#det-${parada.id} .valor.vazio-valor`).count();
   confere(vazias > 0, `em andamento mostra "—" nas não respondidas (${vazias})`);
+  confere(
+    (await page.textContent(`#det-${parada.id}`)).includes("Obrigado — Evento Gratuito de Outubro (/obrigado-evento-outubro) · vai para ela ao terminar"),
+    "em andamento: a página de obrigado para onde vai ao terminar"
+  );
   await recorte(page, `[data-pessoa="${parada.id}"]`, "ver-tudo-em-andamento-1280");
   // Link do WhatsApp.
   const wa = await page.getAttribute(`[data-pessoa="${parada.id}"] .pessoa-contato a`, "href");
@@ -809,7 +821,7 @@ cenario("estados", async () => {
   delete mock.forcar.abertas;
   await page.click("[data-icp] [data-repetir]");
   await esperarCalmo(page);
-  confere((await page.$$(".icp-cartao")).length === 5, "tentar de novo recupera o resumo");
+  confere((await page.$$(".icp-cartao")).length === Object.keys(EV.PERFIL).length, "tentar de novo recupera o resumo");
   await page.click("[data-lista] [data-repetir]");
   await page.waitForFunction(() => document.querySelectorAll("[data-pessoa]").length === 50);
   confere(true, "tentar de novo recupera a lista");
@@ -838,10 +850,191 @@ cenario("estados", async () => {
   await c.page.context().close();
 });
 
+/* ---------------------------------------------------------------- Páginas de obrigado */
+cenario("obrigado", async () => {
+  const fmt = (x) => new Intl.NumberFormat("pt-BR").format(x);
+  const pctTxt = (parte, base) => `${Math.round((parte / base) * 100)}%`;
+  const numero = (page, id, etapa) => page.textContent(`[data-obrigado-pagina='${id}'] [data-etapa='${etapa}'] .num strong`).then((t) => t.trim());
+
+  for (const [largura, altura] of [[1280, 800], [390, 844]]) {
+    const { page, mock, erros } = await novaPagina(browser, { largura, altura });
+    await page.waitForSelector("[data-panel-view]:not([hidden])");
+    await esperarCalmo(page);
+
+    const abas = await page.$$eval("[data-paginas] [data-pagina]", (els) => els.map((e) => `${e.dataset.pagina}|${e.textContent}`));
+    confere(abas.length === 2 && abas[0].startsWith("pesquisa-icp|") && abas[1] === "obrigado|Páginas de obrigadorota /obrigado-*", `faixa de páginas (${abas.join(" / ")})`);
+    confere(!mock.chamadas.some((c) => c.rota === "paginas"), "a aba de obrigado só busca dados quando é aberta");
+
+    mock.chamadas = [];
+    await page.click("[data-paginas] [data-pagina='obrigado']");
+    await page.waitForSelector("[data-obrigado] .obr-cartao [data-etapa]");
+    await esperarCalmo(page);
+    confere(new URL(page.url()).searchParams.get("pagina") === "obrigado", `a URL guarda a aba (${page.url()})`);
+    confere((await page.getAttribute("#pagina-obrigado", "aria-selected")) === "true", "aba de obrigado selecionada");
+    confere(await page.isHidden("[data-pagina-conteudo='pesquisa-icp']"), "conteúdo da pesquisa escondido");
+    confere(await page.isVisible("[data-periodos]"), "o período continua na barra");
+    confere((await page.isHidden("[data-perfis]")) && (await page.isHidden(".filtros-pessoa")), "perfil, busca e situação somem na aba de obrigado");
+    confere(!mock.chamadas.some((c) => c.rota === "resumo"), "abrir a aba não recarrega a pesquisa");
+
+    const r = paginas(DADOS, {});
+    const ids = await page.$$eval("[data-obrigado-pagina]", (els) => els.map((e) => e.dataset.obrigadoPagina));
+    confere(JSON.stringify(ids) === JSON.stringify(["afericao", "cuidador", "evento_outubro"]), `um cartão por página, na ordem (${ids})`);
+    for (const linha of r) {
+      const pagina = OBR.LISTA.find((p) => p.id === linha.pagina);
+      const cartao = `[data-obrigado-pagina='${linha.pagina}']`;
+      confere((await numero(page, linha.pagina, "atribuidas")) === fmt(linha.atribuidas), `${linha.pagina}: concluídas atribuídas = ${linha.atribuidas}`);
+      confere((await numero(page, linha.pagina, "visitantes")) === fmt(linha.visitantes), `${linha.pagina}: chegaram = ${linha.visitantes}`);
+      confere((await numero(page, linha.pagina, "clicaram")) === fmt(linha.clicaram), `${linha.pagina}: clicaram = ${linha.clicaram}`);
+      const subChegaram = await page.textContent(`${cartao} [data-etapa='visitantes'] small`);
+      confere(
+        subChegaram.includes(`${pctTxt(linha.visitantes, linha.atribuidas)} das ${fmt(linha.atribuidas)} pesquisas concluídas atribuídas`) && subChegaram.includes(`${fmt(linha.visitas)} visitas no total`),
+        `${linha.pagina}: % de quem chegou com a base explícita (${subChegaram})`
+      );
+      const subClicaram = await page.textContent(`${cartao} [data-etapa='clicaram'] small`);
+      confere(
+        subClicaram.includes(`${pctTxt(linha.clicaram, linha.visitantes)} das ${fmt(linha.visitantes)} pessoas que chegaram`) &&
+          subClicaram.includes(`${pctTxt(linha.clicaram, linha.atribuidas)} das concluídas`),
+        `${linha.pagina}: % de quem clicou com a base explícita (${subClicaram})`
+      );
+      const cabeca = await page.textContent(`${cartao} .obr-cabeca`);
+      confere(cabeca.includes(pagina.nome) && cabeca.includes(pagina.rota), `${linha.pagina}: nome e rota no cartão`);
+      confere(pagina.perfis.every((perfil) => cabeca.includes(EV.PERFIL_CURTO[perfil])), `${linha.pagina}: perfis que caem na página`);
+      confere(cabeca.includes("Link do grupo ainda não configurado") && (await page.$$(`${cartao} .obr-grupo a`)).length === 0, `${linha.pagina}: aviso de link não configurado, sem link quebrado`);
+      const origens = await page.$$eval(`${cartao} [data-divisao='origem'] tbody tr`, (trs) => trs.map((tr) => Array.from(tr.children).map((c) => c.textContent.trim())));
+      const primeira = linha.por_origem[0];
+      confere(origens.length === linha.por_origem.length && origens[0][0] === primeira.utm_source && origens[0][1] === fmt(primeira.visitantes), `${linha.pagina}: por origem (${origens[0]})`);
+      const dias = await page.$$eval(`${cartao} [data-divisao='dia'] tbody tr`, (trs) => trs.length);
+      confere(dias === Math.min(14, linha.por_dia.length), `${linha.pagina}: uma linha por dia, até 14 (${dias})`);
+    }
+
+    // Página do evento: Técnico e Enfermeiro na mesma página, contados separados.
+    const evento = r.find((l) => l.pagina === "evento_outubro");
+    const linhasPerfil = await page.$$eval("[data-obrigado-pagina='evento_outubro'] [data-divisao='perfil'] tbody tr", (trs) => trs.map((tr) => Array.from(tr.children).map((c) => c.textContent.trim())));
+    for (const chave of ["tecnico", "enfermeiro"]) {
+      const perfil = EV.PERFIL[chave];
+      const esperado = evento.por_perfil.find((x) => x.perfil === perfil);
+      const tr = linhasPerfil.find((l) => l[0] === EV.PERFIL_CURTO[perfil]);
+      confere(
+        tr && tr[1] === fmt(esperado.atribuidas) && tr[2] === fmt(esperado.visitantes) && tr[3] === `${fmt(esperado.clicaram)} · ${pctTxt(esperado.clicaram, esperado.visitantes)}`,
+        `evento_outubro: ${chave} separado (${tr})`
+      );
+    }
+    confere(linhasPerfil.some((l) => l[0] === "Sem perfil (abriu o link direto)" && l[1] === "—"), "acesso direto aparece como 'sem perfil'");
+    confere((await page.textContent("[data-obrigado-pagina='evento_outubro'] [data-divisao='perfil'] caption")).includes("Técnicos de enfermagem e Enfermeiros dividem esta página"), "legenda da divisão na página do evento");
+
+    // "Por dia": as 2 semanas mais recentes primeiro; o resto abre num clique, com o foco no botão.
+    if (evento.por_dia.length > 14) {
+      await page.click("[data-obr-dias='evento_outubro']");
+      const todosDias = await page.$$eval("[data-obrigado-pagina='evento_outubro'] [data-divisao='dia'] tbody th", (ths) => ths.map((th) => th.textContent));
+      confere(todosDias.length === evento.por_dia.length, `Ver todos os dias (${todosDias.length})`);
+      confere((await page.evaluate(() => document.activeElement && document.activeElement.dataset.foco)) === "obr-dias-evento_outubro", "foco fica no botão dos dias");
+      await page.click("[data-obr-dias='evento_outubro']");
+    }
+
+    const soma = r.reduce((t, l) => ({ a: t.a + l.atribuidas, v: t.v + l.visitantes, c: t.c + l.clicaram }), { a: 0, v: 0, c: 0 });
+    const placar = await page.$$eval("[data-obrigado] .obr-placar .valor", (els) => els.map((e) => e.textContent.trim()));
+    confere(JSON.stringify(placar) === JSON.stringify([fmt(soma.a), fmt(soma.v), fmt(soma.c)]), `placar somado (${placar})`);
+
+    const larguraDoc = await page.evaluate(() => document.documentElement.scrollWidth);
+    confere(larguraDoc <= largura, `obrigado: sem rolagem horizontal em ${largura}px (scrollWidth ${larguraDoc})`);
+    const transbordam = await page.$$eval("[data-obrigado] .tabela-rolagem", (els) => els.filter((e) => e.scrollWidth > e.clientWidth + 1).length);
+    confere(transbordam === 0, `obrigado: nenhuma tabela rola de lado em ${largura}px (${transbordam})`);
+    await tela(page, `obrigado-${largura}`, { full: true });
+    await recorte(page, "[data-obrigado-pagina='evento_outubro']", `obrigado-evento-${largura}`);
+
+    if (largura === 1280) {
+      // Período da barra: vale aqui e só recarrega a aba aberta.
+      mock.chamadas = [];
+      await page.click("[data-periodo='7']");
+      await page.waitForFunction(() => document.querySelector("[data-periodo='7']").getAttribute("aria-pressed") === "true");
+      await esperarCalmo(page);
+      const chamada = mock.chamadas.find((c) => c.rota === "paginas");
+      confere(chamada && chamada.url.includes("desde="), `período vai para a API (${chamada && chamada.url})`);
+      confere(!mock.chamadas.some((c) => c.rota === "resumo"), "trocar o período na aba de obrigado não recarrega a pesquisa");
+      const r7 = paginas(DADOS, { desde: new URL(BASE + chamada.url).searchParams.get("desde") });
+      const e7 = r7.find((l) => l.pagina === "evento_outubro");
+      await page.waitForFunction(
+        (esperado) => document.querySelector("[data-obrigado-pagina='evento_outubro'] [data-etapa='atribuidas'] .num strong")?.textContent.trim() === esperado,
+        fmt(e7.atribuidas)
+      );
+      confere((await numero(page, "evento_outubro", "clicaram")) === fmt(e7.clicaram), `7 dias: clicaram = ${e7.clicaram}`);
+      confere((await page.textContent("[data-obrigado-periodo]")).includes("Últimos 7 dias"), "rótulo do período");
+      confere(new URL(page.url()).searchParams.get("periodo") === "7", "período na URL");
+
+      mock.chamadas = [];
+      await page.click("[data-atualizar]");
+      await esperarCalmo(page);
+      confere(mock.chamadas.some((c) => c.rota === "paginas") && !mock.chamadas.some((c) => c.rota === "resumo"), "Atualizar recarrega só a aba aberta");
+
+      // De volta à pesquisa: filtros de pessoa voltam, com o mesmo período.
+      mock.chamadas = [];
+      await page.click("[data-paginas] [data-pagina='pesquisa-icp']");
+      await esperarCalmo(page);
+      confere(await page.isVisible("[data-perfis]"), "abas de perfil voltam na pesquisa");
+      const resumo = mock.chamadas.find((c) => c.rota === "resumo");
+      confere(resumo && resumo.url.includes("desde="), "a pesquisa usa o mesmo período");
+      confere(!new URL(page.url()).searchParams.has("pagina"), "aba padrão não vai para a URL");
+
+      // Erro do banco: aviso, Tentar de novo e recuperação.
+      mock.forcar.paginas = 502;
+      await page.click("[data-paginas] [data-pagina='obrigado']");
+      await page.waitForSelector("[data-obrigado] .erro [data-repetir='obrigado']");
+      confere((await page.textContent("[data-obrigado-status]")).includes("Não foi possível carregar"), "502 avisa no status");
+      confere((await page.$$("[data-obrigado] .obr-cartao")).length === 0, "sem número velho na tela depois do erro");
+      await tela(page, "obrigado-erro-1280");
+      delete mock.forcar.paginas;
+      await page.click("[data-obrigado] [data-repetir='obrigado']");
+      await page.waitForSelector("[data-obrigado] .obr-cartao [data-etapa]");
+      confere((await page.textContent("[data-obrigado-status]")).trim() === "", "Tentar de novo recupera");
+
+      // Sessão vencida: volta ao login.
+      mock.logado = false;
+      await page.click("[data-atualizar]");
+      await page.waitForSelector("[data-login-view]:not([hidden])");
+      confere((await page.textContent("[data-login-status]")).includes("sessão expirou"), "401 na aba de obrigado volta ao login");
+    }
+    const naoEsperados = erros.filter((e) => !/Failed to load resource|502/.test(e));
+    confere(naoEsperados.length === 0, `obrigado: sem erros de JavaScript em ${largura}px (${naoEsperados.join(" | ")})`);
+    await page.context().close();
+  }
+
+  // Aberta direto pela URL, sem ninguém ainda: estado vazio caprichado e cartões com a configuração.
+  const v = await novaPagina(browser, { dados: VAZIO, url: "/painel?pagina=obrigado", largura: 390, altura: 844 });
+  await v.page.waitForSelector("[data-obrigado-vazio]");
+  confere((await v.page.textContent("[data-obrigado-vazio]")).includes("Ninguém chegou às páginas de obrigado ainda"), "vazio geral");
+  confere((await v.page.$$eval("[data-obrigado] .obr-cartao .vazio", (els) => els.length)) === OBR.LISTA.length, "cada cartão diz que ninguém passou por ele");
+  confere((await v.page.$$eval("[data-obrigado] .obr-cartao [data-sem-link]", (els) => els.length)) === OBR.LISTA.length, "vazio ainda mostra o aviso do link");
+  confere(!v.mock.chamadas.some((c) => c.rota === "resumo"), "aberta direto na aba de obrigado, a pesquisa não carrega");
+  confere((await v.page.evaluate(() => document.documentElement.scrollWidth)) <= 390, "vazio sem rolagem horizontal em 390px");
+  await tela(v.page, "obrigado-vazio-390", { full: true });
+  confere(v.erros.length === 0, `vazio sem erros (${v.erros.join(" | ")})`);
+  await v.page.context().close();
+
+  // Link do grupo configurado: o config servido é trocado só neste navegador (o arquivo não muda).
+  const LINK = "https://chat.whatsapp.com/AbCdEf123456";
+  const c = await novaPagina(browser, {
+    url: "/painel?pagina=obrigado",
+    antes: (page) =>
+      page.route("**/js/obrigado-config.js*", async (route) => {
+        const original = await route.fetch();
+        const corpo = (await original.text()).replace('afericao: ""', `afericao: "${LINK}"`);
+        await route.fulfill({ response: original, body: corpo });
+      })
+  });
+  await c.page.waitForSelector("[data-obrigado] .obr-cartao [data-etapa]");
+  confere((await c.page.getAttribute("[data-obrigado-pagina='afericao'] .obr-grupo a", "href")) === LINK, "link configurado vira link do grupo");
+  confere((await c.page.getAttribute("[data-obrigado-pagina='afericao'] .obr-grupo a", "rel")) === "noopener noreferrer", "link do grupo com rel seguro");
+  confere((await c.page.$$("[data-obrigado-pagina='afericao'] [data-sem-link]")).length === 0, "página com link não mostra o aviso");
+  confere((await c.page.$$("[data-obrigado] [data-sem-link]")).length === 2, "as outras duas continuam avisando");
+  await recorte(c.page, "[data-obrigado-pagina='afericao'] .obr-cabeca", "obrigado-link-configurado-1280");
+  confere(c.erros.length === 0, `link configurado sem erros (${c.erros.join(" | ")})`);
+  await c.page.context().close();
+});
+
 
 test("todas as checagens rodaram", () => {
-  // 9 cenários acima; o número exato muda quando um cenário ganha checagem, o piso não.
-  assert.ok(checagens >= 130, `só ${checagens} checagens rodaram`);
+  // 10 cenários acima; o número exato muda quando um cenário ganha checagem, o piso não.
+  assert.ok(checagens >= 200, `só ${checagens} checagens rodaram`);
   assert.ok(todasAsChamadas.length > 100);
   assert.deepEqual(todasAsChamadas.filter((url) => /_outro/.test(url)), [], "o painel nunca pede complemento de Outro");
   console.log(`# painel: ${checagens} checagens`);

@@ -11,11 +11,13 @@
     <link rel="icon" href="/img/favicon-32.png" sizes="32x32" type="image/png">
     <link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
     <link rel="preload" href="/fonts/parkinsans-latin.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="/css/painel.css?v=2">
-    <!-- A ordem importa: o painel lê perguntas, alternativas e perfis de EVPesquisa. Nenhuma
-         lista de perguntas mora no painel — mudou no config, mudou aqui. -->
-    <script src="/js/pesquisa-config.js?v=2" defer></script>
-    <script src="/js/painel.js?v=2" defer></script>
+    <link rel="stylesheet" href="/css/painel.css?v=3">
+    <!-- A ordem importa: o painel lê perguntas, alternativas e perfis de EVPesquisa, e as páginas
+         de obrigado de EVObrigado (que depende de EVPesquisa). Nenhuma lista de perguntas nem de
+         páginas mora no painel — mudou no config, mudou aqui. -->
+    <script src="/js/pesquisa-config.js?v=3" defer></script>
+    <script src="/js/obrigado-config.js?v=1" defer></script>
+    <script src="/js/painel.js?v=3" defer></script>
   </head>
   <body>
     <noscript>
@@ -67,8 +69,9 @@
              render próprios). O atributo é data-pagina, como no /admin do quintino. -->
         <nav class="paginas" role="tablist" aria-label="Página do funil" data-paginas></nav>
 
-        <div class="pagina-conteudo" id="pagina-pesquisa-icp-painel" role="tabpanel" aria-labelledby="pagina-pesquisa-icp" data-pagina-conteudo="pesquisa-icp">
-        <!-- Filtros: ficam presos no topo ao rolar. Tudo abaixo deles responde ao mesmo recorte. -->
+        <!-- Filtros: ficam presos no topo ao rolar. Tudo abaixo deles responde ao mesmo recorte. O
+             período vale para todas as páginas da faixa; perfil, busca e situação (data-so-pesquisa)
+             só existem na pesquisa e somem nas outras abas. -->
         <div class="filtros" data-filtros>
           <div class="filtros-linha">
             <div class="segmentado" role="group" aria-label="Período" data-periodos>
@@ -105,11 +108,11 @@
             <p class="datas-erro" data-datas-erro role="alert"></p>
           </form>
 
-          <div class="perfis" role="tablist" aria-label="Perfil profissional" data-perfis></div>
+          <div class="perfis" role="tablist" aria-label="Perfil profissional" data-perfis data-so-pesquisa></div>
 
           <!-- Busca e situação são filtros como período e perfil: mudam TODOS os números, a lista,
                as respostas abertas e o CSV. -->
-          <div class="filtros-pessoa" role="search" aria-label="Filtrar por pessoa">
+          <div class="filtros-pessoa" role="search" aria-label="Filtrar por pessoa" data-so-pesquisa>
             <label class="busca-global">
               <span class="visualmente-oculto">Buscar por nome, WhatsApp ou e-mail</span>
               <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -124,8 +127,10 @@
               </select>
             </label>
           </div>
-          <p class="filtro-ativo" data-filtro-ativo aria-live="polite" hidden></p>
+          <p class="filtro-ativo" data-filtro-ativo aria-live="polite" data-so-pesquisa hidden></p>
         </div>
+
+        <div class="pagina-conteudo" id="pagina-pesquisa-icp-painel" role="tabpanel" aria-labelledby="pagina-pesquisa-icp" data-pagina-conteudo="pesquisa-icp">
 
         <p class="status" data-panel-status role="status" aria-live="polite"></p>
 
@@ -298,6 +303,20 @@
           <p class="contador" data-contador aria-live="polite"></p>
           <div data-lista></div>
         </section>
+        </div>
+
+        <!-- ============================================================ Páginas de obrigado -->
+        <!-- Rotas /obrigado-* (js/obrigado-config.js). Só o período da barra vale aqui. -->
+        <div class="pagina-conteudo" id="pagina-obrigado-painel" role="tabpanel" aria-labelledby="pagina-obrigado" data-pagina-conteudo="obrigado" hidden>
+          <p class="status" data-obrigado-status role="status" aria-live="polite"></p>
+          <section class="secao secao-obrigado" id="sec-obrigado" aria-labelledby="obrigado-titulo" data-obrigado-secao>
+            <div class="secao-cabeca">
+              <p class="eyebrow" data-obrigado-periodo>Desde o começo</p>
+              <h2 id="obrigado-titulo">Páginas de obrigado</h2>
+              <p class="secao-sub">Quem termina a pesquisa é levado para uma das três páginas pelo perfil da pergunta 1. Em cada uma: quantas pesquisas concluídas foram para lá, quantas pessoas chegaram à página e quantas clicaram no botão do grupo de WhatsApp.</p>
+            </div>
+            <div class="obrigado" data-obrigado></div>
+          </section>
         </div>
 
         <footer class="rodape">

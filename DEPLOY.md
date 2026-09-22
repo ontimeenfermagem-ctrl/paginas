@@ -1,4 +1,4 @@
-# Deploy — Pesquisa de ICP + painel
+# Deploy — Pesquisa de ICP + páginas de obrigado + painel
 
 Um serviço só no Railway (este repositório, com o `Dockerfile` na raiz) e um projeto no Supabase. Não há build, `npm install` nem banco para administrar no Railway: o servidor não tem dependências e todos os dados ficam no Supabase.
 
@@ -20,11 +20,19 @@ Projeto sugerido: **"Painel - Lançamentos"** (ref `wfqnxedkuxvvcfofsmpq`), cria
 
    Tem que voltar um JSON com tudo zerado (`"visitantes" : 0, "pessoas" : 0, ...`).
 
-O que o arquivo cria (tudo com o prefixo `pesquisa_`, para não esbarrar em nada que o projeto venha a ter):
+O que o arquivo cria (tudo com os prefixos `pesquisa_` e `pagina_`/`paginas_`, para não esbarrar em nada que o projeto venha a ter):
 
-- tabelas `pesquisa_visitas` e `pesquisa_respostas`, com **RLS ligado e sem políticas**;
+- tabelas `pesquisa_visitas`, `pesquisa_respostas` e `pagina_eventos` (visitas e cliques no grupo das páginas de obrigado), com **RLS ligado e sem políticas**;
 - views `pesquisa_pessoas` (uma linha por pessoa) e `pesquisa_planilha` (uma coluna por pergunta), as duas `security_invoker`;
-- funções `pesquisa_salvar`, `pesquisa_registrar_evento`, `pesquisa_painel`, `pesquisa_cruzamento`, `pesquisa_abertas` e `pesquisa_valores`, executáveis **só pela service_role**.
+- funções `pesquisa_salvar`, `pesquisa_registrar_evento`, `pesquisa_painel`, `pesquisa_cruzamento`, `pesquisa_abertas`, `pesquisa_valores`, `pagina_registrar_evento` e `paginas_resumo`, executáveis **só pela service_role**.
+
+**Banco que já tem a pesquisa rodando (atualização das páginas de obrigado):** rode o `supabase.sql` inteiro de novo (é idempotente) **ou** só a seção "5. Páginas de obrigado" do fim do arquivo — ela é autossuficiente e termina com `notify pgrst, 'reload schema'`. Faça isso **antes** de publicar o servidor novo; sem a tabela, as páginas abrem normalmente, mas as visitas e os cliques não são contados e a aba "Páginas de obrigado" do painel responde erro. Para conferir:
+
+```sql
+select public.paginas_resumo(null, null, '{"Cuidador(a)": "cuidador"}'::jsonb);
+```
+
+Tem que voltar `{"paginas" : [{"pagina" : "cuidador", "visitas" : 0, ...}]}`.
 
 No Supabase, tudo o que nasce no schema `public` ganha acesso automático da chave pública (anon). O arquivo revoga esse acesso em cada tabela, view e função: a chave pública do projeto não lê, não grava e não executa nada da pesquisa. Isso é testado em `tests/e2e/sql.e2e.mjs` contra um Postgres com os mesmos grants padrão do Supabase.
 
@@ -99,6 +107,8 @@ O domínio ainda não foi decidido, e nada no código depende dele. Abaixo, `SEU
 
 4. Cadastre `SITE_URL=https://SEU-DOMINIO` nas variáveis do Railway: sem ele a prévia do WhatsApp já funciona (usa o endereço da requisição), mas com ele o `canonical` aponta sempre para o domínio oficial, mesmo quando alguém abre pelo endereço `*.up.railway.app`.
 
+As páginas de obrigado ficam em `https://SEU-DOMINIO/obrigado-afericao`, `/obrigado-cuidador` e `/obrigado-evento-outubro` (a pesquisa leva cada pessoa para a do perfil dela, com as UTMs).
+
 A pesquisa mora em `https://SEU-DOMINIO/pesquisa-icp`. A raiz `https://SEU-DOMINIO/` redireciona para ela mantendo as UTMs, e o endereço antigo `/pesquisa` também (301). Nos anúncios e no link da bio, use UTMs, por exemplo:
 
 ```
@@ -106,6 +116,12 @@ https://SEU-DOMINIO/pesquisa-icp?utm_source=instagram&utm_medium=bio&utm_campaig
 ```
 
 O painel fica em `https://SEU-DOMINIO/painel`.
+
+---
+
+## 5.1 Links dos grupos de WhatsApp
+
+Os convites dos três grupos ficam em `js/obrigado-config.js`, no objeto `LINKS_GRUPOS` (`afericao`, `cuidador`, `evento_outubro`). Cole cada convite (`https://chat.whatsapp.com/...`), rode `npm test`, faça commit e deploy — não há variável de ambiente nem SQL para isso. Enquanto um link estiver vazio, a página correspondente avisa que o link chega pelo WhatsApp (sem botão quebrado) e o painel mostra "Link do grupo ainda não configurado" no cartão dela.
 
 ---
 
@@ -121,9 +137,11 @@ Faça pelo celular, de preferência abrindo o link de dentro do Instagram ou do 
 - [ ] No Supabase > Table Editor > `pesquisa_respostas`: a linha está lá, com nome, WhatsApp formatado `(xx) xxxxx-xxxx`, e-mail, as respostas dadas e `utm_source = teste`. Em `pesquisa_visitas`, o visitante com `comecou_em` preenchido.
 - [ ] Reabrir o link no mesmo celular: aparece "Que bom te ver de novo" e "Continuar de onde parei" volta para a pergunta certa.
 - [ ] Painel: login com e-mail e senha; senha errada é recusada. O placar mostra 1 acesso, 1 começou, 1 se identificou; a lista de pessoas mostra "Parou na pergunta N". O filtro de período "Hoje" traz a resposta.
-- [ ] Termine a pesquisa: tela de obrigado; no painel, "Responderam tudo" = 1 e o selo "Respondeu tudo" na lista.
+- [ ] Termine a pesquisa: você é levado para a página de obrigado do seu perfil (ex.: Cuidador(a) → `/obrigado-cuidador?utm_source=teste&utm_campaign=deploy`, com as UTMs), que mostra só o grupo daquele perfil. No painel, "Responderam tudo" = 1 e o selo "Respondeu tudo" na lista; no "Ver tudo", "Página de obrigado".
+- [ ] Clique no botão do grupo. Painel > aba **Páginas de obrigado**: no cartão da sua página, "Pesquisas concluídas atribuídas" = 1, "Chegaram à página" = 1 e "Clicaram no grupo" = 1 (as outras duas páginas zeradas). Cartão com link vazio mostra "Link do grupo ainda não configurado".
+- [ ] `https://SEU-DOMINIO/obrigado-x` e `https://SEU-DOMINIO/obrigado.html` respondem 404.
 - [ ] **Baixar CSV** abre no Excel/Planilhas com acentos certos, uma coluna por pergunta.
-- [ ] n8n: chegou **um** aviso `pesquisa_concluida` (só no fim, nada no meio), com o lead, as UTMs e todas as perguntas do caminho. No painel, o "Ver tudo" da pessoa mostra "Enviado ao n8n em ..." (e o CSV, a coluna `enviado_n8n_em`).
+- [ ] n8n: chegou **um** aviso `pesquisa_concluida` (só no fim, nada no meio), com o lead, as UTMs, todas as perguntas do caminho, `perfil_codigo`, `segmento` e `pagina_obrigado`. No painel, o "Ver tudo" da pessoa mostra "Enviado ao n8n em ..." (e o CSV, a coluna `enviado_n8n_em`).
 - [ ] Pixel: no Gerenciador de Eventos da Meta (Testar eventos), aparecem `PageView`, `Lead` e `PesquisaConcluida` da página `/pesquisa-icp`.
 - [ ] A chave pública não lê nada. Troque `ANON` pela chave anon (ela é pública mesmo) e rode:
 
@@ -132,13 +150,14 @@ Faça pelo celular, de preferência abrindo o link de dentro do Instagram ou do 
     -H "apikey: ANON" -H "Authorization: Bearer ANON"
   ```
 
-  Tem que responder erro de permissão (`permission denied` / 401), **nunca** uma lista.
+  Tem que responder erro de permissão (`permission denied` / 401), **nunca** uma lista. O mesmo com `pagina_eventos?select=pagina` no lugar de `pesquisa_pessoas?select=nome`.
 
 Depois do teste, apague os dados de teste no SQL Editor, para não sujar os números do lançamento (troque pelo WhatsApp que você usou, só os dígitos):
 
 ```sql
 delete from public.pesquisa_respostas where whatsapp_digits = '11999999999';
 delete from public.pesquisa_visitas where utm_source = 'teste';
+delete from public.pagina_eventos where utm_source = 'teste';
 ```
 
 ---
@@ -185,6 +204,7 @@ Outras fontes, se precisar:
 - `pesquisa_pessoas`: igual à planilha, mas com as respostas num campo `respostas` (JSON) e todos os campos técnicos (tempos por pergunta, posição máxima, etc.).
 - `pesquisa_respostas`: **todas** as tentativas, inclusive as repetidas da mesma pessoa.
 - `pesquisa_visitas`: quem abriu a página, com origem e se clicou em "Começar".
+- `pagina_eventos`: cada visita e cada clique no grupo das páginas de obrigado (`pagina`, `evento`, `perfil`, origem). Ex.: `select pagina, perfil, count(*) filter (where evento = 'clique_grupo') as cliques from public.pagina_eventos group by 1, 2;`
 
 Datas ficam gravadas em UTC. Para ver no horário de Brasília: `criado_em at time zone 'America/Sao_Paulo'`.
 
@@ -198,5 +218,6 @@ Datas ficam gravadas em UTC. Para ver no horário de Brasília: `criado_em at ti
   todas na hora. "Sair" no painel apaga o cookie daquele aparelho, mas não invalida o token.
 - **Derrubar todas as sessões abertas** (perdeu um celular logado, por exemplo): troque `PAINEL_SESSAO_SEGREDO`.
 - **Mudar uma pergunta:** veja "Mudar uma pergunta" no `README.md` (é só `js/pesquisa-config.js` + subir a `VERSAO`).
+- **Trocar link de grupo, texto ou rota de uma página de obrigado:** só `js/obrigado-config.js` (seção 5.1).
 - **A pesquisa responde erro ao gravar / painel com erro 502:** confira se o `supabase.sql` foi rodado no projeto certo e se a chave é a service_role. Se o log do Railway falar em função não encontrada logo depois de rodar o SQL, rode no SQL Editor `notify pgrst, 'reload schema';`.
 - **Painel responde 503:** falta alguma das variáveis `SUPABASE_*` ou `PAINEL_*` (o log do deploy lista qual, com `Aviso:`).

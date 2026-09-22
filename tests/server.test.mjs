@@ -1,5 +1,6 @@
 /*
- * server.mjs — rotas públicas: estático, redirect, pixel, cabeçalhos e as duas APIs da pesquisa.
+ * server.mjs — rotas públicas: estático, redirect, pixel, cabeçalhos, as duas APIs da pesquisa e as
+ * páginas de obrigado (rotas /obrigado-* e POST /api/pagina/evento).
  *
  * Nada sai da máquina: o Supabase e o webhook são um fetch falso que grava as chamadas, e o DNS
  * do e-mail é um resolvedor falso. O estático vem de uma pasta temporária com arquivos de
@@ -43,12 +44,15 @@ async function listen(server) {
 /* ------------------------------------------------------------------ fixture do estático */
 
 const HTML_PESQUISA = '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Pesquisa</title></head><body><main id="app">pesquisa</main></body></html>';
+const HTML_OBRIGADO = '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta property="og:image" content="/img/og-pesquisa.jpg"><title>Obrigado</title></head><body><main id="obrigado">obrigado</main></body></html>';
 const HTML_PAINEL = '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="robots" content="noindex, nofollow"><title>Painel</title></head><body>painel</body></html>';
 
 before(async () => {
   root = await mkdtemp(path.join(tmpdir(), "ev-pesquisa-estatico-"));
   const arquivos = {
     "pesquisa.html": HTML_PESQUISA,
+    "obrigado.html": HTML_OBRIGADO,
+    "obrigado-velho.html": "<html>segredo</html>",
     "painel.html": HTML_PAINEL,
     "js/pesquisa.js": `console.log(${JSON.stringify("x".repeat(4000))});`,
     "js/painel.js": "console.log('painel');",
@@ -121,6 +125,7 @@ function createFakeBackend({ rpc = {}, webhook } = {}) {
       if (typeof resposta === "function") return await resposta(chamada);
       if (resposta !== undefined) return jsonResponse(resposta);
       if (nome === "pesquisa_registrar_evento") return new Response(null, { status: 204 });
+      if (nome === "pagina_registrar_evento") return new Response(null, { status: 204 });
       if (nome === "pesquisa_salvar") return jsonResponse({ novo: false, aplicado: true, concluiu_agora: false, status: "em_andamento" });
     }
     return jsonResponse({ message: "rota inesperada no teste" }, 404);
@@ -365,6 +370,240 @@ test("/pesquisa-icp e /pesquisa-icp/ servem a pesquisa com Pixel, CSP e cabeçal
     assert.equal(response.headers.get("cache-control"), "no-cache");
     assert.equal(response.headers.get("x-robots-tag"), null);
   }
+});
+
+/* ================================================================== páginas de obrigado */
+
+const ROTAS_OBRIGADO = ["/obrigado-afericao", "/obrigado-cuidador", "/obrigado-evento-outubro"];
+
+test("/obrigado-* (com e sem barra) servem obrigado.html com Pixel, CSP da pesquisa, noindex, og/canonical da própria rota e no-cache", async () => {
+  const appUrl = await listen(createServerApp({ rootDirectory: root }));
+
+  for (const base of ROTAS_OBRIGADO) {
+    for (const rota of [base, `${base}/`, `${base}?utm_source=meta&utm_campaign=x`]) {
+      const response = await fetch(`${appUrl}${rota}`);
+      const html = await response.text();
+      assert.equal(response.status, 200, rota);
+      assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8");
+      assert.match(html, /<main id="obrigado">obrigado<\/main>/);
+      assert.match(html, /fbq\('init', '538380380948773'\);\nfbq\('track', 'PageView'\);/, rota);
+      assert.equal((html.match(/fbq\('init'/g) || []).length, 1);
+      assert.equal(
+        response.headers.get("content-security-policy"),
+        "default-src 'self'; script-src 'self' 'unsafe-inline' https://connect.facebook.net; img-src 'self' data: https://www.facebook.com; connect-src 'self' https://www.facebook.com https://connect.facebook.net; style-src 'self' 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+      );
+      assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow, noarchive", rota);
+      assert.equal(response.headers.get("x-frame-options"), "DENY");
+      assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+      assert.equal(response.headers.get("cache-control"), "no-cache");
+      // og:url e canonical apontam para a página pedida (sem barra, sem query), e a imagem fica absoluta.
+      assert.ok(html.includes(`<meta property="og:url" content="${appUrl}${base}" />`), rota);
+      assert.ok(html.includes(`<link rel="canonical" href="${appUrl}${base}" />`), rota);
+      assert.ok(html.includes(`<meta property="og:image" content="${appUrl}/img/og-pesquisa.jpg">`), rota);
+    }
+  }
+
+  // HEAD responde sem corpo; POST não existe.
+  const head = await fetch(`${appUrl}/obrigado-cuidador`, { method: "HEAD" });
+  assert.equal(head.status, 200);
+  assert.equal((await fetch(`${appUrl}/obrigado-cuidador`, { method: "POST" })).status, 405);
+});
+
+test("/obrigado-*: SITE_URL manda no og:url; as 3 rotas (mesmo arquivo) não dividem o cache", async () => {
+  const appUrl = await listen(createServerApp({ rootDirectory: root, siteUrl: "https://pesquisa.exemplo.com.br/" }));
+  for (const rota of [...ROTAS_OBRIGADO, ...ROTAS_OBRIGADO.map((r) => `${r}/`)]) {
+    for (const encoding of ["br", "gzip", "identity"]) {
+      const r = await rawGet(appUrl, rota, { "Accept-Encoding": encoding, Host: "malicioso.exemplo" });
+      const corpo = encoding === "br" ? brotliDecompressSync(r.body) : encoding === "gzip" ? gunzipSync(r.body) : r.body;
+      const html = corpo.toString("utf8");
+      const esperado = `https://pesquisa.exemplo.com.br${rota.replace(/\/$/, "")}`;
+      assert.ok(html.includes(`<meta property="og:url" content="${esperado}" />`), `${rota} ${encoding}`);
+      assert.ok(html.includes(`<link rel="canonical" href="${esperado}" />`), `${rota} ${encoding}`);
+      assert.doesNotMatch(html, /malicioso/);
+    }
+  }
+});
+
+test("/obrigado*: qualquer outra rota é 404 — inclusive o arquivo direto e caminhos tortos até ele", async () => {
+  const appUrl = await listen(createServerApp({ rootDirectory: root }));
+  for (const caminho of [
+    "/obrigado",
+    "/obrigado/",
+    "/obrigado-x",
+    "/obrigado-estudante",
+    "/obrigado-cuidador-velho",
+    "/obrigado-afericao/extra",
+    "/obrigado-afericao//",
+    "/obrigado.html",
+    "/obrigado-velho.html",
+    "/Obrigado-afericao",
+    "/js/..%2fobrigado.html",
+    "/img/%2e%2e/obrigado.html",
+    "/./obrigado.html"
+  ]) {
+    const response = await rawGet(appUrl, caminho);
+    assert.equal(response.status, 404, caminho);
+    assert.doesNotMatch(response.body.toString(), /obrigado<\/main>|segredo/, caminho);
+  }
+});
+
+/* ================================================================== POST /api/pagina/evento */
+
+const EVENTO_PAGINA = { pagina: "cuidador", evento: "visita", visitante_id: VISITANTE, sessao_id: SESSAO, perfil: "Cuidador(a)" };
+
+test("pagina/evento: 405 sem POST, 415 sem JSON, 413 corpo grande, 400 JSON quebrado, 422 corpo que não é objeto", async () => {
+  const { server, backend } = app();
+  const appUrl = await listen(server);
+
+  const get = await fetch(`${appUrl}/api/pagina/evento`);
+  assert.equal(get.status, 405);
+  assert.equal(get.headers.get("allow"), "POST");
+
+  const semJson = await fetch(`${appUrl}/api/pagina/evento`, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify(EVENTO_PAGINA)
+  });
+  assert.equal(semJson.status, 415);
+  assert.deepEqual(await semJson.json(), { ok: false, error: "unsupported_media_type" });
+
+  const grande = await postJson(appUrl, "/api/pagina/evento", { ...EVENTO_PAGINA, page_url: "x".repeat(70 * 1024) });
+  assert.equal(grande.status, 413);
+  assert.deepEqual(await grande.json(), { ok: false, error: "payload_too_large" });
+
+  const quebrado = await postJson(appUrl, "/api/pagina/evento", "{pagina:");
+  assert.equal(quebrado.status, 400);
+  assert.deepEqual(await quebrado.json(), { ok: false, error: "invalid_json" });
+
+  for (const corpo of ["[]", "null", '"cuidador"', "7"]) {
+    const response = await postJson(appUrl, "/api/pagina/evento", corpo);
+    assert.equal(response.status, 422, corpo);
+    assert.deepEqual(await response.json(), { ok: false, error: "invalid_body" });
+  }
+  assert.equal(backend.chamadas.length, 0);
+});
+
+test("pagina/evento: página ou evento fora da lista → 422, sem ir ao banco", async () => {
+  const { server, backend } = app();
+  const appUrl = await listen(server);
+  for (const corpo of [
+    { ...EVENTO_PAGINA, pagina: "estudante" },
+    { ...EVENTO_PAGINA, pagina: "/obrigado-cuidador" },
+    { ...EVENTO_PAGINA, pagina: "Cuidador" },
+    { ...EVENTO_PAGINA, pagina: ["cuidador"] },
+    { ...EVENTO_PAGINA, pagina: undefined },
+    { ...EVENTO_PAGINA, evento: "inicio" },
+    { ...EVENTO_PAGINA, evento: "clique" },
+    { ...EVENTO_PAGINA, evento: "VISITA" },
+    { ...EVENTO_PAGINA, evento: undefined },
+    { ...EVENTO_PAGINA, pagina: "__proto__" },
+    { ...EVENTO_PAGINA, evento: "toString" }
+  ]) {
+    const response = await postJson(appUrl, "/api/pagina/evento", corpo);
+    assert.equal(response.status, 422, JSON.stringify(corpo));
+    assert.deepEqual(await response.json(), { ok: false, error: "invalid_event" });
+  }
+  assert.equal(backend.chamadas.length, 0);
+});
+
+test("pagina/evento: sem banco configurado → 503 database_not_configured", async () => {
+  const appUrl = await listen(createServerApp({ rootDirectory: root }));
+  const response = await postJson(appUrl, "/api/pagina/evento", EVENTO_PAGINA);
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { ok: false, error: "database_not_configured" });
+});
+
+test("pagina/evento: grava via pagina_registrar_evento com service_role; uuid e perfil inválidos viram null, texto aparado com teto", async () => {
+  const { server, backend } = app();
+  const appUrl = await listen(server);
+
+  const response = await postJson(appUrl, "/api/pagina/evento", {
+    pagina: "evento_outubro",
+    evento: "clique_grupo",
+    visitante_id: VISITANTE.toUpperCase(),
+    sessao_id: "nao-e-uuid",
+    perfil: "Enfermeiro(a)",
+    page_url: "  https://pesquisa.exemplo/obrigado-evento-outubro?utm_source=meta  ",
+    referrer: "",
+    dispositivo: "desktop",
+    utm_source: "meta",
+    utm_medium: "   ",
+    utm_campaign: "c".repeat(600),
+    utm_content: 42,
+    utm_term: "termo",
+    fbclid: "f".repeat(1_200),
+    gclid: null,
+    nome: "Maria (não é campo)"
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true });
+  assert.equal(response.headers.get("cache-control"), "no-store");
+
+  assert.equal(backend.chamadas.length, 1);
+  const [chamada] = backend.chamadas;
+  assert.equal(chamada.url, `${SUPABASE_URL}/rest/v1/rpc/pagina_registrar_evento`);
+  assert.equal(chamada.method, "POST");
+  assert.equal(chamada.headers.apikey, SUPABASE_KEY);
+  assert.equal(chamada.headers.Authorization, `Bearer ${SUPABASE_KEY}`);
+  assert.deepEqual(chamada.body, {
+    p: {
+      pagina: "evento_outubro",
+      evento: "clique_grupo",
+      visitante_id: VISITANTE,
+      sessao_id: null,
+      perfil: "Enfermeiro(a)",
+      page_url: "https://pesquisa.exemplo/obrigado-evento-outubro?utm_source=meta",
+      referrer: null,
+      dispositivo: "desktop",
+      utm_source: "meta",
+      utm_medium: null,
+      utm_campaign: "c".repeat(500),
+      utm_content: null,
+      utm_term: "termo",
+      fbclid: "f".repeat(1_000),
+      gclid: null
+    }
+  });
+
+  // Perfil desconhecido (inclusive o "Estudante" que saiu), dispositivo estranho e ids ausentes: null.
+  for (const perfil of ["Estudante da área da saúde", "Outro", "__proto__", 3, null]) {
+    await postJson(appUrl, "/api/pagina/evento", { pagina: "afericao", evento: "visita", perfil, dispositivo: "geladeira" });
+    const { p } = backend.chamadas.at(-1).body;
+    assert.deepEqual(
+      { pagina: p.pagina, evento: p.evento, perfil: p.perfil, visitante_id: p.visitante_id, sessao_id: p.sessao_id, dispositivo: p.dispositivo },
+      { pagina: "afericao", evento: "visita", perfil: null, visitante_id: null, sessao_id: null, dispositivo: null },
+      String(perfil)
+    );
+  }
+});
+
+test("pagina/evento: falha do banco → 502 sem vazar detalhe", async () => {
+  for (const resposta of [() => jsonResponse({ message: "detalhe interno" }, 500), () => Promise.reject(new Error("rede caiu"))]) {
+    const backend = createFakeBackend({ rpc: { pagina_registrar_evento: resposta } });
+    const appUrl = await listen(app({ backend }).server);
+    const response = await postJson(appUrl, "/api/pagina/evento", EVENTO_PAGINA);
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { ok: false, error: "database_unavailable" });
+  }
+});
+
+test("pagina/evento: rate limit próprio de 240/min por IP (a pesquisa não gasta o das páginas de obrigado)", async () => {
+  let agora = Date.parse("2026-09-22T12:00:00Z");
+  const { server } = app({ now: () => agora });
+  const appUrl = await listen(server);
+
+  // O limite da pesquisa esgotado não bloqueia a página de obrigado.
+  for (let i = 0; i < 241; i += 1) await postJson(appUrl, "/api/pesquisa/evento", { visitante_id: VISITANTE, evento: "visita" });
+  for (let i = 0; i < 240; i += 1) {
+    const response = await postJson(appUrl, "/api/pagina/evento", EVENTO_PAGINA, { "X-Forwarded-For": `10.0.0.${i % 250}, 200.1.1.1` });
+    assert.equal(response.status, 200, `requisição ${i + 1}`);
+  }
+  const bloqueada = await postJson(appUrl, "/api/pagina/evento", EVENTO_PAGINA, { "X-Forwarded-For": "9.9.9.9, 200.1.1.1" });
+  assert.equal(bloqueada.status, 429);
+  assert.deepEqual(await bloqueada.json(), { ok: false, error: "too_many_requests" });
+  assert.equal((await postJson(appUrl, "/api/pagina/evento", EVENTO_PAGINA, { "X-Forwarded-For": "200.2.2.2" })).status, 200);
+  agora += 61_000;
+  assert.equal((await postJson(appUrl, "/api/pagina/evento", EVENTO_PAGINA, { "X-Forwarded-For": "200.1.1.1" })).status, 200);
 });
 
 test("META_PIXEL_ID: outro id é respeitado, 'off' e valor estranho desligam", async () => {
@@ -975,10 +1214,13 @@ test("salvar: pergunta_atual — visível aceita; escondida, inventada ou 'fim' 
   await salvar(completas, "inventada");
   assert.equal(ultimaP().pergunta_atual, "fim");
 
-  // Estudante (sem bloco 9): o "fim" fica na etapa 8.
+  // "Estudante" saiu da pergunta 1 (4 perfis): um rascunho velho com ele perde o perfil e o bloco
+  // 9, "fim" não vale, e a pessoa volta para a pergunta 1.
   const estudante = { ...completas, perfil: "Estudante da área da saúde" };
   await salvar(estudante, "fim");
-  assert.equal(ultimaP().etapa_atual, 8);
+  assert.equal(ultimaP().perfil, null);
+  assert.equal(ultimaP().completa, false);
+  assert.equal(ultimaP().pergunta_atual, "perfil");
   assert.equal(ultimaP().total_perguntas, 31);
 });
 
@@ -1158,6 +1400,9 @@ test("webhook: chegar ao fim manda UM aviso 'pesquisa_concluida' com o payload d
       email: "maria@gmail.com"
     },
     perfil: "Cuidador(a)",
+    perfil_codigo: "cuidador",
+    segmento: "PERFIL_CUIDADOR",
+    pagina_obrigado: { id: "cuidador", rota: "/obrigado-cuidador", nome: "Obrigado — Formação Técnica Cuidador de Valor", grupo: "cuidador" },
     utm: { utm_source: "instagram", utm_medium: "stories", utm_campaign: "icp", utm_content: null, utm_term: null },
     rastreio: {
       fbclid: "fb-1",
@@ -1390,6 +1635,37 @@ test("reenvio: payload igual ao do envio imediato (mesma linha, mesmo relógio)"
   servers.push(server);
   await server.reenvio.executar();
   assert.deepEqual(backend.chamadas.find((c) => c.url === WEBHOOK_URL).body, avisosDe(imediato)[0].body);
+  // O reenvio leva os mesmos campos novos (mesma função de montagem).
+  const reenviado = backend.chamadas.find((c) => c.url === WEBHOOK_URL).body;
+  assert.equal(reenviado.perfil_codigo, "cuidador");
+  assert.equal(reenviado.segmento, "PERFIL_CUIDADOR");
+  assert.deepEqual(reenviado.pagina_obrigado, { id: "cuidador", rota: "/obrigado-cuidador", nome: "Obrigado — Formação Técnica Cuidador de Valor", grupo: "cuidador" });
+});
+
+test("payload do n8n: perfil_codigo, segmento e pagina_obrigado de cada perfil (Técnico e Enfermeiro: mesma página, códigos separados)", () => {
+  const agora = Date.parse("2026-09-22T10:00:00Z");
+  const evento = { id: "evento_outubro", rota: "/obrigado-evento-outubro", nome: "Obrigado — Evento Gratuito de Outubro", grupo: "evento_outubro" };
+  const casos = [
+    ["Auxiliar ou antiga atendente de enfermagem", "auxiliar_atendente", "PERFIL_AUXILIAR_ATENDENTE", { id: "afericao", rota: "/obrigado-afericao", nome: "Obrigado — Aula de Aferição", grupo: "afericao" }],
+    ["Cuidador(a)", "cuidador", "PERFIL_CUIDADOR", { id: "cuidador", rota: "/obrigado-cuidador", nome: "Obrigado — Formação Técnica Cuidador de Valor", grupo: "cuidador" }],
+    ["Técnico(a) de enfermagem", "tecnico_enfermagem", "PERFIL_TECNICO", evento],
+    ["Enfermeiro(a)", "enfermeiro", "PERFIL_ENFERMEIRO", evento],
+    // Sem perfil, perfil que saiu da pesquisa ou chave herdada: tudo null, nada inventado.
+    [undefined, null, null, null],
+    ["Estudante da área da saúde", null, null, null],
+    ["constructor", null, null, null]
+  ];
+  for (const [perfil, codigo, segmento, pagina] of casos) {
+    const respostas = perfil === undefined ? {} : { perfil };
+    const payload = montarPayloadWebhook({ linha: linhaFinalizada({ respostas }), id: SESSAO, contato: {}, respostas: {}, rastreio: {}, agora });
+    assert.equal(payload.perfil, perfil ?? null, String(perfil));
+    assert.equal(payload.perfil_codigo, codigo, String(perfil));
+    assert.equal(payload.segmento, segmento, String(perfil));
+    assert.deepEqual(payload.pagina_obrigado, pagina, String(perfil));
+  }
+  // Ordem das chaves no JSON: os campos novos logo depois de `perfil`.
+  const chaves = Object.keys(montarPayloadWebhook({ linha: linhaFinalizada(), id: SESSAO, contato: {}, respostas: {}, rastreio: {}, agora }));
+  assert.deepEqual(chaves.slice(chaves.indexOf("perfil"), chaves.indexOf("perfil") + 4), ["perfil", "perfil_codigo", "segmento", "pagina_obrigado"]);
 });
 
 test("reenvio: não sobrepõe execuções; falha na busca só loga", async () => {

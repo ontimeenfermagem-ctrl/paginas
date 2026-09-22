@@ -35,12 +35,30 @@
   /* Perfis — a pergunta 1 decide quais blocos condicionais aparecem.   */
   /* ================================================================== */
 
+  // Quatro perfis, por decisão do cliente: "Estudante da área da saúde" e "Outro" saíram. Cada perfil
+  // tem um bloco próprio na etapa 9 e leva a uma página de obrigado (js/obrigado-config.js).
   const PERFIL = Object.freeze({
     auxiliar: "Auxiliar ou antiga atendente de enfermagem",
     cuidador: "Cuidador(a)",
     tecnico: "Técnico(a) de enfermagem",
-    enfermeiro: "Enfermeiro(a)",
-    estudante: "Estudante da área da saúde"
+    enfermeiro: "Enfermeiro(a)"
+  });
+
+  /**
+   * Valor interno de cada perfil, sem acento, para CRM, automações e o n8n: o rótulo da tela pode
+   * mudar de texto, o código não. `segmento` é a etiqueta de público no CRM.
+   */
+  const PERFIL_CODIGO = Object.freeze({
+    [PERFIL.auxiliar]: "auxiliar_atendente",
+    [PERFIL.cuidador]: "cuidador",
+    [PERFIL.tecnico]: "tecnico_enfermagem",
+    [PERFIL.enfermeiro]: "enfermeiro"
+  });
+  const PERFIL_SEGMENTO = Object.freeze({
+    [PERFIL.auxiliar]: "PERFIL_AUXILIAR_ATENDENTE",
+    [PERFIL.cuidador]: "PERFIL_CUIDADOR",
+    [PERFIL.tecnico]: "PERFIL_TECNICO",
+    [PERFIL.enfermeiro]: "PERFIL_ENFERMEIRO"
   });
 
   /** Como o perfil aparece no meio de uma frase ("perguntas só pra quem é ..."). */
@@ -48,8 +66,7 @@
     [PERFIL.auxiliar]: "auxiliar ou atendente de enfermagem",
     [PERFIL.cuidador]: "cuidador(a)",
     [PERFIL.tecnico]: "técnico(a) de enfermagem",
-    [PERFIL.enfermeiro]: "enfermeiro(a)",
-    [PERFIL.estudante]: "estudante da área da saúde"
+    [PERFIL.enfermeiro]: "enfermeiro(a)"
   });
 
   /** Rótulo curto para abas, cartões e gráficos do painel. */
@@ -57,8 +74,7 @@
     [PERFIL.auxiliar]: "Auxiliares e antigas atendentes",
     [PERFIL.cuidador]: "Cuidadores",
     [PERFIL.tecnico]: "Técnicos de enfermagem",
-    [PERFIL.enfermeiro]: "Enfermeiros",
-    [PERFIL.estudante]: "Estudantes"
+    [PERFIL.enfermeiro]: "Enfermeiros"
   });
 
   /* ================================================================== */
@@ -165,8 +181,7 @@
           PERFIL.auxiliar,
           PERFIL.cuidador,
           PERFIL.tecnico,
-          PERFIL.enfermeiro,
-          PERFIL.estudante
+          PERFIL.enfermeiro
         ],
         nota: "Pergunta principal de segmentação: decide quais perguntas específicas (blocos A a D) aparecem."
       },
@@ -1143,6 +1158,8 @@
     PERFIL,
     PERFIL_NA_FRASE,
     PERFIL_CURTO,
+    PERFIL_CODIGO,
+    PERFIL_SEGMENTO,
     ESTADOS,
     REGIOES,
     ETAPAS,
