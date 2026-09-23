@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 import { createServerApp } from "../../server.mjs";
-import { abertas, cruzamento, EV, gerar, lista, OBR, paginas, painel } from "./apoio/painel-fixtures.mjs";
+import { abertas, CHK, cruzamento, EV, gerar, inscricoesResumo, lista, listaInscricoes, OBR, paginas, painel } from "./apoio/painel-fixtures.mjs";
 
 const RAIZ = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const TELAS = process.env.E2E_SCREENS ? path.join(process.env.E2E_SCREENS, "painel") : "";
@@ -47,7 +47,7 @@ after(async () => {
 });
 
 const DADOS = gerar();
-const VAZIO = { visitantes: [], pessoas: [], eventos: [] };
+const VAZIO = { visitantes: [], pessoas: [], eventos: [], inscricoes: [], compras: [] };
 
 // Cada checagem é uma asserção (a primeira que falha derruba o cenário) e é contada: o último
 // teste confere que nenhuma foi pulada.
@@ -104,6 +104,12 @@ function criarMock(page, { dados = DADOS, logado = true } = {}) {
         const filtros = { desde: q.desde, ate: q.ate, perfil: q.perfil, status: q.status, busca: q.busca };
         if (rota === "resumo") return json(200, { ok: true, resumo: painel(mock.dados, filtros), gerado_em: new Date().toISOString() });
         if (rota === "paginas") return json(200, { ok: true, paginas: paginas(mock.dados, filtros), gerado_em: new Date().toISOString() });
+        if (rota === "inscricoes") {
+          if (q.pagina && !CHK.LISTA.some((p) => p.id === q.pagina)) return json(422, { ok: false, error: "invalid_filters" });
+          const recorte = { desde: q.desde, ate: q.ate, pagina: q.pagina };
+          const listaIns = listaInscricoes(mock.dados, recorte, { limite: Number(q.limite || 100), offset: Number(q.offset || 0) });
+          return json(200, { ok: true, resumo: inscricoesResumo(mock.dados, recorte), ...listaIns, gerado_em: new Date().toISOString() });
+        }
         if (rota === "cruzamento") {
           const ids = EV.perguntasAnalisaveis().map((p) => p.id);
           if (!ids.includes(q.linha) || !ids.includes(q.coluna) || q.linha === q.coluna) return json(422, { ok: false, error: "invalid_filters" });
@@ -862,7 +868,10 @@ cenario("obrigado", async () => {
     await esperarCalmo(page);
 
     const abas = await page.$$eval("[data-paginas] [data-pagina]", (els) => els.map((e) => `${e.dataset.pagina}|${e.textContent}`));
-    confere(abas.length === 2 && abas[0].startsWith("pesquisa-icp|") && abas[1] === "obrigado|Páginas de obrigadorota /obrigado-*", `faixa de páginas (${abas.join(" / ")})`);
+    confere(
+      abas.length === 3 && abas[0].startsWith("pesquisa-icp|") && abas[1] === "obrigado|Páginas de obrigadorota /obrigado-*",
+      `faixa de páginas (${abas.join(" / ")})`
+    );
     confere(!mock.chamadas.some((c) => c.rota === "paginas"), "a aba de obrigado só busca dados quando é aberta");
 
     mock.chamadas = [];
@@ -1032,9 +1041,169 @@ cenario("obrigado", async () => {
 });
 
 
+/* ---------------------------------------------------------------- Inscrições e vendas */
+cenario("inscricoes", async () => {
+  const PAGINA = CHK.LISTA[0];
+  const moeda = (valor) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(valor);
+
+  for (const largura of [1280, 390]) {
+    const { page, mock, erros } = await novaPagina(browser, { largura, altura: largura < 500 ? 844 : 900 });
+    await page.waitForSelector("[data-panel-view]:not([hidden])");
+    await esperarCalmo(page);
+
+    // A aba nasce da LISTA do js/checkout-config.js, com o nome e a rota de lá.
+    const abas = await page.$$eval("[data-paginas] [data-pagina]", (els) => els.map((e) => `${e.dataset.pagina}|${e.textContent}`));
+    confere(abas.length === 3 && abas[2] === `inscricoes|${PAGINA.nome}rota ${PAGINA.rota}`, `faixa com a aba de inscrição (${abas.join(" / ")})`);
+    confere(!mock.chamadas.some((c) => c.rota === "inscricoes"), "a aba de inscrição só busca dados quando é aberta");
+
+    await page.click("[data-paginas] [data-pagina='inscricoes']");
+    await page.waitForSelector("[data-inscricoes] .ins-cartao [data-etapa]");
+    await esperarCalmo(page);
+    confere(new URL(page.url()).searchParams.get("pagina") === "inscricoes", `a URL guarda a aba (${page.url()})`);
+    confere((await page.getAttribute("#pagina-inscricoes", "aria-selected")) === "true", "aba de inscrição selecionada");
+    confere(await page.isHidden("[data-pagina-conteudo='pesquisa-icp']"), "o conteúdo da pesquisa some");
+    confere((await page.isHidden("[data-perfis]")) && (await page.isHidden(".filtros-pessoa")), "perfil, busca e situação somem na aba de inscrição");
+
+    // Os números conferidos contra as fixtures (o mesmo que o SQL devolveria).
+    const r = inscricoesResumo(DADOS, {});
+    const linha = r.paginas[0];
+    const numero = (etapa) => page.textContent(`[data-inscricao-pagina='${PAGINA.id}'] [data-etapa='${etapa}'] .num strong`).then((t) => t.trim());
+    confere((await numero("inscritos")) === String(linha.inscritos), `inscritos = ${linha.inscritos}`);
+    confere((await numero("cliques")) === String(linha.cliques), `cliques no checkout = ${linha.cliques}`);
+    confere((await numero("compras")) === String(linha.compras), `compras = ${linha.compras}`);
+    confere(
+      (await page.textContent(`[data-inscricao-pagina='${PAGINA.id}'] [data-receita]`)).includes(moeda(linha.receita).replace(/\u00a0/g, " ").split(" ")[1]),
+      `receita = ${linha.receita}`
+    );
+    // A taxa vem escrita COM a base ("x% dos N inscritos"): o cliente lê o número e o denominador.
+    const subCompras = await page.textContent(`[data-inscricao-pagina='${PAGINA.id}'] [data-etapa='compras'] .rotulo small`);
+    const esperado = `${Math.round((linha.compras / linha.inscritos) * 100)}%`;
+    confere(subCompras.includes(esperado) && subCompras.includes(String(linha.inscritos)), `taxa com base escrita (${subCompras.trim()})`);
+
+    // Tabelas por origem, campanha e termo (o sck).
+    for (const [divisao, dados, chave] of [
+      ["origem", linha.por_origem, "utm_source"],
+      ["campanha", linha.por_campanha, "utm_campaign"],
+      ["termo", linha.por_termo, "utm_term"]
+    ]) {
+      const linhas = await page.$$eval(`[data-inscricao-pagina='${PAGINA.id}'] [data-divisao='${divisao}'] tbody tr`, (trs) =>
+        trs.map((tr) => Array.from(tr.children).map((c) => c.textContent.trim()))
+      );
+      confere(linhas.length === dados.length, `${divisao}: ${dados.length} linhas`);
+      confere(linhas[0][0] === String(dados[0][chave]) && linhas[0][1] === String(dados[0].inscritos), `${divisao}: a maior é ${dados[0][chave]} com ${dados[0].inscritos}`);
+      confere(linhas[0][2].startsWith(String(dados[0].compras)), `${divisao}: compras da maior = ${dados[0].compras}`);
+    }
+    confere(
+      (await page.textContent(`[data-inscricao-pagina='${PAGINA.id}'] [data-divisao='termo'] caption`)).includes("sck"),
+      "a tabela de termo explica que ele vira o sck na Hotmart"
+    );
+
+    // Por dia, no fuso de Brasília, do mais recente para o mais antigo.
+    const dias = await page.$$eval(`[data-inscricao-pagina='${PAGINA.id}'] [data-divisao='dia'] tbody tr`, (trs) => trs.map((tr) => tr.children[0].textContent.trim()));
+    confere(dias.length > 0 && dias.length <= 14, `por dia mostra no máximo 14 linhas (${dias.length})`);
+
+    // Compras recentes, com o aviso de quem não casou com inscrição.
+    const recentes = await page.$$eval("[data-inscricoes] .ins-compras tbody tr", (trs) => trs.length);
+    confere(recentes === r.compras_recentes.length, `compras recentes = ${r.compras_recentes.length}`);
+    const orfas = await page.$$eval("[data-inscricoes] .ins-compras tbody tr.ins-orfa", (trs) => trs.length);
+    confere(orfas === r.compras_recentes.filter((c) => !c.casou).length, `compras órfãs destacadas (${orfas})`);
+    confere((await page.textContent("[data-ins-aviso]")).includes("não casaram"), "o aviso conta quantas compras não casaram com inscrição");
+
+    // Lista de inscritos: selo comprou/não comprou e link de WhatsApp.
+    const inscritos = await page.$$("[data-inscricoes] .ins-pessoa");
+    confere(inscritos.length === 50, `a lista traz as 50 primeiras (${inscritos.length})`);
+    const compraram = await page.$$eval("[data-inscricoes] .ins-pessoa .selo.ok", (els) => els.map((e) => e.textContent));
+    const naoCompraram = await page.$$eval("[data-inscricoes] .ins-pessoa .selo.meio", (els) => els.map((e) => e.textContent));
+    confere(compraram.length + naoCompraram.length === 50, "cada inscrito tem um selo");
+    confere(compraram.every((t) => t.includes("Comprou")) && naoCompraram.every((t) => t.includes("Não comprou")), "os selos dizem comprou / não comprou");
+    const wa = await page.getAttribute("[data-inscricoes] .ins-pessoa a[href^='https://wa.me/']", "href");
+    confere(/^https:\/\/wa\.me\/55\d{10,11}$/.test(wa), `link de WhatsApp pronto (${wa})`);
+    confere((await page.textContent("[data-ins-contador]")).includes(String(linha.inscritos)), "o contador diz quantos são no total");
+
+    // Placar somado e CSV com os filtros da tela.
+    const placar = await page.$$eval("[data-inscricoes] .ins-placar .valor", (els) => els.map((e) => e.textContent.trim()));
+    confere(placar[0] === String(linha.inscritos) && placar[2] === String(linha.compras), `placar (${placar.join(" / ")})`);
+    confere((await page.getAttribute("[data-inscricoes-csv]", "href")) === "/api/painel/exportar-inscricoes.csv", "CSV sem filtro nenhum");
+
+    // Sem rolagem horizontal, nem tabela transbordando.
+    const larguraDoc = await page.evaluate(() => document.documentElement.scrollWidth);
+    confere(larguraDoc <= largura, `inscrição: sem rolagem horizontal em ${largura}px (scrollWidth ${larguraDoc})`);
+    const transbordam = await page.$$eval("[data-inscricoes] .tabela-rolagem", (els) => els.filter((e) => e.scrollWidth > e.clientWidth + 1).length);
+    confere(transbordam === 0, `inscrição: nenhuma tabela rola de lado em ${largura}px (${transbordam})`);
+    await tela(page, `inscricoes-${largura}`, { full: true });
+    await recorte(page, `[data-inscricao-pagina='${PAGINA.id}']`, `inscricoes-cartao-${largura}`);
+
+    if (largura === 1280) {
+      // "Carregar mais" traz a página seguinte sem perder o que já estava na tela.
+      await page.click("[data-ins-mais]");
+      await page.waitForFunction(() => document.querySelectorAll("[data-inscricoes] .ins-pessoa").length > 50);
+      confere((await page.$$("[data-inscricoes] .ins-pessoa")).length === 100, "Carregar mais soma mais 50");
+
+      // O período muda só esta aba, e o CSV acompanha.
+      mock.chamadas.length = 0;
+      await page.click("[data-periodo='7']");
+      await page.waitForFunction(() => !document.querySelector("[aria-busy='true']"));
+      const chamada = mock.chamadas.find((c) => c.rota === "inscricoes");
+      confere(Boolean(chamada) && chamada.url.includes("desde="), `o período vai na requisição (${chamada && chamada.url})`);
+      confere(!mock.chamadas.some((c) => c.rota === "resumo"), "trocar o período na aba de inscrição não recarrega a pesquisa");
+      const r7 = inscricoesResumo(DADOS, { desde: new URL(BASE + chamada.url).searchParams.get("desde") });
+      await page.waitForFunction(
+        (esperado) => document.querySelector("[data-inscricao-pagina] [data-etapa='inscritos'] .num strong")?.textContent.trim() === esperado,
+        String(r7.paginas[0].inscritos),
+        { timeout: 5000 }
+      );
+      confere(true, `período de 7 dias recalcula (${r7.paginas[0].inscritos} inscritos)`);
+      confere((await page.textContent("[data-inscricoes-periodo]")).includes("Últimos 7 dias"), "rótulo do período");
+      confere((await page.getAttribute("[data-inscricoes-csv]", "href")).includes("desde="), "o CSV leva o mesmo período");
+
+      // Atualizar recarrega só esta aba.
+      mock.chamadas.length = 0;
+      await page.click("[data-atualizar]");
+      await page.waitForFunction(() => !document.querySelector("[aria-busy='true']"));
+      confere(mock.chamadas.some((c) => c.rota === "inscricoes") && !mock.chamadas.some((c) => c.rota === "resumo"), "Atualizar recarrega só a aba aberta");
+
+      // Erro e "Tentar de novo".
+      await page.click("[data-paginas] [data-pagina='pesquisa-icp']");
+      mock.forcar.inscricoes = 502;
+      await page.click("[data-paginas] [data-pagina='inscricoes']");
+      await page.waitForSelector("[data-inscricoes] .erro [data-repetir='inscricoes']");
+      confere((await page.textContent("[data-inscricoes-status]")).includes("Não foi possível carregar"), "502 avisa no status");
+      confere((await page.$$("[data-inscricoes] .ins-cartao")).length === 0, "sem número velho na tela depois do erro");
+      await tela(page, "inscricoes-erro-1280");
+      delete mock.forcar.inscricoes;
+      await page.click("[data-inscricoes] [data-repetir='inscricoes']");
+      await page.waitForSelector("[data-inscricoes] .ins-cartao [data-etapa]");
+      confere((await page.textContent("[data-inscricoes-status]")).trim() === "", "Tentar de novo recupera");
+
+      // Sessão expirada na aba nova volta ao login.
+      mock.logado = false;
+      await page.click("[data-atualizar]");
+      await page.waitForSelector("[data-login-view]:not([hidden])");
+      confere((await page.textContent("[data-login-status]")).includes("sessão expirou"), "401 na aba de inscrição volta ao login");
+    }
+
+    const naoEsperados = erros.filter((e) => !/Failed to load resource|502/.test(e));
+    confere(naoEsperados.length === 0, `inscrição: sem erros de JavaScript em ${largura}px (${naoEsperados.join(" | ")})`);
+    await page.context().close();
+  }
+
+  // Aberta direto pela URL, sem ninguém inscrito ainda: estado vazio caprichado.
+  const v = await novaPagina(browser, { dados: VAZIO, url: "/painel?pagina=inscricoes", largura: 390, altura: 844 });
+  await v.page.waitForSelector("[data-inscricoes-vazio]");
+  confere((await v.page.textContent("[data-inscricoes-vazio]")).includes("Ninguém se inscreveu ainda"), "vazio geral");
+  confere((await v.page.$$eval("[data-inscricoes] .ins-cartao .vazio", (els) => els.length)) === CHK.LISTA.length, "cada cartão diz que ninguém se inscreveu nele");
+  confere((await v.page.textContent("[data-inscricoes] .ins-compras")).includes("Nenhum aviso de venda"), "compras recentes vazio explica de onde vêm os avisos");
+  confere((await v.page.$$("[data-ins-aviso]")).length === 0, "sem compra órfã, sem aviso");
+  confere(!v.mock.chamadas.some((c) => c.rota === "resumo"), "aberta direto na aba de inscrição, a pesquisa não carrega");
+  confere((await v.page.evaluate(() => document.documentElement.scrollWidth)) <= 390, "vazio sem rolagem horizontal em 390px");
+  await tela(v.page, "inscricoes-vazio-390", { full: true });
+  confere(v.erros.length === 0, `vazio sem erros (${v.erros.join(" | ")})`);
+  await v.page.context().close();
+});
+
 test("todas as checagens rodaram", () => {
-  // 10 cenários acima; o número exato muda quando um cenário ganha checagem, o piso não.
-  assert.ok(checagens >= 200, `só ${checagens} checagens rodaram`);
+  // 11 cenários acima; o número exato muda quando um cenário ganha checagem, o piso não.
+  assert.ok(checagens >= 240, `só ${checagens} checagens rodaram`);
   assert.ok(todasAsChamadas.length > 100);
   assert.deepEqual(todasAsChamadas.filter((url) => /_outro/.test(url)), [], "o painel nunca pede complemento de Outro");
   console.log(`# painel: ${checagens} checagens`);

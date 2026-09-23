@@ -1238,3 +1238,522 @@ grant execute on function public.paginas_resumo(timestamptz, timestamptz, jsonb)
 -- Sem isto, as rotas novas do /rest/v1 respondem 404 até o PostgREST reler o esquema sozinho — e o
 -- formulário passaria os primeiros minutos sem gravar nada.
 notify pgrst, 'reload schema';
+
+
+-- ============================================================================================
+-- 6. Inscrições com checkout na Hotmart (/viver-de-furo-inscricao) e o aviso de venda
+--
+-- A página nova é só um formulário: nome, WhatsApp e e-mail. Ao enviar, o SERVIDOR monta o link
+-- do checkout (js/checkout-config.js, montarUrlCheckout: as UTMs seguem, o utm_term vira também o
+-- `sck`, e o contato vai na URL para o checkout abrir preenchido), grava a inscrição aqui e
+-- devolve o link para o navegador abrir.
+--
+-- Depois a Hotmart avisa cada evento de compra no webhook POST /api/hotmart/venda. O payload CRU
+-- fica em compras.payload (jsonb): se a Hotmart mudar um campo de lugar, nada se perde e dá para
+-- reprocessar. O casamento com a inscrição é por e-mail OU pelos ÚLTIMOS 8 dígitos do telefone —
+-- o 9 e o DDI variam, os 8 finais não.
+--
+-- Mesmas barreiras das outras seções: RLS ligado e SEM política, revoke de public/anon/
+-- authenticated, grant só para service_role, funções security invoker com search_path fixo.
+--
+-- Este bloco é autossuficiente: pode ser colado sozinho num banco que já tem as seções 1 a 5.
+-- ============================================================================================
+
+-- --------------------------------------------------------------------------------------------
+-- inscricoes — uma linha por PESSOA em cada página (pagina + WhatsApp + e-mail).
+--
+-- Reenviar o formulário (voltou, clicou de novo, abriu no outro aparelho) NÃO cria linha nova:
+-- soma `cliques`, atualiza o link do checkout e mantém o rastreio de PRIMEIRO toque. É isso que
+-- faz "inscritos" ser gente, e "cliques" ser clique.
+-- --------------------------------------------------------------------------------------------
+create table if not exists public.inscricoes (
+  -- O id nasce no navegador (o mesmo padrão da pesquisa). Se ele repetir para outro contato, a
+  -- função gera um novo: quem manda é a chave (pagina, whatsapp_digits, email).
+  id uuid primary key,
+  -- Id da página em js/checkout-config.js ('viver-de-furo'). Só o formato fica aqui: página nova
+  -- no config não pede SQL novo.
+  pagina text not null check (pagina ~ '^[a-z0-9_-]{1,60}$'),
+  criado_em timestamptz not null default now(),
+  atualizado_em timestamptz not null default now(),
+  nome text,
+  whatsapp text,                                     -- como a pessoa vê: (11) 91234-5678
+  whatsapp_digits text,                              -- só dígitos, sem DDI: 11912345678
+  -- Pronto para o wa.me e para casar com o telefone que a Hotmart manda.
+  whatsapp_internacional text generated always as ('55' || whatsapp_digits) stored,
+  email text,
+  checkout_url text,                                 -- o link exato que foi aberto (com utm e sck)
+  cliques integer not null default 1,                -- quantas vezes ela pediu o checkout
+  clicou_em timestamptz,                             -- o último pedido
+  visitante_id uuid,
+  utm_source text,
+  utm_medium text,
+  utm_campaign text,
+  utm_content text,
+  utm_term text,                                     -- é também o `sck` que vai para a Hotmart
+  fbclid text,
+  gclid text,
+  page_url text,
+  referrer text,
+  dispositivo text,                                  -- 'mobile' | 'tablet' | 'desktop'
+  comprou_em timestamptz,                            -- preenchido pelo aviso de compra aprovada
+  compra_status text,
+  compra_valor numeric(12, 2),
+  compra_moeda text,
+  compra_transacao text,
+  compra_evento_em timestamptz                       -- o momento do evento que gravou o estado atual
+);
+
+-- A chave de verdade: a mesma pessoa na mesma página é UMA inscrição.
+create unique index if not exists inscricoes_chave_idx
+  on public.inscricoes (pagina, whatsapp_digits, email);
+-- Lista do painel e recorte por período.
+create index if not exists inscricoes_pagina_criado_em_idx
+  on public.inscricoes (pagina, criado_em desc);
+-- O casamento da compra procura por telefone e por e-mail.
+create index if not exists inscricoes_whatsapp_digits_idx on public.inscricoes (whatsapp_digits);
+create index if not exists inscricoes_email_idx on public.inscricoes (email);
+
+-- --------------------------------------------------------------------------------------------
+-- compras — uma linha por EVENTO de compra recebido da Hotmart (Webhook 2.0).
+--
+-- Guarda os campos que o painel usa E o payload cru. A mesma (transacao, evento) chegando duas
+-- vezes (a Hotmart repete quando não recebe 2xx na hora) não vira duas linhas nem conta duas vezes.
+-- --------------------------------------------------------------------------------------------
+create table if not exists public.compras (
+  id bigint generated always as identity primary key,
+  recebido_em timestamptz not null default now(),
+  evento text not null,                              -- PURCHASE_APPROVED, PURCHASE_REFUNDED, ...
+  hotmart_id text,                                   -- o id do aviso, na Hotmart
+  transacao text,                                    -- HP1234567890 — a compra
+  status text,
+  produto_id text,
+  produto_nome text,
+  oferta text,                                       -- o código da oferta (off=)
+  valor numeric(12, 2),
+  moeda text,
+  comprador_nome text,
+  comprador_email text,
+  comprador_telefone text,
+  comprador_digits text,                             -- só dígitos, para casar com a inscrição
+  sck text,                                          -- o que mandamos no link (= utm_term)
+  src text,
+  pedido_em timestamptz,
+  aprovado_em timestamptz,
+  inscricao_id uuid,                                 -- null = compra que não casou com ninguém
+  pagina text,
+  payload jsonb not null
+);
+
+-- Idempotência. Parcial porque evento sem transação (um payload estranho) não pode bloquear os
+-- outros: sem transação, cada aviso é uma linha.
+create unique index if not exists compras_transacao_evento_idx
+  on public.compras (transacao, evento)
+  where transacao is not null;
+create index if not exists compras_recebido_em_idx on public.compras (recebido_em desc);
+create index if not exists compras_comprador_email_idx on public.compras (comprador_email);
+create index if not exists compras_comprador_digits_idx on public.compras (comprador_digits);
+
+alter table public.inscricoes enable row level security;
+alter table public.compras enable row level security;
+revoke all on table public.inscricoes from public, anon, authenticated;
+revoke all on table public.compras from public, anon, authenticated;
+grant select, insert, update, delete on table public.inscricoes to service_role;
+grant select, insert, update, delete on table public.compras to service_role;
+-- A sequência do id de compras também nasce com grant para anon no Supabase: fora.
+revoke all on sequence public.compras_id_seq from public, anon, authenticated;
+grant usage, select on sequence public.compras_id_seq to service_role;
+
+
+-- --------------------------------------------------------------------------------------------
+-- inscricao_salvar: grava (ou atualiza) a inscrição e devolve {ok, novo, id}.
+--
+-- `p` já vem validado pelo servidor (contato pelas mesmas regras da tela, link do checkout montado
+-- por EVCheckout.montarUrlCheckout). Aqui mora só o que precisa ser atômico:
+--   . a mesma pessoa na mesma página é UMA linha (chave única), com `cliques` somando;
+--   . o rastreio é de PRIMEIRO toque, e em BLOCO — quem chegou pelo anúncio e voltou depois pelo
+--     link direto continua creditada ao anúncio, com a campanha inteira, e não meia campanha de
+--     cada visita (mesma regra de pesquisa_salvar).
+-- --------------------------------------------------------------------------------------------
+create or replace function public.inscricao_salvar(p jsonb)
+returns json
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  d jsonb := case when jsonb_typeof(p) = 'object' then p else '{}'::jsonb end;
+  v_pagina text := nullif(btrim(d ->> 'pagina'), '');
+  v_digits text := nullif(btrim(d ->> 'whatsapp_digits'), '');
+  v_email text := lower(nullif(btrim(d ->> 'email'), ''));
+  v_id_pedido text := nullif(btrim(d ->> 'id'), '');
+  uuid_re constant text := '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
+  v_id uuid;
+  v_novo boolean := false;
+begin
+  if v_pagina is null then
+    raise exception 'inscricao_salvar: página obrigatória' using errcode = '22023';
+  end if;
+  if v_digits is null or v_email is null then
+    raise exception 'inscricao_salvar: WhatsApp e e-mail obrigatórios' using errcode = '22023';
+  end if;
+
+  -- 1. Já existe? Soma o clique e mantém o primeiro toque.
+  update public.inscricoes as i set
+    nome = coalesce(nullif(btrim(d ->> 'nome'), ''), i.nome),
+    whatsapp = coalesce(nullif(btrim(d ->> 'whatsapp'), ''), i.whatsapp),
+    checkout_url = coalesce(nullif(btrim(d ->> 'checkout_url'), ''), i.checkout_url),
+    cliques = i.cliques + 1,
+    clicou_em = now(),
+    atualizado_em = now(),
+    visitante_id = coalesce(i.visitante_id, case when nullif(btrim(d ->> 'visitante_id'), '') ~ uuid_re then (d ->> 'visitante_id')::uuid end),
+    page_url = coalesce(i.page_url, nullif(btrim(d ->> 'page_url'), '')),
+    referrer = coalesce(i.referrer, nullif(btrim(d ->> 'referrer'), '')),
+    dispositivo = coalesce(i.dispositivo, nullif(btrim(d ->> 'dispositivo'), '')),
+    -- Campanha como UM bloco: só preenche se NENHUM campo de rastreio de campanha existir ainda.
+    utm_source = case when (i.utm_source, i.utm_medium, i.utm_campaign, i.utm_content, i.utm_term, i.fbclid, i.gclid) is null then nullif(btrim(d ->> 'utm_source'), '') else i.utm_source end,
+    utm_medium = case when (i.utm_source, i.utm_medium, i.utm_campaign, i.utm_content, i.utm_term, i.fbclid, i.gclid) is null then nullif(btrim(d ->> 'utm_medium'), '') else i.utm_medium end,
+    utm_campaign = case when (i.utm_source, i.utm_medium, i.utm_campaign, i.utm_content, i.utm_term, i.fbclid, i.gclid) is null then nullif(btrim(d ->> 'utm_campaign'), '') else i.utm_campaign end,
+    utm_content = case when (i.utm_source, i.utm_medium, i.utm_campaign, i.utm_content, i.utm_term, i.fbclid, i.gclid) is null then nullif(btrim(d ->> 'utm_content'), '') else i.utm_content end,
+    utm_term = case when (i.utm_source, i.utm_medium, i.utm_campaign, i.utm_content, i.utm_term, i.fbclid, i.gclid) is null then nullif(btrim(d ->> 'utm_term'), '') else i.utm_term end,
+    fbclid = case when (i.utm_source, i.utm_medium, i.utm_campaign, i.utm_content, i.utm_term, i.fbclid, i.gclid) is null then nullif(btrim(d ->> 'fbclid'), '') else i.fbclid end,
+    gclid = case when (i.utm_source, i.utm_medium, i.utm_campaign, i.utm_content, i.utm_term, i.fbclid, i.gclid) is null then nullif(btrim(d ->> 'gclid'), '') else i.gclid end
+  where i.pagina = v_pagina and i.whatsapp_digits = v_digits and i.email = v_email
+  returning i.id into v_id;
+
+  if not found then
+    -- 2. Primeira vez. O id do navegador só vale se ainda não existir aqui: a mesma pessoa que
+    --    corrige o e-mail e reenvia manda o MESMO id para um contato diferente.
+    insert into public.inscricoes (
+      id, pagina, nome, whatsapp, whatsapp_digits, email, checkout_url, cliques, clicou_em,
+      visitante_id, utm_source, utm_medium, utm_campaign, utm_content, utm_term, fbclid, gclid,
+      page_url, referrer, dispositivo
+    ) values (
+      case
+        when v_id_pedido ~ uuid_re and not exists (select 1 from public.inscricoes as x where x.id = v_id_pedido::uuid)
+          then v_id_pedido::uuid
+        else gen_random_uuid()
+      end,
+      v_pagina,
+      nullif(btrim(d ->> 'nome'), ''),
+      nullif(btrim(d ->> 'whatsapp'), ''),
+      v_digits,
+      v_email,
+      nullif(btrim(d ->> 'checkout_url'), ''),
+      1,
+      now(),
+      case when nullif(btrim(d ->> 'visitante_id'), '') ~ uuid_re then (d ->> 'visitante_id')::uuid end,
+      nullif(btrim(d ->> 'utm_source'), ''),
+      nullif(btrim(d ->> 'utm_medium'), ''),
+      nullif(btrim(d ->> 'utm_campaign'), ''),
+      nullif(btrim(d ->> 'utm_content'), ''),
+      nullif(btrim(d ->> 'utm_term'), ''),
+      nullif(btrim(d ->> 'fbclid'), ''),
+      nullif(btrim(d ->> 'gclid'), ''),
+      nullif(btrim(d ->> 'page_url'), ''),
+      nullif(btrim(d ->> 'referrer'), ''),
+      nullif(btrim(d ->> 'dispositivo'), '')
+    )
+    on conflict (pagina, whatsapp_digits, email) do nothing
+    returning id into v_id;
+    v_novo := found;
+
+    -- 3. Corrida: outro envio inseriu a mesma pessoa entre o passo 1 e o 2. Conta o clique nela.
+    if not v_novo then
+      update public.inscricoes as i set cliques = i.cliques + 1, clicou_em = now(), atualizado_em = now()
+      where i.pagina = v_pagina and i.whatsapp_digits = v_digits and i.email = v_email
+      returning i.id into v_id;
+    end if;
+  end if;
+
+  return json_build_object('ok', true, 'novo', v_novo, 'id', v_id);
+end;
+$$;
+
+
+-- --------------------------------------------------------------------------------------------
+-- hotmart_registrar_compra: grava o aviso de venda e marca (ou desmarca) a inscrição.
+--
+-- `p` vem do servidor com os campos já extraídos do payload da Hotmart e o payload CRU em
+-- `payload`. Devolve {ok, novo, casou, inscricao_id, pagina}.
+--
+--   novo   = false quando o mesmo (transacao, evento) já estava gravado. A Hotmart repete o aviso
+--            até receber 2xx; repetir não pode virar duas compras nem somar duas vezes.
+--   casou  = achou a inscrição pelo e-mail (igual, minúsculo) OU pelos ÚLTIMOS 8 dígitos do
+--            telefone. Havendo mais de uma, vale a mais recente.
+--
+-- Só PURCHASE_APPROVED e PURCHASE_COMPLETE marcam comprou_em. Cancelamento, reembolso, chargeback
+-- e disputa limpam comprou_em e guardam o status. Um evento MAIS ANTIGO do que o que já está
+-- gravado não sobrescreve o estado atual (a Hotmart pode reenviar um aviso velho depois do novo).
+-- --------------------------------------------------------------------------------------------
+create or replace function public.hotmart_registrar_compra(p jsonb)
+returns json
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  d jsonb := case when jsonb_typeof(p) = 'object' then p else '{}'::jsonb end;
+  v_evento text := nullif(btrim(d ->> 'evento'), '');
+  v_transacao text := nullif(btrim(d ->> 'transacao'), '');
+  v_email text := lower(nullif(btrim(d ->> 'comprador_email'), ''));
+  v_digits text := nullif(regexp_replace(coalesce(d ->> 'comprador_digits', ''), '[^0-9]', '', 'g'), '');
+  v_fim8 text := case when length(nullif(regexp_replace(coalesce(d ->> 'comprador_digits', ''), '[^0-9]', '', 'g'), '')) >= 8
+                      then right(regexp_replace(d ->> 'comprador_digits', '[^0-9]', '', 'g'), 8) end;
+  v_pedido_em timestamptz := (nullif(btrim(d ->> 'pedido_em'), ''))::timestamptz;
+  v_aprovado_em timestamptz := (nullif(btrim(d ->> 'aprovado_em'), ''))::timestamptz;
+  v_evento_em timestamptz := (nullif(btrim(d ->> 'evento_em'), ''))::timestamptz;
+  v_momento timestamptz;
+  v_inscricao_id uuid;
+  v_pagina text;
+  v_compra_id bigint;
+  v_novo boolean;
+  aprovados constant text[] := array['PURCHASE_APPROVED', 'PURCHASE_COMPLETE'];
+  cancelados constant text[] := array['PURCHASE_CANCELED', 'PURCHASE_REFUNDED', 'PURCHASE_CHARGEBACK', 'PURCHASE_PROTEST'];
+begin
+  if v_evento is null then
+    raise exception 'hotmart_registrar_compra: evento obrigatório' using errcode = '22023';
+  end if;
+  v_momento := coalesce(v_evento_em, v_aprovado_em, v_pedido_em, now());
+
+  -- 1. De quem é esta compra? E-mail primeiro; senão, os últimos 8 dígitos do telefone.
+  select i.id, i.pagina into v_inscricao_id, v_pagina
+  from public.inscricoes as i
+  where (v_email is not null and lower(i.email) = v_email)
+     or (v_fim8 is not null and i.whatsapp_digits is not null and right(i.whatsapp_digits, 8) = v_fim8)
+  order by (v_email is not null and lower(i.email) = v_email) desc, i.criado_em desc
+  limit 1;
+
+  -- 2. Grava o aviso. O mesmo (transacao, evento) só entra uma vez.
+  insert into public.compras (
+    evento, hotmart_id, transacao, status, produto_id, produto_nome, oferta, valor, moeda,
+    comprador_nome, comprador_email, comprador_telefone, comprador_digits, sck, src,
+    pedido_em, aprovado_em, inscricao_id, pagina, payload
+  ) values (
+    v_evento,
+    nullif(btrim(d ->> 'hotmart_id'), ''),
+    v_transacao,
+    nullif(btrim(d ->> 'status'), ''),
+    nullif(btrim(d ->> 'produto_id'), ''),
+    nullif(btrim(d ->> 'produto_nome'), ''),
+    nullif(btrim(d ->> 'oferta'), ''),
+    (nullif(btrim(d ->> 'valor'), ''))::numeric,
+    nullif(btrim(d ->> 'moeda'), ''),
+    nullif(btrim(d ->> 'comprador_nome'), ''),
+    v_email,
+    nullif(btrim(d ->> 'comprador_telefone'), ''),
+    v_digits,
+    nullif(btrim(d ->> 'sck'), ''),
+    nullif(btrim(d ->> 'src'), ''),
+    v_pedido_em,
+    v_aprovado_em,
+    v_inscricao_id,
+    v_pagina,
+    case when jsonb_typeof(d -> 'payload') is null then '{}'::jsonb else d -> 'payload' end
+  )
+  on conflict (transacao, evento) where transacao is not null do nothing
+  returning id into v_compra_id;
+  v_novo := found;
+
+  -- 3. Marca a inscrição. Aviso repetido não mexe em nada.
+  if v_novo and v_inscricao_id is not null then
+    if v_evento = any (aprovados) then
+      update public.inscricoes as i set
+        comprou_em = coalesce(v_aprovado_em, v_momento),
+        compra_status = coalesce(nullif(btrim(d ->> 'status'), ''), v_evento),
+        compra_valor = coalesce((nullif(btrim(d ->> 'valor'), ''))::numeric, i.compra_valor),
+        compra_moeda = coalesce(nullif(btrim(d ->> 'moeda'), ''), i.compra_moeda),
+        compra_transacao = coalesce(v_transacao, i.compra_transacao),
+        compra_evento_em = v_momento,
+        atualizado_em = now()
+      where i.id = v_inscricao_id
+        and (i.compra_evento_em is null or i.compra_evento_em <= v_momento);
+    elsif v_evento = any (cancelados) then
+      update public.inscricoes as i set
+        comprou_em = null,
+        compra_status = coalesce(nullif(btrim(d ->> 'status'), ''), v_evento),
+        compra_transacao = coalesce(v_transacao, i.compra_transacao),
+        compra_evento_em = v_momento,
+        atualizado_em = now()
+      where i.id = v_inscricao_id
+        and (i.compra_evento_em is null or i.compra_evento_em <= v_momento);
+    end if;
+  end if;
+
+  return json_build_object(
+    'ok', true,
+    'novo', v_novo,
+    'casou', v_inscricao_id is not null,
+    'inscricao_id', v_inscricao_id,
+    'pagina', v_pagina
+  );
+end;
+$$;
+
+
+-- --------------------------------------------------------------------------------------------
+-- inscricoes_resumo: os números da aba de inscrições do painel, numa ida ao banco.
+--
+--   p_desde/p_ate  = recorte por inscricoes.criado_em, em [p_desde, p_ate)
+--   p_pagina       = uma página do js/checkout-config.js; null = todas as que têm inscrição
+--
+--   inscritos      = pessoas (uma linha por pagina+WhatsApp+e-mail)
+--   cliques        = quantas vezes o checkout foi pedido (reenviar o formulário soma aqui)
+--   compras        = inscritos com comprou_em preenchido
+--   receita        = soma de compra_valor desses inscritos
+--   taxa_compra    = compras / inscritos em PORCENTAGEM, com 1 casa (ex.: 12.5)
+--   por_origem / por_campanha / por_termo = utm_source, utm_campaign e utm_term ('(sem utm)' quando
+--                    vazio). O termo é o que vira `sck` no checkout: é por ele que o cliente sabe
+--                    qual criativo vendeu.
+--   por_dia        = inscritos pelo dia da INSCRIÇÃO e compras pelo dia da COMPRA, no fuso de
+--                    São Paulo (um dia pode ter compra sem inscrição nova, e vice-versa)
+--   compras_sem_inscricao = avisos de compra aprovada no período que não casaram com ninguém
+--                    (comprou pelo link de outro lugar, ou com outro e-mail e outro telefone)
+--   compras_recentes = os 20 avisos mais recentes do período, com `casou`
+--
+-- Listas vazias voltam como [], nunca null.
+-- --------------------------------------------------------------------------------------------
+create or replace function public.inscricoes_resumo(
+  p_desde timestamptz default null,
+  p_ate timestamptz default null,
+  p_pagina text default null
+)
+returns json
+language sql
+stable
+security invoker
+set search_path = public
+as $$
+  with
+  base as materialized (
+    select i.*
+    from public.inscricoes as i
+    where (p_pagina is null or i.pagina = p_pagina)
+      and (p_desde is null or i.criado_em >= p_desde)
+      and (p_ate is null or i.criado_em < p_ate)
+  ),
+  paginas as (
+    select p_pagina as pagina where p_pagina is not null
+    union
+    select distinct b.pagina from base as b where p_pagina is null
+  ),
+  eventos as materialized (
+    select c.*
+    from public.compras as c
+    where (p_pagina is null or c.pagina = p_pagina or c.pagina is null)
+      and (p_desde is null or c.recebido_em >= p_desde)
+      and (p_ate is null or c.recebido_em < p_ate)
+  )
+  select json_build_object(
+    'paginas', coalesce((
+      select json_agg(json_build_object(
+        'pagina', pg.pagina,
+        'inscritos', t.inscritos,
+        'cliques', t.cliques,
+        'compras', t.compras,
+        'receita', t.receita,
+        'taxa_compra', case when t.inscritos > 0 then round(t.compras::numeric * 100 / t.inscritos, 1) else 0 end,
+        'por_origem', (
+          select coalesce(json_agg(json_build_object('utm_source', x.valor, 'inscritos', x.inscritos, 'compras', x.compras)
+                                   order by x.inscritos desc, x.compras desc, x.valor collate "C"), '[]'::json)
+          from (
+            -- O top 50 sai de uma subconsulta nomeada: "collate" precisa de uma coluna de verdade,
+            -- e não do apelido do select.
+            select * from (
+              select coalesce(nullif(btrim(b.utm_source), ''), '(sem utm)') as valor,
+                     count(*)::int as inscritos,
+                     count(*) filter (where b.comprou_em is not null)::int as compras
+              from base as b where b.pagina = pg.pagina group by 1
+            ) as y
+            order by y.inscritos desc, y.compras desc, y.valor collate "C"
+            limit 50
+          ) as x
+        ),
+        'por_campanha', (
+          select coalesce(json_agg(json_build_object('utm_campaign', x.valor, 'inscritos', x.inscritos, 'compras', x.compras)
+                                   order by x.inscritos desc, x.compras desc, x.valor collate "C"), '[]'::json)
+          from (
+            -- O top 50 sai de uma subconsulta nomeada: "collate" precisa de uma coluna de verdade,
+            -- e não do apelido do select.
+            select * from (
+              select coalesce(nullif(btrim(b.utm_campaign), ''), '(sem utm)') as valor,
+                     count(*)::int as inscritos,
+                     count(*) filter (where b.comprou_em is not null)::int as compras
+              from base as b where b.pagina = pg.pagina group by 1
+            ) as y
+            order by y.inscritos desc, y.compras desc, y.valor collate "C"
+            limit 50
+          ) as x
+        ),
+        'por_termo', (
+          select coalesce(json_agg(json_build_object('utm_term', x.valor, 'inscritos', x.inscritos, 'compras', x.compras)
+                                   order by x.inscritos desc, x.compras desc, x.valor collate "C"), '[]'::json)
+          from (
+            -- O top 50 sai de uma subconsulta nomeada: "collate" precisa de uma coluna de verdade,
+            -- e não do apelido do select.
+            select * from (
+              select coalesce(nullif(btrim(b.utm_term), ''), '(sem utm)') as valor,
+                     count(*)::int as inscritos,
+                     count(*) filter (where b.comprou_em is not null)::int as compras
+              from base as b where b.pagina = pg.pagina group by 1
+            ) as y
+            order by y.inscritos desc, y.compras desc, y.valor collate "C"
+            limit 50
+          ) as x
+        ),
+        'por_dia', (
+          select coalesce(json_agg(json_build_object('dia', x.dia, 'inscritos', x.inscritos, 'compras', x.compras)
+                                   order by x.dia), '[]'::json)
+          from (
+            select u.dia, sum(u.ins)::int as inscritos, sum(u.com)::int as compras
+            from (
+              select (b.criado_em at time zone 'America/Sao_Paulo')::date as dia, 1 as ins, 0 as com
+              from base as b where b.pagina = pg.pagina
+              union all
+              select (b.comprou_em at time zone 'America/Sao_Paulo')::date, 0, 1
+              from base as b where b.pagina = pg.pagina and b.comprou_em is not null
+            ) as u
+            group by u.dia
+          ) as x
+        )
+      ) order by pg.pagina collate "C")
+      from paginas as pg
+      cross join lateral (
+        select count(*)::int as inscritos,
+               coalesce(sum(b.cliques), 0)::int as cliques,
+               count(*) filter (where b.comprou_em is not null)::int as compras,
+               coalesce(sum(b.compra_valor) filter (where b.comprou_em is not null), 0)::numeric(12, 2) as receita
+        from base as b
+        where b.pagina = pg.pagina
+      ) as t
+    ), '[]'::json),
+    'compras_sem_inscricao', (
+      select count(*)::int from eventos as e
+      where e.inscricao_id is null and e.evento in ('PURCHASE_APPROVED', 'PURCHASE_COMPLETE')
+    ),
+    'compras_recentes', coalesce((
+      select json_agg(json_build_object(
+        'recebido_em', x.recebido_em,
+        'evento', x.evento,
+        'status', x.status,
+        'comprador_nome', x.comprador_nome,
+        'comprador_email', x.comprador_email,
+        'valor', x.valor,
+        'pagina', x.pagina,
+        'casou', x.inscricao_id is not null
+      ) order by x.recebido_em desc, x.id desc)
+      from (select * from eventos order by recebido_em desc, id desc limit 20) as x
+    ), '[]'::json)
+  );
+$$;
+
+revoke all on function public.inscricao_salvar(jsonb) from public, anon, authenticated;
+revoke all on function public.hotmart_registrar_compra(jsonb) from public, anon, authenticated;
+revoke all on function public.inscricoes_resumo(timestamptz, timestamptz, text) from public, anon, authenticated;
+grant execute on function public.inscricao_salvar(jsonb) to service_role;
+grant execute on function public.hotmart_registrar_compra(jsonb) to service_role;
+grant execute on function public.inscricoes_resumo(timestamptz, timestamptz, text) to service_role;
+
+-- De novo, porque este bloco pode ser colado sozinho: sem isto, /rest/v1/rpc/inscricao_salvar
+-- responde 404 até o PostgREST reler o esquema sozinho — e a página passaria os primeiros minutos
+-- sem gravar inscrição nenhuma.
+notify pgrst, 'reload schema';

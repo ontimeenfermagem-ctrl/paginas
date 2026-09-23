@@ -8,13 +8,15 @@
  * pesquisa-config) são as de verdade, lidas pelo servidor do próprio repositório.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, afterEach, before, test } from "node:test";
+import vm from "node:vm";
 import { gunzipSync, brotliDecompressSync } from "node:zlib";
-import { createServerApp, respostasLegiveis, calcularPosicao, montarPayloadWebhook, origemDaRequisicao } from "../server.mjs";
+import { createServerApp, respostasLegiveis, calcularPosicao, extrairVendaHotmart, dataHotmart, montarPayloadWebhook, origemDaRequisicao } from "../server.mjs";
 
 const SUPABASE_URL = "https://projeto-de-teste.supabase.co";
 const SUPABASE_KEY = "chave-service-role-de-teste";
@@ -45,6 +47,8 @@ async function listen(server) {
 
 const HTML_PESQUISA = '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Pesquisa</title></head><body><main id="app">pesquisa</main></body></html>';
 const HTML_OBRIGADO = '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta property="og:image" content="/img/og-pesquisa.jpg"><title>Obrigado</title></head><body><main id="obrigado">obrigado</main></body></html>';
+const HTML_INSCRICAO =
+  '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta property="og:image" content="/img/og-inscricao.jpg"><title>Inscrição</title></head><body><main id="app">inscrição</main></body></html>';
 const HTML_PAINEL = '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="robots" content="noindex, nofollow"><title>Painel</title></head><body>painel</body></html>';
 
 before(async () => {
@@ -53,6 +57,7 @@ before(async () => {
     "pesquisa.html": HTML_PESQUISA,
     "obrigado.html": HTML_OBRIGADO,
     "obrigado-velho.html": "<html>segredo</html>",
+    "viver-de-furo-inscricao.html": HTML_INSCRICAO,
     "painel.html": HTML_PAINEL,
     "js/pesquisa.js": `console.log(${JSON.stringify("x".repeat(4000))});`,
     "js/painel.js": "console.log('painel');",
@@ -1763,4 +1768,514 @@ test("contato: o nome é gravado com maiúsculas certas, seja como for digitado"
   const r = validarContato({ nome: "MARIA DA SILVA", whatsapp: "(11) 91234-5678", email: "Maria@Gmail.com" });
   assert.equal(r.contato.nome, "Maria da Silva");
   assert.equal(r.contato.email, "maria@gmail.com");
+});
+
+/* ================================================================== inscrição + checkout Hotmart */
+
+// O MESMO config que o servidor carrega, para o teste não repetir o link do checkout à mão.
+const contextoCheckout = vm.createContext({});
+for (const arquivo of ["js/lead-rules.js", "js/checkout-config.js"]) {
+  vm.runInContext(readFileSync(new URL(`../${arquivo}`, import.meta.url), "utf8"), contextoCheckout, { filename: arquivo });
+}
+const CHECKOUT = contextoCheckout.EVCheckout;
+const PAGINA_INSCRICAO = CHECKOUT.LISTA[0];
+
+function corpoInscricao(extra = {}) {
+  return {
+    pagina: PAGINA_INSCRICAO.id,
+    id: SESSAO,
+    visitante_id: VISITANTE,
+    contato: { nome: "  maria   da silva ", whatsapp: "11912345678", email: " Maria@Gmail.com " },
+    rastreio: {
+      page_url: `https://lp.exemplo${PAGINA_INSCRICAO.rota}?utm_source=facebook`,
+      referrer: "https://www.facebook.com/",
+      dispositivo: "mobile",
+      utm_source: "facebook",
+      utm_medium: "cpc",
+      utm_campaign: "viver-de-furo-set",
+      utm_term: "criativo-07",
+      utm_content: "anuncio-b",
+      fbclid: "IwAR-teste"
+    },
+    ...extra
+  };
+}
+
+function backendInscricao(extra = {}) {
+  return createFakeBackend({ rpc: { inscricao_salvar: { ok: true, novo: true, id: SESSAO }, ...extra } });
+}
+
+test(`a rota ${PAGINA_INSCRICAO.rota} serve a página (com e sem barra), com Pixel, CSP, og/canonical e no-cache`, async () => {
+  const appUrl = await listen(createServerApp({ rootDirectory: root, siteUrl: "https://lp.exemplo.com.br" }));
+
+  for (const caminho of [PAGINA_INSCRICAO.rota, `${PAGINA_INSCRICAO.rota}/`]) {
+    const response = await fetch(`${appUrl}${caminho}`);
+    assert.equal(response.status, 200, caminho);
+    assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.equal(response.headers.get("cache-control"), "no-cache");
+    assert.equal(response.headers.get("x-frame-options"), "DENY");
+    assert.match(response.headers.get("content-security-policy") || "", /connect\.facebook\.net/);
+
+    const html = await response.text();
+    assert.match(html, /fbq\('init', '538380380948773'\)/, `pixel em ${caminho}`);
+    assert.ok(html.includes(`<meta property="og:url" content="https://lp.exemplo.com.br${PAGINA_INSCRICAO.rota}" />`), caminho);
+    assert.ok(html.includes(`<link rel="canonical" href="https://lp.exemplo.com.br${PAGINA_INSCRICAO.rota}" />`), caminho);
+    // Imagem da prévia com caminho relativo vira absoluta (o WhatsApp não monta prévia sem isso).
+    assert.ok(html.includes('content="https://lp.exemplo.com.br/img/og-inscricao.jpg"'), caminho);
+  }
+});
+
+test("/api/inscricao: grava e devolve a URL do checkout montada no SERVIDOR", async () => {
+  const backend = backendInscricao();
+  const { server } = app({ backend });
+  const appUrl = await listen(server);
+
+  const response = await postJson(appUrl, "/api/inscricao", corpoInscricao());
+  assert.equal(response.status, 200);
+  const corpo = await response.json();
+  assert.deepEqual(Object.keys(corpo).sort(), ["checkout", "ok"]);
+  assert.equal(corpo.ok, true);
+
+  const url = new URL(corpo.checkout);
+  assert.equal(`${url.origin}${url.pathname}`, PAGINA_INSCRICAO.checkout.split("?")[0]);
+  assert.equal(url.searchParams.get("off"), "7j2nqptq");
+  assert.equal(url.searchParams.get("checkoutMode"), "10");
+  assert.equal(url.searchParams.get("utm_source"), "facebook");
+  assert.equal(url.searchParams.get("utm_medium"), "cpc");
+  assert.equal(url.searchParams.get("utm_campaign"), "viver-de-furo-set");
+  assert.equal(url.searchParams.get("utm_term"), "criativo-07");
+  assert.equal(url.searchParams.get("utm_content"), "anuncio-b");
+  assert.equal(url.searchParams.get("sck"), "criativo-07", "o sck é o utm_term");
+  assert.equal(url.searchParams.get("name"), "Maria da Silva", "nome formatado");
+  assert.equal(url.searchParams.get("email"), "maria@gmail.com");
+  assert.equal(url.searchParams.get("phoneac"), "11");
+  assert.equal(url.searchParams.get("phonenumber"), "912345678");
+  assert.equal(url.searchParams.get("fbclid"), null, "fbclid não vai para a Hotmart");
+  // A URL do servidor é EXATAMENTE a do contrato.
+  assert.equal(
+    corpo.checkout,
+    CHECKOUT.montarUrlCheckout(PAGINA_INSCRICAO.checkout, {
+      utm: { utm_source: "facebook", utm_medium: "cpc", utm_campaign: "viver-de-furo-set", utm_term: "criativo-07", utm_content: "anuncio-b" },
+      contato: { nome: "maria da silva", email: "maria@gmail.com", whatsapp: "11912345678" }
+    })
+  );
+
+  const [chamada] = backend.chamadas;
+  assert.match(chamada.url, /\/rest\/v1\/rpc\/inscricao_salvar$/);
+  assert.equal(chamada.method, "POST");
+  assert.equal(chamada.headers.apikey, SUPABASE_KEY);
+  assert.deepEqual(chamada.body.p, {
+    id: SESSAO,
+    pagina: PAGINA_INSCRICAO.id,
+    visitante_id: VISITANTE,
+    // Contato normalizado pelas MESMAS regras da pesquisa.
+    nome: "Maria da Silva",
+    whatsapp: "(11) 91234-5678",
+    whatsapp_digits: "11912345678",
+    email: "maria@gmail.com",
+    checkout_url: corpo.checkout,
+    page_url: `https://lp.exemplo${PAGINA_INSCRICAO.rota}?utm_source=facebook`,
+    referrer: "https://www.facebook.com/",
+    dispositivo: "mobile",
+    utm_source: "facebook",
+    utm_medium: "cpc",
+    utm_campaign: "viver-de-furo-set",
+    utm_content: "anuncio-b",
+    utm_term: "criativo-07",
+    fbclid: "IwAR-teste",
+    gclid: null
+  });
+});
+
+test("/api/inscricao: sem UTM nenhuma, o link do cliente sai inteiro e sem sck", async () => {
+  const { server } = app({ backend: backendInscricao() });
+  const appUrl = await listen(server);
+
+  const response = await postJson(appUrl, "/api/inscricao", corpoInscricao({ rastreio: { dispositivo: "desktop" } }));
+  const { checkout } = await response.json();
+  const params = new URL(checkout).searchParams;
+  assert.equal(params.get("off"), "7j2nqptq");
+  assert.equal(params.get("checkoutMode"), "10");
+  assert.equal(params.get("sck"), null);
+  assert.equal(params.get("utm_source"), null);
+  assert.equal(params.get("name"), "Maria da Silva");
+});
+
+test("/api/inscricao: método, tipo, corpo e página — 405, 415, 400, 413, 422", async () => {
+  const { server } = app({ backend: backendInscricao() });
+  const appUrl = await listen(server);
+
+  const get = await fetch(`${appUrl}/api/inscricao`);
+  assert.equal(get.status, 405);
+  assert.equal(get.headers.get("allow"), "POST");
+
+  const semJson = await fetch(`${appUrl}/api/inscricao`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: "pagina=viver-de-furo"
+  });
+  assert.equal(semJson.status, 415);
+
+  const quebrado = await postJson(appUrl, "/api/inscricao", "{");
+  assert.equal(quebrado.status, 400);
+
+  const gigante = await postJson(appUrl, "/api/inscricao", { pagina: "x".repeat(70 * 1024) });
+  assert.equal(gigante.status, 413);
+  assert.deepEqual(await gigante.json(), { ok: false, error: "payload_too_large" });
+
+  const lista = await postJson(appUrl, "/api/inscricao", "[]");
+  assert.equal(lista.status, 422);
+  assert.deepEqual(await lista.json(), { ok: false, error: "invalid_body" });
+
+  // Página que não existe no config — inclusive uma chave herdada do Object.
+  for (const pagina of ["outra-pagina", "", null, "toString", "constructor"]) {
+    const response = await postJson(appUrl, "/api/inscricao", corpoInscricao({ pagina }));
+    assert.equal(response.status, 422, String(pagina));
+    assert.deepEqual(await response.json(), { ok: false, error: "invalid_page" }, String(pagina));
+  }
+});
+
+test("/api/inscricao: contato inválido volta 422 com as mensagens do EVLeadRules, campo a campo", async () => {
+  const { server } = app({ backend: backendInscricao() });
+  const appUrl = await listen(server);
+
+  const response = await postJson(
+    appUrl,
+    "/api/inscricao",
+    corpoInscricao({ contato: { nome: "Maria2", whatsapp: "1191234", email: "maria@" } })
+  );
+  assert.equal(response.status, 422);
+  const corpo = await response.json();
+  assert.equal(corpo.error, "invalid_contact");
+  assert.deepEqual(Object.keys(corpo.campos).sort(), ["email", "nome", "whatsapp"]);
+  assert.equal(corpo.campos.nome, "Confere o nome: use só letras.");
+  assert.equal(corpo.campos.whatsapp, "Faltam números: são 11 dígitos contando o DDD.");
+  assert.equal(corpo.campos.email, "Confere o e-mail, parece que tem algo errado.");
+
+  // Sobrenome e celular: as mesmas regras da pesquisa.
+  const semSobrenome = await postJson(appUrl, "/api/inscricao", corpoInscricao({ contato: { nome: "Maria", whatsapp: "11912345678", email: "maria@gmail.com" } }));
+  assert.equal((await semSobrenome.json()).campos.nome, "Escreva também o seu sobrenome.");
+  const fixo = await postJson(appUrl, "/api/inscricao", corpoInscricao({ contato: { nome: "Maria Silva", whatsapp: "1131234567", email: "maria@gmail.com" } }));
+  assert.equal((await fixo.json()).campos.whatsapp, "Faltam números: são 11 dígitos contando o DDD.");
+});
+
+test("/api/inscricao: domínio de e-mail que não recebe mensagem volta 422 (mesmo resolvedor da pesquisa)", async () => {
+  const resolver = fakeResolver((dominio) => (dominio === "escolainexistente.com.br" ? "missing" : "ok"));
+  const backend = backendInscricao();
+  const { server } = app({ backend, resolver });
+  const appUrl = await listen(server);
+
+  const response = await postJson(
+    appUrl,
+    "/api/inscricao",
+    corpoInscricao({ contato: { nome: "Maria Silva", whatsapp: "11912345678", email: "maria@escolainexistente.com.br" } })
+  );
+  assert.equal(response.status, 422);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "invalid_contact",
+    campos: { email: "Não encontramos esse endereço de e-mail. Confere se está certinho?" }
+  });
+  assert.deepEqual(resolver.consultas, ["escolainexistente.com.br"]);
+  assert.equal(backend.chamadas.length, 0, "nada foi gravado");
+});
+
+test("/api/inscricao: sem banco → 503; banco fora → 502 sem vazar detalhe", async () => {
+  const semBanco = await listen(createServerApp({ rootDirectory: root, resolveEmailDomain: async () => "ok" }));
+  const resposta503 = await postJson(semBanco, "/api/inscricao", corpoInscricao());
+  assert.equal(resposta503.status, 503);
+  assert.deepEqual(await resposta503.json(), { ok: false, error: "database_not_configured" });
+
+  const backend = createFakeBackend({ rpc: { inscricao_salvar: () => jsonResponse({ message: "detalhe interno" }, 500) } });
+  const appUrl = await listen(app({ backend }).server);
+  const resposta502 = await postJson(appUrl, "/api/inscricao", corpoInscricao());
+  assert.equal(resposta502.status, 502);
+  assert.deepEqual(await resposta502.json(), { ok: false, error: "database_unavailable" });
+});
+
+test("/api/inscricao: rate limit próprio de 240/min por IP, sem atrapalhar a pesquisa", async () => {
+  const { server } = app({ backend: backendInscricao() });
+  const appUrl = await listen(server);
+
+  for (let i = 0; i < 240; i += 1) {
+    const response = await postJson(appUrl, "/api/inscricao", corpoInscricao(), { "X-Forwarded-For": `10.0.0.${i % 250}, 200.1.1.1` });
+    assert.equal(response.status, 200, `requisição ${i + 1}`);
+  }
+  const bloqueada = await postJson(appUrl, "/api/inscricao", corpoInscricao(), { "X-Forwarded-For": "9.9.9.9, 200.1.1.1" });
+  assert.equal(bloqueada.status, 429);
+  assert.deepEqual(await bloqueada.json(), { ok: false, error: "too_many_requests" });
+
+  // O limite é só desta rota: a pesquisa segue gravando no mesmo IP.
+  const pesquisa = await postJson(appUrl, "/api/pesquisa/salvar", corpoSalvar(), { "X-Forwarded-For": "200.1.1.1" });
+  assert.equal(pesquisa.status, 200);
+  // E outro IP continua livre na própria rota.
+  const outro = await postJson(appUrl, "/api/inscricao", corpoInscricao(), { "X-Forwarded-For": "200.2.2.2" });
+  assert.equal(outro.status, 200);
+});
+
+/* ================================================================== webhook de venda da Hotmart */
+
+const HOTTOK = "hottok-de-teste-abcdef";
+const CHAVE_WEBHOOK = "chave-de-url-de-teste-123456";
+
+function payloadHotmart(extra = {}, dados = {}) {
+  return {
+    id: "aviso-1",
+    event: "PURCHASE_APPROVED",
+    version: "2.0.0",
+    creation_date: 1_758_600_000_000,
+    data: {
+      product: { id: "Y74893363S", ucode: "abc-ucode", name: "Viver de Furo de Orelha" },
+      buyer: { name: "Maria da Silva", email: "Maria@Gmail.com", checkout_phone_code: "55", checkout_phone: "11912345678" },
+      purchase: {
+        transaction: "HP1234567890",
+        status: "APPROVED",
+        order_date: 1_758_600_000_000,
+        approved_date: 1_758_600_060_000,
+        price: { value: 197, currency_value: "BRL" },
+        offer: { code: "7j2nqptq" },
+        payment: { type: "PIX", method: "PIX" },
+        tracking: { source: "facebook", source_sck: "criativo-07", external_code: "xyz" },
+        ...dados
+      }
+    },
+    ...extra
+  };
+}
+
+function backendHotmart(resposta = { ok: true, novo: true, casou: true, inscricao_id: SESSAO, pagina: "viver-de-furo" }) {
+  return createFakeBackend({ rpc: { hotmart_registrar_compra: typeof resposta === "function" ? resposta : () => jsonResponse(resposta) } });
+}
+
+function appHotmart(opcoes = {}) {
+  return app({ backend: backendHotmart(), hotmartHottok: HOTTOK, hotmartChave: CHAVE_WEBHOOK, ...opcoes });
+}
+
+test("hotmart: sem HOTMART_HOTTOK e sem HOTMART_WEBHOOK_CHAVE → 503 (a Hotmart reenvia depois)", async () => {
+  const { server } = app({ backend: backendHotmart() });
+  const appUrl = await listen(server);
+
+  const response = await postJson(appUrl, "/api/hotmart/venda", payloadHotmart(), { "X-HOTMART-HOTTOK": HOTTOK });
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { ok: false, error: "webhook_not_configured" });
+});
+
+test("hotmart: hottok certo grava; hottok errado, ausente ou vazio → 401", async () => {
+  const backend = backendHotmart();
+  const { server } = app({ backend, hotmartHottok: HOTTOK });
+  const appUrl = await listen(server);
+
+  const ok = await postJson(appUrl, "/api/hotmart/venda", payloadHotmart(), { "X-HOTMART-HOTTOK": HOTTOK });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(await ok.json(), { ok: true });
+  assert.equal(backend.chamadas.length, 1);
+
+  for (const headers of [{ "X-HOTMART-HOTTOK": "errado" }, { "X-HOTMART-HOTTOK": "" }, {}, { "X-HOTMART-HOTTOK": `${HOTTOK}x` }]) {
+    const response = await postJson(appUrl, "/api/hotmart/venda", payloadHotmart(), headers);
+    assert.equal(response.status, 401, JSON.stringify(headers));
+    assert.deepEqual(await response.json(), { ok: false, error: "unauthorized" });
+  }
+  assert.equal(backend.chamadas.length, 1, "nada além do aviso autenticado foi gravado");
+});
+
+test("hotmart: a chave na URL funciona sozinha (antes de o hottok existir) e a errada não", async () => {
+  const backend = backendHotmart();
+  const { server } = app({ backend, hotmartChave: CHAVE_WEBHOOK });
+  const appUrl = await listen(server);
+
+  const ok = await postJson(appUrl, `/api/hotmart/venda?chave=${CHAVE_WEBHOOK}`, payloadHotmart());
+  assert.equal(ok.status, 200);
+
+  for (const query of ["", "?chave=", "?chave=errada", `?chave=${CHAVE_WEBHOOK}x`, "?outra=1"]) {
+    const response = await postJson(appUrl, `/api/hotmart/venda${query}`, payloadHotmart());
+    assert.equal(response.status, 401, query);
+  }
+
+  // Com as duas configuradas, qualquer uma das duas basta.
+  const dois = await listen(appHotmart().server);
+  assert.equal((await postJson(dois, `/api/hotmart/venda?chave=${CHAVE_WEBHOOK}`, payloadHotmart())).status, 200);
+  assert.equal((await postJson(dois, "/api/hotmart/venda", payloadHotmart(), { "X-HOTMART-HOTTOK": HOTTOK })).status, 200);
+  assert.equal((await postJson(dois, "/api/hotmart/venda?chave=errada", payloadHotmart(), { "X-HOTMART-HOTTOK": "errado" })).status, 401);
+});
+
+test("hotmart: GET responde 405 e não grava nada", async () => {
+  const backend = backendHotmart();
+  const { server } = app({ backend, hotmartHottok: HOTTOK, hotmartChave: CHAVE_WEBHOOK });
+  const appUrl = await listen(server);
+
+  const response = await fetch(`${appUrl}/api/hotmart/venda?chave=${CHAVE_WEBHOOK}`);
+  assert.equal(response.status, 405);
+  assert.equal(response.headers.get("allow"), "POST");
+  assert.equal(backend.chamadas.length, 0);
+});
+
+test("hotmart: os campos vão para o SQL com o payload CRU junto", async () => {
+  const backend = backendHotmart();
+  const { server } = appHotmart({ backend });
+  const appUrl = await listen(server);
+
+  const payload = payloadHotmart();
+  const response = await postJson(appUrl, "/api/hotmart/venda", payload, { "X-HOTMART-HOTTOK": HOTTOK });
+  assert.equal(response.status, 200);
+
+  const [chamada] = backend.chamadas;
+  assert.match(chamada.url, /\/rest\/v1\/rpc\/hotmart_registrar_compra$/);
+  const p = chamada.body.p;
+  assert.equal(p.evento, "PURCHASE_APPROVED");
+  assert.equal(p.hotmart_id, "aviso-1");
+  assert.equal(p.transacao, "HP1234567890");
+  assert.equal(p.status, "APPROVED");
+  assert.equal(p.produto_id, "Y74893363S");
+  assert.equal(p.produto_nome, "Viver de Furo de Orelha");
+  assert.equal(p.oferta, "7j2nqptq");
+  assert.equal(p.valor, 197);
+  assert.equal(p.moeda, "BRL");
+  assert.equal(p.comprador_nome, "Maria da Silva");
+  assert.equal(p.comprador_email, "maria@gmail.com", "e-mail minúsculo, como na inscrição");
+  assert.equal(p.comprador_telefone, "5511912345678", "DDI + número");
+  assert.equal(p.comprador_digits, "11912345678", "os mesmos dígitos gravados na inscrição");
+  assert.equal(p.sck, "criativo-07");
+  assert.equal(p.src, "facebook");
+  assert.equal(p.evento_em, "2025-09-23T04:00:00.000Z");
+  assert.equal(p.pedido_em, "2025-09-23T04:00:00.000Z");
+  assert.equal(p.aprovado_em, "2025-09-23T04:01:00.000Z");
+  assert.deepEqual(p.payload, payload, "o payload inteiro, do jeito que chegou");
+});
+
+test("hotmart: comprador em data.purchase.buyer, sck em sckPaymentLink, datas ISO e telefone já com DDI", async () => {
+  const backend = backendHotmart();
+  const { server } = appHotmart({ backend });
+  const appUrl = await listen(server);
+
+  const payload = {
+    id: "aviso-2",
+    event: "PURCHASE_COMPLETE",
+    data: {
+      product: { ucode: "so-ucode", name: "Viver de Furo" },
+      purchase: {
+        transaction: "HP999",
+        status: "COMPLETED",
+        buyer: { name: "João Souza", email: "JOAO@GMAIL.COM", checkout_phone: "+55 (21) 99876-5432" },
+        order_date: "2026-09-20T10:00:00Z",
+        approved_date: "2026-09-20T10:05:00Z",
+        price: { value: "197.50", currency_code: "BRL" },
+        sckPaymentLink: "criativo-09"
+      }
+    }
+  };
+  assert.equal((await postJson(appUrl, `/api/hotmart/venda?chave=${CHAVE_WEBHOOK}`, payload)).status, 200);
+
+  const p = backend.chamadas[0].body.p;
+  assert.equal(p.evento, "PURCHASE_COMPLETE");
+  assert.equal(p.produto_id, "so-ucode");
+  assert.equal(p.comprador_nome, "João Souza");
+  assert.equal(p.comprador_email, "joao@gmail.com");
+  assert.equal(p.comprador_digits, "21998765432", "o +55 sai, como no formulário");
+  assert.equal(p.sck, "criativo-09");
+  assert.equal(p.valor, 197.5);
+  assert.equal(p.moeda, "BRL");
+  assert.equal(p.pedido_em, "2026-09-20T10:00:00.000Z");
+  assert.equal(p.aprovado_em, "2026-09-20T10:05:00.000Z");
+  assert.equal(p.evento_em, null, "sem creation_date, o momento fica por conta do banco");
+});
+
+test("hotmart: evento de cancelamento, reembolso e chargeback é gravado igual", async () => {
+  const backend = backendHotmart({ ok: true, novo: true, casou: true, inscricao_id: SESSAO, pagina: "viver-de-furo" });
+  const { server } = appHotmart({ backend });
+  const appUrl = await listen(server);
+
+  for (const evento of ["PURCHASE_CANCELED", "PURCHASE_REFUNDED", "PURCHASE_CHARGEBACK", "PURCHASE_PROTEST", "PURCHASE_BILLET_PRINTED", "PURCHASE_OUT_OF_SHOPPING_CART"]) {
+    const response = await postJson(appUrl, "/api/hotmart/venda", payloadHotmart({ event: evento }), { "X-HOTMART-HOTTOK": HOTTOK });
+    assert.equal(response.status, 200, evento);
+    assert.deepEqual(await response.json(), { ok: true }, evento);
+  }
+  assert.deepEqual(
+    backend.chamadas.map((chamada) => chamada.body.p.evento),
+    ["PURCHASE_CANCELED", "PURCHASE_REFUNDED", "PURCHASE_CHARGEBACK", "PURCHASE_PROTEST", "PURCHASE_BILLET_PRINTED", "PURCHASE_OUT_OF_SHOPPING_CART"]
+  );
+});
+
+test("hotmart: aviso que não é de compra é aceito e ignorado; sem evento → 422", async () => {
+  const backend = backendHotmart();
+  const { server } = appHotmart({ backend });
+  const appUrl = await listen(server);
+
+  for (const evento of ["CLUB_FIRST_ACCESS", "SUBSCRIPTION_CANCELLATION", "UPDATE_SUBSCRIPTION_CHARGE_DATE"]) {
+    const response = await postJson(appUrl, "/api/hotmart/venda", payloadHotmart({ event: evento }), { "X-HOTMART-HOTTOK": HOTTOK });
+    assert.equal(response.status, 200, evento);
+    assert.deepEqual(await response.json(), { ok: true, ignorado: true }, evento);
+  }
+  assert.equal(backend.chamadas.length, 0, "nada disso vai para o banco");
+
+  for (const corpo of [{ id: "x" }, { event: "" }, { event: 42 }]) {
+    const response = await postJson(appUrl, "/api/hotmart/venda", corpo, { "X-HOTMART-HOTTOK": HOTTOK });
+    assert.equal(response.status, 422, JSON.stringify(corpo));
+    assert.deepEqual(await response.json(), { ok: false, error: "invalid_event" });
+  }
+});
+
+test("hotmart: aceita payload grande (256 KB) e corta acima disso", async () => {
+  const backend = backendHotmart();
+  const { server } = appHotmart({ backend });
+  const appUrl = await listen(server);
+
+  // Um payload de 100 KB (a Hotmart manda comissões, assinatura, dados do produtor...) passa.
+  const grande = payloadHotmart({ extra_da_hotmart: "x".repeat(100 * 1024) });
+  const ok = await postJson(appUrl, "/api/hotmart/venda", grande, { "X-HOTMART-HOTTOK": HOTTOK });
+  assert.equal(ok.status, 200);
+  assert.equal(backend.chamadas[0].body.p.payload.extra_da_hotmart.length, 100 * 1024, "o extra desconhecido foi guardado inteiro");
+
+  const enorme = payloadHotmart({ extra_da_hotmart: "x".repeat(300 * 1024) });
+  const grandeDemais = await postJson(appUrl, "/api/hotmart/venda", enorme, { "X-HOTMART-HOTTOK": HOTTOK });
+  assert.equal(grandeDemais.status, 413);
+  assert.deepEqual(await grandeDemais.json(), { ok: false, error: "payload_too_large" });
+});
+
+test("hotmart: banco fora → 502 (a Hotmart reenvia); sem banco → 503", async () => {
+  const backend = createFakeBackend({ rpc: { hotmart_registrar_compra: () => jsonResponse({ message: "detalhe interno" }, 500) } });
+  const { server } = appHotmart({ backend });
+  const appUrl = await listen(server);
+
+  const response = await postJson(appUrl, "/api/hotmart/venda", payloadHotmart(), { "X-HOTMART-HOTTOK": HOTTOK });
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), { ok: false, error: "database_unavailable" });
+
+  const semBanco = await listen(
+    createServerApp({ rootDirectory: root, hotmartHottok: HOTTOK, resolveEmailDomain: async () => "ok" })
+  );
+  const resposta503 = await postJson(semBanco, "/api/hotmart/venda", payloadHotmart(), { "X-HOTMART-HOTTOK": HOTTOK });
+  assert.equal(resposta503.status, 503);
+  assert.deepEqual(await resposta503.json(), { ok: false, error: "database_not_configured" });
+});
+
+test("hotmart: compra que não casou com inscrição ainda responde 200 (o banco guarda o aviso)", async () => {
+  const backend = backendHotmart({ ok: true, novo: true, casou: false, inscricao_id: null, pagina: null });
+  const { server } = appHotmart({ backend });
+  const appUrl = await listen(server);
+
+  const response = await postJson(appUrl, "/api/hotmart/venda", payloadHotmart(), { "X-HOTMART-HOTTOK": HOTTOK });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true });
+});
+
+test("extrairVendaHotmart: payload vazio, torto ou de outro formato nunca lança", () => {
+  for (const corpo of [null, undefined, 42, "texto", [], {}, { data: null }, { data: { purchase: [] } }, { data: { buyer: "x" } }]) {
+    const venda = extrairVendaHotmart(corpo);
+    assert.equal(typeof venda, "object");
+    assert.equal(venda.evento, "");
+    assert.equal(venda.transacao, null);
+    assert.equal(venda.comprador_digits, null);
+  }
+  // O evento sobe para maiúsculas: "purchase_approved" e "PURCHASE_APPROVED" são o mesmo aviso.
+  assert.equal(extrairVendaHotmart({ event: "purchase_approved" }).evento, "PURCHASE_APPROVED");
+});
+
+test("dataHotmart: epoch em milissegundos, em segundos, ISO e lixo", () => {
+  assert.equal(dataHotmart(1_758_600_000_000), "2025-09-23T04:00:00.000Z");
+  assert.equal(dataHotmart(1_758_600_000), "2025-09-23T04:00:00.000Z");
+  assert.equal(dataHotmart("1758600000000"), "2025-09-23T04:00:00.000Z");
+  assert.equal(dataHotmart("2026-09-23T04:00:00Z"), "2026-09-23T04:00:00.000Z");
+  for (const lixo of [null, undefined, "", "   ", "ontem", {}, [], Number.NaN, Infinity]) {
+    assert.equal(dataHotmart(lixo), null, String(lixo));
+  }
 });

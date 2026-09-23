@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { createHmac, randomBytes, scryptSync } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { afterEach, test } from "node:test";
-import { createServerApp, COLUNAS_CSV, celulaCsv, dataHoraBrasilia } from "../server.mjs";
+import { createServerApp, COLUNAS_CSV, COLUNAS_CSV_INSCRICOES, celulaCsv, dataHoraBrasilia } from "../server.mjs";
 
 const SUPABASE_URL = "https://projeto-de-teste.supabase.co";
 const SUPABASE_KEY = "chave-service-role-de-teste";
@@ -68,6 +68,37 @@ const RESUMO = {
   trafego: []
 };
 
+// O que inscricoes_resumo devolve, no formato do contrato.
+const RESUMO_INSCRICOES = {
+  paginas: [
+    {
+      pagina: "viver-de-furo",
+      inscritos: 40,
+      cliques: 52,
+      compras: 5,
+      receita: 985.0,
+      taxa_compra: 12.5,
+      por_origem: [{ utm_source: "facebook", inscritos: 30, compras: 4 }],
+      por_campanha: [{ utm_campaign: "viver-de-furo-set", inscritos: 30, compras: 4 }],
+      por_termo: [{ utm_term: "criativo-07", inscritos: 18, compras: 3 }],
+      por_dia: [{ dia: "2026-09-21", inscritos: 40, compras: 5 }]
+    }
+  ],
+  compras_sem_inscricao: 1,
+  compras_recentes: [
+    {
+      recebido_em: "2026-09-21T14:00:00Z",
+      evento: "PURCHASE_APPROVED",
+      status: "APPROVED",
+      comprador_nome: "Maria da Silva",
+      comprador_email: "maria@gmail.com",
+      valor: 197,
+      pagina: "viver-de-furo",
+      casou: true
+    }
+  ]
+};
+
 /**
  * `tabelas` responde GET em pesquisa_pessoas / pesquisa_respostas (função recebe a URL e devolve
  * { linhas, total } ou uma Response). `rpc` responde por nome de função.
@@ -87,7 +118,7 @@ function createFakeBackend({ rpc = {}, tabelas = {} } = {}) {
 
     const nome = endereco.pathname.match(/^\/rest\/v1\/rpc\/([a-z_]+)$/)?.[1];
     if (nome) {
-      const resposta = rpc[nome] ?? (nome === "pesquisa_painel" ? RESUMO : undefined);
+      const resposta = rpc[nome] ?? (nome === "pesquisa_painel" ? RESUMO : nome === "inscricoes_resumo" ? RESUMO_INSCRICOES : undefined);
       if (typeof resposta === "function") return await resposta(chamadas.at(-1));
       if (resposta !== undefined) return jsonResponse(resposta);
       return jsonResponse({ message: "função desconhecida" }, 404);
@@ -169,7 +200,9 @@ const ROTAS_DE_DADOS = [
   "/api/painel/abertas?chaves=sonho",
   "/api/painel/cruzamento?linha=perfil&coluna=renda_atual",
   "/api/painel/paginas",
-  "/api/painel/exportar.csv"
+  "/api/painel/inscricoes",
+  "/api/painel/exportar.csv",
+  "/api/painel/exportar-inscricoes.csv"
 ];
 
 /* ================================================================== configuração e login */
@@ -476,7 +509,13 @@ test("filtros inválidos → 422 invalid_filters, sem ir ao banco", async () => 
     "/api/painel/exportar.csv?status=x",
     "/api/painel/exportar.csv?desde=x",
     "/api/painel/paginas?desde=ontem",
-    "/api/painel/paginas?ate=2026-13-45"
+    "/api/painel/paginas?ate=2026-13-45",
+    "/api/painel/inscricoes?desde=ontem",
+    "/api/painel/inscricoes?pagina=nao-existe",
+    "/api/painel/inscricoes?limite=0",
+    "/api/painel/inscricoes?offset=-2",
+    "/api/painel/exportar-inscricoes.csv?desde=x",
+    "/api/painel/exportar-inscricoes.csv?pagina=outra"
   ]) {
     const response = await get(rota);
     assert.equal(response.status, 422, rota);
@@ -498,7 +537,11 @@ test("banco fora ou resposta fora do formato → 502 database_unavailable", asyn
     ["/api/painel/paginas", createFakeBackend({ rpc: { paginas_resumo: () => jsonResponse({ message: "x" }, 500) } })],
     ["/api/painel/paginas", createFakeBackend({ rpc: { paginas_resumo: [] } })],
     ["/api/painel/paginas", createFakeBackend({ rpc: { paginas_resumo: { paginas: "nao-e-lista" } } })],
-    ["/api/painel/paginas", createFakeBackend({ rpc: { paginas_resumo: () => Promise.reject(new Error("timeout")) } })]
+    ["/api/painel/paginas", createFakeBackend({ rpc: { paginas_resumo: () => Promise.reject(new Error("timeout")) } })],
+    ["/api/painel/inscricoes", createFakeBackend({ rpc: { inscricoes_resumo: () => jsonResponse({ message: "x" }, 500) }, tabelas: { inscricoes: () => ({ linhas: [] }) } })],
+    ["/api/painel/inscricoes", createFakeBackend({ rpc: { inscricoes_resumo: { paginas: "nao-e-lista" } }, tabelas: { inscricoes: () => ({ linhas: [] }) } })],
+    ["/api/painel/inscricoes", createFakeBackend({ rpc: { inscricoes_resumo: RESUMO_INSCRICOES }, tabelas: { inscricoes: () => jsonResponse({ message: "x" }, 500) } })],
+    ["/api/painel/exportar-inscricoes.csv", createFakeBackend({ tabelas: { inscricoes: () => jsonResponse({ message: "x" }, 503) } })]
   ]) {
     const { get } = await logado({ backend });
     const response = await get(rota);
@@ -1002,4 +1045,222 @@ test("CSV: link clicado sem sessão (pede HTML) volta para o login em vez de bai
   const api = await fetch(`${appUrl}/api/painel/exportar.csv`);
   assert.equal(api.status, 401);
   assert.deepEqual(await api.json(), { ok: false, error: "unauthorized" });
+});
+
+/* ================================================================== inscrições e vendas */
+
+function linhaInscricao(n, extra = {}) {
+  return {
+    id: `10000000-0000-4000-8000-${String(n).padStart(12, "0")}`,
+    pagina: "viver-de-furo",
+    criado_em: "2026-09-21T14:05:00+00:00",
+    atualizado_em: "2026-09-21T14:06:00+00:00",
+    nome: `Pessoa ${n}`,
+    whatsapp: "(11) 91234-5678",
+    whatsapp_digits: "11912345678",
+    whatsapp_internacional: "5511912345678",
+    email: `pessoa${n}@gmail.com`,
+    checkout_url: "https://pay.hotmart.com/Y74893363S?off=7j2nqptq&checkoutMode=10&utm_source=facebook&sck=criativo-07",
+    cliques: 2,
+    clicou_em: "2026-09-21T14:06:00+00:00",
+    comprou_em: null,
+    compra_status: null,
+    compra_valor: null,
+    compra_transacao: null,
+    utm_source: "facebook",
+    utm_medium: "cpc",
+    utm_campaign: "viver-de-furo-set",
+    utm_term: "criativo-07",
+    utm_content: "anuncio-b",
+    fbclid: null,
+    gclid: null,
+    page_url: "https://lp.exemplo/viver-de-furo-inscricao",
+    referrer: "https://www.facebook.com/",
+    dispositivo: "mobile",
+    ...extra
+  };
+}
+
+function backendInscricoes(linhas = [linhaInscricao(1)], extra = {}) {
+  return createFakeBackend({ tabelas: { inscricoes: () => ({ linhas, total: linhas.length }) }, ...extra });
+}
+
+test("inscrições: chama inscricoes_resumo com o período e lista a tabela com os mesmos filtros", async () => {
+  const backend = backendInscricoes();
+  const { get } = await logado({ backend });
+
+  const response = await get("/api/painel/inscricoes?desde=2026-09-01T03:00:00Z&ate=2026-09-22T03:00:00Z&pagina=viver-de-furo&limite=10&offset=20");
+  assert.equal(response.status, 200);
+  const corpo = await response.json();
+  assert.equal(corpo.ok, true);
+  assert.equal(corpo.resumo.paginas[0].inscritos, 40);
+  assert.equal(corpo.resumo.compras_sem_inscricao, 1);
+  assert.equal(corpo.itens.length, 1);
+  assert.equal(corpo.total, 1);
+  assert.match(corpo.gerado_em, /^\d{4}-\d{2}-\d{2}T/);
+
+  const rpc = backend.chamadas.find((chamada) => chamada.caminho === "/rest/v1/rpc/inscricoes_resumo");
+  assert.deepEqual(rpc.body, {
+    p_desde: "2026-09-01T03:00:00.000Z",
+    p_ate: "2026-09-22T03:00:00.000Z",
+    p_pagina: "viver-de-furo"
+  });
+
+  const lista = backend.chamadas.find((chamada) => chamada.caminho === "/rest/v1/inscricoes");
+  assert.equal(lista.params.get("pagina"), "eq.viver-de-furo");
+  assert.deepEqual(lista.params.getAll("criado_em"), ["gte.2026-09-01T03:00:00.000Z", "lt.2026-09-22T03:00:00.000Z"]);
+  assert.equal(lista.params.get("order"), "criado_em.desc,id.desc");
+  assert.equal(lista.params.get("limit"), "10");
+  assert.equal(lista.params.get("offset"), "20");
+  assert.equal(lista.headers.Prefer, "count=exact");
+});
+
+test("inscrições: sem filtro nenhum, o SQL recebe null e a lista não filtra por página", async () => {
+  const backend = backendInscricoes();
+  const { get } = await logado({ backend });
+
+  assert.equal((await get("/api/painel/inscricoes")).status, 200);
+  const rpc = backend.chamadas.find((chamada) => chamada.caminho === "/rest/v1/rpc/inscricoes_resumo");
+  assert.deepEqual(rpc.body, { p_desde: null, p_ate: null, p_pagina: null });
+  const lista = backend.chamadas.find((chamada) => chamada.caminho === "/rest/v1/inscricoes");
+  assert.equal(lista.params.get("pagina"), null);
+  assert.deepEqual(lista.params.getAll("criado_em"), []);
+  assert.equal(lista.params.get("limit"), "100");
+});
+
+test("inscrições: o total vem do Content-Range (e não do que coube na página)", async () => {
+  const backend = createFakeBackend({
+    tabelas: { inscricoes: () => ({ linhas: [linhaInscricao(1), linhaInscricao(2)], total: 137 }) }
+  });
+  const { get } = await logado({ backend });
+  const corpo = await (await get("/api/painel/inscricoes?limite=2")).json();
+  assert.equal(corpo.total, 137);
+  assert.equal(corpo.itens.length, 2);
+});
+
+test("CSV de inscrições: cabeçalhos HTTP, BOM, colunas na ordem do contrato e sck = utm_term", async () => {
+  const agora = Date.parse("2026-09-22T01:30:00Z"); // 21/09 ainda, no horário de Brasília
+  const comprou = linhaInscricao(1, {
+    comprou_em: "2026-09-21T15:00:00Z",
+    compra_status: "APPROVED",
+    compra_valor: "197.00",
+    compra_transacao: "HP1234567890"
+  });
+  const backend = backendInscricoes([comprou]);
+  const { get } = await logado({ backend, now: () => agora });
+
+  const response = await get("/api/painel/exportar-inscricoes.csv");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "text/csv; charset=utf-8");
+  assert.equal(response.headers.get("content-disposition"), 'attachment; filename="inscricoes-2026-09-21.csv"');
+  assert.equal(response.headers.get("cache-control"), "no-store");
+
+  const bytes = Buffer.from(await response.arrayBuffer());
+  assert.deepEqual([...bytes.subarray(0, 3)], [0xef, 0xbb, 0xbf], "BOM UTF-8");
+  const texto = bytes.subarray(3).toString("utf8");
+  assert.ok(texto.endsWith("\r\n"));
+
+  const [cabecalho, linha] = lerCsv(texto);
+  assert.deepEqual(cabecalho, [
+    "data",
+    "nome",
+    "whatsapp",
+    "whatsapp_internacional",
+    "email",
+    "pagina",
+    "cliques",
+    "comprou_em",
+    "compra_status",
+    "compra_valor",
+    "compra_transacao",
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "sck",
+    "fbclid",
+    "gclid",
+    "page_url",
+    "referrer",
+    "dispositivo"
+  ]);
+  assert.deepEqual(
+    cabecalho,
+    COLUNAS_CSV_INSCRICOES.map((coluna) => coluna.cabecalho)
+  );
+  const coluna = (nome) => linha[cabecalho.indexOf(nome)];
+  assert.equal(coluna("data"), "21/09/2026 11:05");
+  assert.equal(coluna("nome"), "Pessoa 1");
+  assert.equal(coluna("whatsapp"), "(11) 91234-5678");
+  assert.equal(coluna("whatsapp_internacional"), "5511912345678");
+  assert.equal(coluna("pagina"), "viver-de-furo");
+  assert.equal(coluna("cliques"), "2");
+  assert.equal(coluna("comprou_em"), "21/09/2026 12:00");
+  assert.equal(coluna("compra_status"), "APPROVED");
+  assert.equal(coluna("compra_valor"), "197,00", "vírgula decimal, para o Excel em pt-BR");
+  assert.equal(coluna("compra_transacao"), "HP1234567890");
+  assert.equal(coluna("sck"), "criativo-07");
+  assert.equal(coluna("sck"), coluna("utm_term"), "o sck é o utm_term");
+  assert.equal(coluna("fbclid"), "");
+});
+
+test("CSV de inscrições: fórmula neutralizada, filtros na consulta e uma página a mais quando enche", async () => {
+  const perigosa = linhaInscricao(1, { nome: '=HYPERLINK("http://mal.com","clique")', email: "+maria@gmail.com", utm_campaign: "-desconto" });
+  const backend = backendInscricoes([perigosa]);
+  const { get } = await logado({ backend });
+
+  const linhas = lerCsv(await (await get("/api/painel/exportar-inscricoes.csv?desde=2026-09-01T03:00:00Z&pagina=viver-de-furo")).text());
+  const coluna = (nome) => linhas[1][linhas[0].indexOf(nome)];
+  assert.equal(coluna("nome"), `'=HYPERLINK("http://mal.com","clique")`);
+  assert.equal(coluna("email"), "'+maria@gmail.com");
+  assert.equal(coluna("utm_campaign"), "'-desconto");
+
+  const consulta = backend.chamadas.find((chamada) => chamada.caminho === "/rest/v1/inscricoes");
+  assert.equal(consulta.params.get("pagina"), "eq.viver-de-furo");
+  assert.equal(consulta.params.get("order"), "criado_em.asc,id.asc", "ordem crescente: quem entra durante a exportação vai para o fim");
+  assert.equal(consulta.params.get("limit"), "1000");
+  assert.deepEqual(consulta.params.getAll("criado_em"), ["gte.2026-09-01T03:00:00.000Z"]);
+
+  // Exatamente 1.000 linhas: pede a página seguinte e para quando ela vem vazia.
+  const todas = Array.from({ length: 1_000 }, (_, i) => linhaInscricao(i + 1));
+  const paginado = createFakeBackend({
+    tabelas: { inscricoes: (params) => ({ linhas: todas.slice(Number(params.get("offset")), Number(params.get("offset")) + 1_000) }) }
+  });
+  const segundo = await logado({ backend: paginado });
+  const completo = lerCsv(await (await segundo.get("/api/painel/exportar-inscricoes.csv")).text());
+  assert.equal(completo.length, 1_001);
+  assert.equal(paginado.chamadas.filter((chamada) => chamada.caminho === "/rest/v1/inscricoes").length, 2);
+});
+
+test("CSV de inscrições: sem ninguém sai só o cabeçalho; link clicado sem sessão volta ao login", async () => {
+  const vazio = await logado({ backend: backendInscricoes([]) });
+  const linhas = lerCsv(await (await vazio.get("/api/painel/exportar-inscricoes.csv")).text());
+  assert.equal(linhas.length, 1);
+  assert.equal(linhas[0][0], "data");
+
+  const { server } = painelApp();
+  const appUrl = await listen(server);
+  const clique = await fetch(`${appUrl}/api/painel/exportar-inscricoes.csv?pagina=viver-de-furo`, {
+    redirect: "manual",
+    headers: { Accept: "text/html,application/xhtml+xml,*/*;q=0.8" }
+  });
+  assert.equal(clique.status, 302);
+  assert.equal(clique.headers.get("location"), "/painel");
+
+  // Chamada de API (sem pedir HTML) continua recebendo o 401 em JSON.
+  const api = await fetch(`${appUrl}/api/painel/exportar-inscricoes.csv`);
+  assert.equal(api.status, 401);
+  assert.deepEqual(await api.json(), { ok: false, error: "unauthorized" });
+});
+
+test("CSV de inscrições: se o banco cair no meio, a conexão é cortada", async () => {
+  const todas = Array.from({ length: 1_000 }, (_, i) => linhaInscricao(i + 1));
+  const backend = createFakeBackend({
+    tabelas: { inscricoes: (params) => (params.get("offset") === "0" ? { linhas: todas } : jsonResponse({ message: "caiu" }, 500)) }
+  });
+  const { get } = await logado({ backend });
+  const response = await get("/api/painel/exportar-inscricoes.csv");
+  assert.equal(response.status, 200);
+  await assert.rejects(response.text());
 });

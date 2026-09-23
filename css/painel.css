@@ -2839,3 +2839,252 @@ tr.fora-da-pagina td {
     font-size: 1.45rem;
   }
 }
+
+/* ============================================================================================ */
+/* Aba de inscrições com checkout na Hotmart (/viver-de-furo-inscricao)                          */
+/* ============================================================================================ */
+
+.secao-inscricoes {
+  margin-top: 1.25rem;
+}
+
+.inscricoes,
+.ins-lista {
+  display: grid;
+  gap: 1rem;
+}
+
+.placar.ins-placar {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.ins-placar li {
+  padding: 0.75rem 0.8rem;
+}
+
+.ins-vazio {
+  margin-top: 0;
+}
+
+.ins-vazio h3 {
+  font-size: 1.2rem;
+}
+
+.ins-cartao,
+.ins-compras,
+.ins-pessoas {
+  display: grid;
+  margin-top: 0;
+  gap: 1rem;
+}
+
+.ins-cartao .nota {
+  margin-top: 0;
+}
+
+.ins-cabeca {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem 1rem;
+}
+
+.ins-titulo {
+  min-width: 0;
+}
+
+.ins-titulo h3 {
+  font-size: 1.15rem;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.ins-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 0.35rem;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+  gap: 0.3rem 0.6rem;
+}
+
+.ins-rota {
+  padding: 0.05rem 0.55rem;
+  border-radius: 999px;
+  background: var(--parchment-deep);
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+}
+
+/* A receita fica à direita do título: é o número que o cliente procura primeiro. */
+.ins-receita {
+  display: grid;
+  margin: 0;
+  justify-items: flex-end;
+  text-align: right;
+}
+
+.ins-receita span {
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ins-receita strong {
+  font-size: 1.35rem;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.ins-divisoes {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ins-divisao {
+  min-width: 0;
+}
+
+.ins-divisao h4 {
+  margin-bottom: 0.45rem;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ins-divisao .vazio {
+  padding: 1rem;
+}
+
+.ins-mais-dias {
+  margin-top: 0.5rem;
+}
+
+.ins-divisao th,
+.ins-divisao td {
+  padding: 0.5rem 0.5rem;
+}
+
+.ins-divisao thead th {
+  white-space: normal;
+}
+
+.ins-divisao td.n .taxa-inline {
+  display: block;
+  font-size: 0.78rem;
+}
+
+/* Compra que não casou com inscrição: o aviso e a linha esmaecida dizem o mesmo, de dois jeitos. */
+.ins-aviso {
+  display: flex;
+  align-items: flex-start;
+  margin: 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid color-mix(in srgb, var(--gold) 60%, var(--border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--gold-soft) 45%, var(--parchment-soft));
+  color: var(--ink);
+  font-size: 0.85rem;
+  gap: 0.45rem;
+  line-height: 1.45;
+}
+
+.ins-aviso svg {
+  flex: none;
+  margin-top: 0.15rem;
+  color: #7d6331;
+}
+
+.ins-aviso strong {
+  display: block;
+}
+
+/* O evento fica embaixo da data: cinco colunas não cabem numa tela de 390px. */
+.ins-compras tbody th small {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 400;
+}
+
+.ins-compras td .selo {
+  white-space: normal;
+}
+
+tr.ins-orfa th,
+tr.ins-orfa td {
+  background: color-mix(in srgb, var(--gold-soft) 22%, transparent);
+}
+
+.ins-pessoas-lista {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.ins-pessoa {
+  margin: 0;
+}
+
+.ins-mais {
+  justify-self: center;
+}
+
+@media (min-width: 900px) {
+  .placar.ins-placar {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1080px) {
+  .ins-divisoes {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 719px) {
+  .ins-placar li {
+    padding: 0.65rem 0.6rem;
+  }
+
+  .ins-placar .valor {
+    font-size: 1.45rem;
+  }
+
+  .ins-receita {
+    justify-items: flex-start;
+    text-align: left;
+  }
+
+  /* Origem + dois números numa tela de 390px sem rolagem lateral. */
+  .ins-divisao table,
+  .ins-compras table {
+    font-size: 0.8rem;
+  }
+
+  .ins-divisao th,
+  .ins-divisao td,
+  .ins-compras th,
+  .ins-compras td {
+    padding: 0.45rem 0.3rem;
+  }
+
+  .ins-divisao th:first-child,
+  .ins-divisao td:first-child,
+  .ins-compras th:first-child,
+  .ins-compras td:first-child {
+    padding-left: 0.55rem;
+  }
+
+  .ins-divisao thead th,
+  .ins-compras thead th {
+    font-size: 0.72rem;
+  }
+}

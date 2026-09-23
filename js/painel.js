@@ -25,6 +25,8 @@
   const EV = window.EVPesquisa;
   // As páginas de obrigado (js/obrigado-config.js). Sem ele, só a aba delas avisa do problema.
   const OBR = window.EVObrigado || null;
+  // As páginas de inscrição com checkout na Hotmart (js/checkout-config.js). Mesma regra.
+  const CHK = window.EVCheckout || null;
   const FUSO = "America/Sao_Paulo";
   const LIMITE_LISTA = 50;
   const LIMITE_ABERTAS = 30;
@@ -64,9 +66,18 @@
    * As funções da pesquisa são ligadas mais abaixo, quando existem.
    */
   // `filtrar` = o período da barra mudou (vale para todas as páginas).
+  // O nome e a rota da aba de inscrições vêm do config, nunca escritos à mão: com uma página só,
+  // a aba tem o nome dela ("Viver de Furo — inscrição"); com mais de uma, vira "Inscrições".
+  const PAGINAS_CHECKOUT = CHK ? Array.from(CHK.LISTA) : [];
+  const ABA_INSCRICOES =
+    PAGINAS_CHECKOUT.length === 1
+      ? { nome: PAGINAS_CHECKOUT[0].nome, rota: PAGINAS_CHECKOUT[0].rota }
+      : { nome: "Inscrições", rota: PAGINAS_CHECKOUT.length ? `${PAGINAS_CHECKOUT.length} páginas` : "—" };
+
   const PAGINAS = [
     { id: "pesquisa-icp", nome: "Pesquisa ICP", rota: "/pesquisa-icp", entrar: null, atualizar: null, sair: null, filtrar: null },
-    { id: "obrigado", nome: "Páginas de obrigado", rota: "/obrigado-*", entrar: null, atualizar: null, sair: null, filtrar: null }
+    { id: "obrigado", nome: "Páginas de obrigado", rota: "/obrigado-*", entrar: null, atualizar: null, sair: null, filtrar: null },
+    { id: "inscricoes", nome: ABA_INSCRICOES.nome, rota: ABA_INSCRICOES.rota, entrar: null, atualizar: null, sair: null, filtrar: null }
   ];
   let paginaAtual = PAGINAS[0];
 
@@ -87,6 +98,8 @@
     $$("[data-pagina-conteudo]").forEach((bloco) => {
       bloco.hidden = bloco.dataset.paginaConteudo !== paginaAtual.id;
     });
+    // No celular a faixa rola de lado: a aba aberta precisa estar visível nela.
+    mostrarAbaAtiva(faixa);
   }
 
   function trocarPagina(id) {
@@ -614,7 +627,7 @@
   /* ================================================================== */
 
   // Sequências separadas por bloco: a resposta antiga de um bloco nunca sobrescreve a nova.
-  const seq = { resumo: 0, lista: 0, cruz: 0, abertas: 0, obrigado: 0 };
+  const seq = { resumo: 0, lista: 0, cruz: 0, abertas: 0, obrigado: 0, inscricoes: 0 };
   let emVoo = 0;
 
   function ocupado(delta) {
@@ -764,7 +777,7 @@
   // A barra é de todas as páginas: mostra a hora dos números da página aberta.
   function pintarAtualizado() {
     const alvo = $("[data-atualizado]");
-    const gerado = paginaAtual.id === "obrigado" ? obr.geradoEm : state.geradoEm;
+    const gerado = paginaAtual.id === "obrigado" ? obr.geradoEm : paginaAtual.id === "inscricoes" ? ins.geradoEm : state.geradoEm;
     alvo.textContent = gerado ? `Atualizado às ${hora(gerado)}` : "—";
   }
 
@@ -864,13 +877,15 @@
   }
 
   function ligarFaixasRolaveis() {
-    const faixas = () => $$(".perfis, .segmentado, .abas, .atalhos");
+    const faixas = () => $$(".paginas, .perfis, .segmentado, .abas, .atalhos");
     for (const faixa of faixas()) faixa.addEventListener("scroll", () => sinalizarRolagem(faixa), { passive: true });
     const todas = () => faixas().forEach(sinalizarRolagem);
     window.addEventListener("resize", todas, { passive: true });
     // Também quando a faixa aparece (o painel começa escondido atrás do login) ou muda de tamanho.
     if (typeof ResizeObserver === "function") {
-      const observador = new ResizeObserver((entradas) => entradas.forEach((e) => (e.target.matches(".perfis") ? mostrarAbaAtiva(e.target) : sinalizarRolagem(e.target))));
+      const observador = new ResizeObserver((entradas) =>
+        entradas.forEach((e) => (e.target.matches(".perfis, .paginas") ? mostrarAbaAtiva(e.target) : sinalizarRolagem(e.target)))
+      );
       faixas().forEach((faixa) => observador.observe(faixa));
     }
     todas();
@@ -2565,6 +2580,7 @@
     else if (acao === "cruzamento") carregarCruzamento();
     else if (acao === "abertas") carregarAbertas({ reiniciar: !state.abertas.itens.length });
     else if (acao === "obrigado") carregarObrigado();
+    else if (acao === "inscricoes") carregarInscricoes();
     else if (acao.startsWith("outro:")) carregarOutro(acao.slice(6));
   });
 
@@ -2894,6 +2910,426 @@
   }
 
   /* ================================================================== */
+  /* Inscrições com checkout na Hotmart                                   */
+  /* ================================================================== */
+
+  /*
+   * A aba das páginas de inscrição (js/checkout-config.js). Números de /api/painel/inscricoes
+   * (SQL inscricoes_resumo, no período da barra): inscritos → cliques no checkout → compras, com
+   * receita, origem, campanha, termo (o `sck`, que diz qual criativo vendeu), dia, as compras
+   * recentes vindas do webhook da Hotmart e a lista de inscritos com WhatsApp.
+   */
+  const ins = { resumo: null, itens: [], total: 0, erro: 0, pronto: false, carregando: false, geradoEm: "", diasTodos: new Set() };
+  const LIMITE_INSCRITOS = 50;
+
+  const MOEDA = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
+
+  function dinheiro(valor) {
+    return MOEDA.format(num(valor));
+  }
+
+  function limparInscricoes() {
+    ins.resumo = null;
+    ins.itens = [];
+    ins.total = 0;
+    ins.erro = 0;
+    ins.pronto = false;
+    ins.carregando = false;
+    ins.geradoEm = "";
+    ins.diasTodos.clear();
+    seq.inscricoes++;
+  }
+
+  function parametrosInscricoes() {
+    const params = new URLSearchParams();
+    const { desde, ate } = intervalo();
+    if (desde) params.set("desde", desde);
+    if (ate) params.set("ate", ate);
+    return params;
+  }
+
+  /** O CSV de inscrições sai com o MESMO período da tela. */
+  function atualizarCsvInscricoes() {
+    const alvo = $("[data-inscricoes-csv]");
+    if (!alvo) return;
+    const params = parametrosInscricoes();
+    alvo.href = `/api/painel/exportar-inscricoes.csv${params.toString() ? `?${params}` : ""}`;
+  }
+
+  async function carregarInscricoes({ mais = false } = {}) {
+    const alvo = $("[data-inscricoes]");
+    const secao = $("[data-inscricoes-secao]");
+    const status = $("[data-inscricoes-status]");
+    if (!CHK) {
+      redesenhar(
+        alvo,
+        `<div class="erro" role="alert"><strong>Não foi possível carregar a configuração das páginas de inscrição.</strong><span>Recarregue a página. Se continuar, confira se o arquivo js/checkout-config.js foi publicado.</span></div>`
+      );
+      return;
+    }
+
+    const minha = ++seq.inscricoes;
+    const params = parametrosInscricoes();
+    params.set("limite", String(LIMITE_INSCRITOS));
+    params.set("offset", String(mais ? ins.itens.length : 0));
+    atualizarCsvInscricoes();
+
+    secao.setAttribute("aria-busy", "true");
+    ins.carregando = true;
+    // Esqueleto só na primeira vez; nas recargas o desenho anterior fica esmaecido.
+    if (!ins.pronto) redesenhar(alvo, `<div class="ins-lista">${PAGINAS_CHECKOUT.map(() => `<div class="cartao">${esqueleto(7)}</div>`).join("")}</div>`);
+    status.textContent = "Carregando...";
+    delete status.dataset.estado;
+    ocupado(1);
+    const resposta = await api(`/api/painel/inscricoes?${params}`);
+    ocupado(-1);
+    if (minha !== seq.inscricoes) return;
+    secao.removeAttribute("aria-busy");
+    ins.carregando = false;
+
+    if (resposta.status === 401) {
+      sessaoExpirou();
+      return;
+    }
+    if (!resposta.ok || !resposta.body.resumo || !Array.isArray(resposta.body.resumo.paginas)) {
+      // Sem dado bom, os números de outro período não podem ficar na tela.
+      ins.resumo = null;
+      ins.itens = [];
+      ins.total = 0;
+      ins.erro = resposta.status || 0;
+      ins.pronto = false;
+      status.dataset.estado = "erro";
+      status.textContent = mensagemErro(ins.erro);
+      pintarInscricoes();
+      return;
+    }
+
+    const itens = Array.isArray(resposta.body.itens) ? resposta.body.itens : [];
+    ins.resumo = resposta.body.resumo;
+    ins.itens = mais ? ins.itens.concat(itens) : itens;
+    ins.total = num(resposta.body.total);
+    ins.erro = 0;
+    ins.pronto = true;
+    ins.geradoEm = resposta.body.gerado_em || new Date().toISOString();
+    status.textContent = "";
+    pintarInscricoes();
+  }
+
+  /** Uma linha do resumo por página do config (página sem nenhuma inscrição vira zeros). */
+  function linhasDasPaginas() {
+    const porId = new Map(
+      (ins.resumo && Array.isArray(ins.resumo.paginas) ? ins.resumo.paginas : [])
+        .filter((linha) => linha && typeof linha === "object")
+        .map((linha) => [String(linha.pagina), linha])
+    );
+    return PAGINAS_CHECKOUT.map((pagina) => ({ pagina, linha: porId.get(pagina.id) || {} }));
+  }
+
+  function funilInscricaoHtml(linha) {
+    const inscritos = num(linha.inscritos);
+    const cliques = num(linha.cliques);
+    const compras = num(linha.compras);
+    const etapas = [
+      {
+        chave: "inscritos",
+        rotulo: "Inscritos",
+        sub: "base: quem deixou nome, WhatsApp e e-mail no formulário",
+        valor: inscritos
+      },
+      {
+        chave: "cliques",
+        rotulo: "Cliques no checkout",
+        sub: `${escapeHtml(plural(cliques, "abertura", "aberturas"))} da página de pagamento · quem envia o formulário de novo soma aqui, sem virar inscrito novo`,
+        valor: cliques
+      },
+      {
+        chave: "compras",
+        rotulo: "Compras",
+        sub: `${taxaComBase(compras, inscritos, "dos {n} inscritos", "sem inscrito no período")} · pelo aviso da Hotmart`,
+        valor: compras,
+        fim: true
+      }
+    ];
+    const topo = Math.max(1, ...etapas.map((etapa) => etapa.valor));
+    const itens = etapas
+      .map(
+        (etapa) => `<li class="linha-barra${etapa.fim ? " fim" : ""}${etapa.valor ? "" : " zero"}" data-etapa="${etapa.chave}">
+          <span class="rotulo">${escapeHtml(etapa.rotulo)}<small>${etapa.sub}</small></span>
+          <span class="trilho" role="img" aria-label="${escapeHtml(`${etapa.rotulo}: ${n(etapa.valor)}`)}"><span style="width:${((etapa.valor / topo) * 100).toFixed(2)}%"></span></span>
+          <span class="num"><strong>${n(etapa.valor)}</strong></span>
+        </li>`
+      )
+      .join("");
+    return `<ol class="funil ins-funil">${itens}</ol><p class="nota">Um inscrito é uma pessoa por página (WhatsApp e e-mail): voltar e enviar de novo soma clique, não inscrito. A compra é casada pelo e-mail ou pelos últimos 8 dígitos do telefone que a pessoa digitou na Hotmart.</p>`;
+  }
+
+  function tabelaDivisaoHtml(titulo, chave, itens, legenda) {
+    const linhas = (Array.isArray(itens) ? itens : []).map((item) => ({
+      rotulo: String(item[chave] == null || item[chave] === "" ? "(sem utm)" : item[chave]),
+      inscritos: num(item.inscritos),
+      compras: num(item.compras)
+    }));
+    const corpo = linhas.length
+      ? `<div class="tabela-rolagem"><table>
+          <caption>${escapeHtml(legenda)}</caption>
+          <thead><tr><th scope="col">${escapeHtml(titulo)}</th><th scope="col" class="n">Inscritos</th><th scope="col" class="n">Compras</th></tr></thead>
+          <tbody>${linhas
+            .map(
+              (item) => `<tr><th scope="row">${escapeHtml(item.rotulo)}</th><td class="n">${n(item.inscritos)}</td><td class="n">${n(item.compras)}${
+                item.inscritos ? `<span class="taxa-inline"> · ${pct(item.compras, item.inscritos)}</span>` : ""
+              }</td></tr>`
+            )
+            .join("")}</tbody>
+        </table></div>`
+      : vazioHtml("Sem inscrição neste período.", "");
+    return corpo;
+  }
+
+  function tabelaDiasHtml(pagina, linha) {
+    // Mais recente primeiro: quem abre o painel quer ver hoje e ontem sem rolar.
+    const dias = (Array.isArray(linha.por_dia) ? linha.por_dia : [])
+      .map((item) => ({ dia: String(item.dia).slice(0, 10), inscritos: num(item.inscritos), compras: num(item.compras) }))
+      .filter((item) => ymdValido(item.dia))
+      .sort((a, b) => b.dia.localeCompare(a.dia));
+    if (!dias.length) return vazioHtml("Sem inscrição neste período.", "");
+    const todos = ins.diasTodos.has(pagina.id);
+    const mostrados = todos ? dias : dias.slice(0, DIAS_VISIVEIS);
+    const botao =
+      dias.length > DIAS_VISIVEIS
+        ? `<button type="button" class="botao-texto ins-mais-dias" data-ins-dias="${escapeHtml(pagina.id)}" data-foco="ins-dias-${escapeHtml(pagina.id)}" aria-expanded="${todos}">${
+            todos ? `Mostrar só os ${DIAS_VISIVEIS} mais recentes` : `Ver todos os ${n(dias.length)} dias`
+          }</button>`
+        : "";
+    return `<div class="tabela-rolagem"><table>
+      <caption>Horário de Brasília${dias.length > mostrados.length ? ` · os ${DIAS_VISIVEIS} dias mais recentes de ${n(dias.length)}` : ""}. Inscritos pelo dia do cadastro, compras pelo dia da compra.</caption>
+      <thead><tr><th scope="col">Dia</th><th scope="col" class="n">Inscritos</th><th scope="col" class="n">Compras</th></tr></thead>
+      <tbody>${mostrados
+        .map(
+          (item) => `<tr><th scope="row">${escapeHtml(`${dataCurta(item.dia)} · ${diaSemana(item.dia)}`)}</th><td class="n">${n(item.inscritos)}</td><td class="n">${n(
+            item.compras
+          )}</td></tr>`
+        )
+        .join("")}</tbody>
+    </table></div>${botao}`;
+  }
+
+  function cartaoInscricaoHtml(pagina, linha) {
+    const vazia = !num(linha.inscritos) && !num(linha.cliques);
+    const corpo = vazia
+      ? vazioHtml(
+          state.periodo === "tudo" ? "Ninguém se inscreveu nesta página ainda." : "Ninguém se inscreveu nesta página neste período.",
+          "Assim que a primeira pessoa enviar o formulário, os números aparecem aqui."
+        )
+      : `${funilInscricaoHtml(linha)}<div class="ins-divisoes">
+          <div class="ins-divisao" data-divisao="origem"><h4>Por origem</h4>${tabelaDivisaoHtml("Origem", "utm_source", linha.por_origem, "utm_source do anúncio. “(sem utm)” = chegou sem parâmetro de campanha.")}</div>
+          <div class="ins-divisao" data-divisao="campanha"><h4>Por campanha</h4>${tabelaDivisaoHtml("Campanha", "utm_campaign", linha.por_campanha, "utm_campaign do anúncio.")}</div>
+          <div class="ins-divisao" data-divisao="termo"><h4>Por termo (sck)</h4>${tabelaDivisaoHtml(
+            "Termo",
+            "utm_term",
+            linha.por_termo,
+            "O utm_term vai para a Hotmart como sck: é este valor que aparece no relatório de vendas de lá."
+          )}</div>
+          <div class="ins-divisao" data-divisao="dia"><h4>Por dia</h4>${tabelaDiasHtml(pagina, linha)}</div>
+        </div>`;
+    return `<article class="cartao ins-cartao" data-inscricao-pagina="${escapeHtml(pagina.id)}" aria-labelledby="ins-${escapeHtml(pagina.id)}">
+      <header class="ins-cabeca">
+        <div class="ins-titulo">
+          <h3 id="ins-${escapeHtml(pagina.id)}">${escapeHtml(pagina.nome)}</h3>
+          <p class="ins-meta"><span class="ins-rota">${escapeHtml(pagina.rota)}</span><span class="ins-produto">${escapeHtml(pagina.produto || "")}</span></p>
+        </div>
+        <p class="ins-receita"><span>Receita</span><strong data-receita>${escapeHtml(dinheiro(linha.receita))}</strong></p>
+      </header>
+      ${corpo}
+    </article>`;
+  }
+
+  const EVENTOS_COMPRA = {
+    PURCHASE_APPROVED: "Compra aprovada",
+    PURCHASE_COMPLETE: "Compra concluída",
+    PURCHASE_CANCELED: "Cancelada",
+    PURCHASE_REFUNDED: "Reembolsada",
+    PURCHASE_CHARGEBACK: "Chargeback",
+    PURCHASE_PROTEST: "Em disputa",
+    PURCHASE_BILLET_PRINTED: "Boleto gerado",
+    PURCHASE_OUT_OF_SHOPPING_CART: "Abandonou o checkout",
+    PURCHASE_DELAYED: "Pagamento atrasado",
+    PURCHASE_EXPIRED: "Pagamento expirado"
+  };
+
+  function rotuloEvento(evento) {
+    const chave = String(evento || "");
+    return Object.prototype.hasOwnProperty.call(EVENTOS_COMPRA, chave) ? EVENTOS_COMPRA[chave] : chave || "—";
+  }
+
+  function comprasRecentesHtml() {
+    const compras = Array.isArray(ins.resumo?.compras_recentes) ? ins.resumo.compras_recentes : [];
+    const semInscricao = num(ins.resumo?.compras_sem_inscricao);
+    const aviso = semInscricao
+      ? `<p class="ins-aviso" data-ins-aviso><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24"><path d="M12 8v5m0 3.5v.5M10.3 3.9 2.6 17.4A2 2 0 0 0 4.3 20.4h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span><strong>${escapeHtml(
+          plural(semInscricao, "compra aprovada não casou", "compras aprovadas não casaram")
+        )} com nenhuma inscrição.</strong> Ou a pessoa comprou por outro link, ou digitou na Hotmart um e-mail e um telefone diferentes dos do formulário. O aviso inteiro está guardado no banco.</span></p>`
+      : "";
+    const corpo = compras.length
+      ? `<div class="tabela-rolagem"><table>
+          <caption>Os 20 avisos mais recentes da Hotmart no período.</caption>
+          <thead><tr><th scope="col">Quando</th><th scope="col">Quem</th><th scope="col" class="n">Valor</th><th scope="col">Casou</th></tr></thead>
+          <tbody>${compras
+            .map((compra) => {
+              const casou = compra.casou === true;
+              // O evento vai embaixo da data: numa tela de 390px cinco colunas não cabem, e a
+              // informação importante (quando, quem, quanto, casou) continua inteira.
+              return `<tr${casou ? "" : ' class="ins-orfa"'}>
+                <th scope="row">${escapeHtml(dataHora(compra.recebido_em))}<small>${escapeHtml(rotuloEvento(compra.evento))}</small></th>
+                <td>${escapeHtml(compra.comprador_nome || compra.comprador_email || "—")}</td>
+                <td class="n">${compra.valor == null ? "—" : escapeHtml(dinheiro(compra.valor))}</td>
+                <td>${
+                  casou
+                    ? '<span class="selo ok">com inscrição</span>'
+                    : '<span class="selo meio" title="Nenhuma inscrição com este e-mail nem com estes últimos 8 dígitos de telefone">sem inscrição</span>'
+                }</td>
+              </tr>`;
+            })
+            .join("")}</tbody>
+        </table></div>`
+      : vazioHtml(
+          state.periodo === "tudo" ? "Nenhum aviso de venda recebido ainda." : "Nenhum aviso de venda neste período.",
+          "Os avisos chegam da Hotmart no endereço /api/hotmart/venda assim que alguém paga."
+        );
+    return `<article class="cartao ins-compras" aria-labelledby="ins-compras-titulo">
+      <div class="cartao-cabeca">
+        <h3 id="ins-compras-titulo">Compras recentes</h3>
+        <p class="cartao-sub">Cada aviso da Hotmart (aprovada, boleto, reembolso). Só compra aprovada marca o inscrito como comprador.</p>
+      </div>
+      ${aviso}${corpo}
+    </article>`;
+  }
+
+  function inscritoHtml(item) {
+    const link = whatsappLink(item.whatsapp_digits);
+    const telefone = item.whatsapp
+      ? link
+        ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>${escapeHtml(
+            item.whatsapp
+          )}<span class="visualmente-oculto"> (abre o WhatsApp)</span></a>`
+        : `<span>${escapeHtml(item.whatsapp)}</span>`
+      : "<span>sem WhatsApp</span>";
+    const comprou = Boolean(item.comprou_em);
+    const selo = comprou
+      ? `<span class="selo ok"><svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>${escapeHtml(
+          `Comprou · ${dataHora(item.comprou_em)}`
+        )}</span>${item.compra_valor == null ? "" : `<span class="selo rep">${escapeHtml(dinheiro(item.compra_valor))}</span>`}`
+      : `<span class="selo meio"${item.compra_status ? ` title="${escapeHtml(`Último aviso da Hotmart: ${item.compra_status}`)}"` : ""}>Não comprou${
+          item.compra_status ? ` · ${escapeHtml(String(item.compra_status).toLowerCase())}` : ""
+        }</span>`;
+    const cliques = num(item.cliques);
+    return `<article class="pessoa ins-pessoa" data-inscrito="${escapeHtml(item.id)}">
+      <div class="pessoa-cabeca">
+        <div class="pessoa-quem">
+          <span class="pessoa-nome">${escapeHtml(item.nome || "Sem nome")}</span>
+          <span class="pessoa-meta">${escapeHtml(`${dataHora(item.criado_em)} · ${plural(cliques, "clique no checkout", "cliques no checkout")}`)}</span>
+        </div>
+        <div class="pessoa-contato">${telefone}<span>${escapeHtml(item.email || "sem e-mail")}</span></div>
+        <div class="pessoa-selos">${selo}</div>
+        <div class="pessoa-acoes">
+          <span class="pessoa-origem">${escapeHtml(origemTexto(item))}${item.utm_term ? ` · ${escapeHtml(item.utm_term)}` : ""}</span>
+        </div>
+      </div>
+    </article>`;
+  }
+
+  function listaInscritosHtml() {
+    const corpo = ins.itens.length
+      ? `${ins.itens.map(inscritoHtml).join("")}${
+          ins.itens.length < ins.total
+            ? `<button type="button" class="botao botao-leve ins-mais" data-ins-mais data-foco="ins-mais"${ins.carregando ? " disabled" : ""}>${
+                ins.carregando ? "Carregando..." : `Carregar mais ${n(Math.min(LIMITE_INSCRITOS, ins.total - ins.itens.length))}`
+              }</button>`
+            : ""
+        }`
+      : vazioHtml(
+          state.periodo === "tudo" ? "Nenhuma inscrição ainda." : "Nenhuma inscrição neste período.",
+          "Cada pessoa que envia o formulário aparece aqui, com o WhatsApp pronto para conversar."
+        );
+    return `<article class="cartao ins-pessoas" aria-labelledby="ins-pessoas-titulo">
+      <div class="cartao-cabeca">
+        <h3 id="ins-pessoas-titulo">Inscritos</h3>
+        <p class="cartao-sub" data-ins-contador>Mostrando <strong>${n(ins.itens.length)}</strong> de <strong>${n(ins.total)}</strong> ${
+          ins.total === 1 ? "pessoa" : "pessoas"
+        }, das mais recentes para as mais antigas.</p>
+      </div>
+      <div class="ins-pessoas-lista">${corpo}</div>
+    </article>`;
+  }
+
+  function pintarInscricoes() {
+    const alvo = $("[data-inscricoes]");
+    $("[data-inscricoes-periodo]").textContent =
+      ins.geradoEm && ins.resumo ? `${rotuloPeriodo()} · atualizado às ${hora(ins.geradoEm)}` : rotuloPeriodo();
+    pintarAtualizado();
+    if (!ins.resumo) {
+      redesenhar(alvo, erroHtml(ins.erro, "inscricoes", "repetir-inscricoes"));
+      return;
+    }
+
+    const linhas = linhasDasPaginas();
+    const total = linhas.reduce(
+      (soma, item) => ({
+        inscritos: soma.inscritos + num(item.linha.inscritos),
+        cliques: soma.cliques + num(item.linha.cliques),
+        compras: soma.compras + num(item.linha.compras),
+        receita: soma.receita + num(item.linha.receita)
+      }),
+      { inscritos: 0, cliques: 0, compras: 0, receita: 0 }
+    );
+    const topo = total.inscritos
+      ? `<ul class="placar ins-placar" aria-label="Todas as páginas de inscrição somadas">
+          <li><span class="rotulo">Inscritos</span><span class="valor">${n(total.inscritos)}</span><span class="detalhe">deixaram o contato</span></li>
+          <li><span class="rotulo">Cliques no checkout</span><span class="valor">${n(total.cliques)}</span><span class="detalhe">${escapeHtml(
+            `${(total.cliques / total.inscritos).toFixed(1).replace(".", ",")} por inscrito`
+          )}</span></li>
+          <li class="destaque"><span class="rotulo">Compras</span><span class="valor">${n(total.compras)}</span><span class="detalhe"><strong>${pct(
+            total.compras,
+            total.inscritos
+          )}</strong> dos ${n(total.inscritos)} inscritos</span></li>
+          <li><span class="rotulo">Receita</span><span class="valor">${escapeHtml(dinheiro(total.receita))}</span><span class="detalhe">${escapeHtml(
+            total.compras ? `${dinheiro(total.receita / total.compras)} por compra` : "nenhuma compra ainda"
+          )}</span></li>
+        </ul>`
+      : `<div class="vazio-geral ins-vazio" data-inscricoes-vazio>
+          <img src="/img/ev-icone-color.png" alt="" width="64" height="64">
+          <h3>${state.periodo === "tudo" ? "Ninguém se inscreveu ainda" : "Ninguém se inscreveu neste período"}</h3>
+          <p>${
+            state.periodo === "tudo"
+              ? "Quem enviar o formulário da página de inscrição aparece aqui, com o clique no checkout e a compra."
+              : "Tente um período maior, ou “Tudo”."
+          }</p>
+        </div>`;
+
+    redesenhar(
+      alvo,
+      `${topo}<div class="ins-lista">${linhas.map((item) => cartaoInscricaoHtml(item.pagina, item.linha)).join("")}</div>${comprasRecentesHtml()}${listaInscritosHtml()}`
+    );
+  }
+
+  $("[data-inscricoes]").addEventListener("click", (evento) => {
+    const alvo = evento.target instanceof Element ? evento.target : null;
+    if (!alvo) return;
+    const dias = alvo.closest("[data-ins-dias]");
+    if (dias && ins.resumo) {
+      const id = dias.dataset.insDias;
+      if (ins.diasTodos.has(id)) ins.diasTodos.delete(id);
+      else ins.diasTodos.add(id);
+      state.focoDepois = `ins-dias-${id}`;
+      pintarInscricoes();
+      return;
+    }
+    if (alvo.closest("[data-ins-mais]") && !ins.carregando) {
+      state.focoDepois = "ins-mais";
+      carregarInscricoes({ mais: true });
+    }
+  });
+
+  /* ================================================================== */
   /* Registro da pesquisa na faixa de páginas                             */
   /* ================================================================== */
 
@@ -2909,6 +3345,13 @@
     atualizar: () => carregarObrigado(),
     sair: () => limparObrigado(),
     filtrar: () => carregarObrigado()
+  });
+
+  Object.assign(PAGINAS[2], {
+    entrar: () => carregarInscricoes(),
+    atualizar: () => carregarInscricoes(),
+    sair: () => limparInscricoes(),
+    filtrar: () => carregarInscricoes()
   });
 
   $("[data-paginas]").addEventListener("click", (evento) => {

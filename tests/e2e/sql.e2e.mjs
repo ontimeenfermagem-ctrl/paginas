@@ -1829,3 +1829,615 @@ describe("desempenho", () => {
     }
   });
 });
+
+/* ============================================================================================ */
+/* 6. Inscrições com checkout na Hotmart e o aviso de venda                                     */
+/* ============================================================================================ */
+
+const PAGINA = "viver-de-furo";
+
+async function limparInscricoes() {
+  await stack.sql("truncate table public.inscricoes, public.compras restart identity");
+}
+
+/** O `p` de inscricao_salvar, como o servidor monta. */
+function inscricao(sobrescrever = {}) {
+  return {
+    id: randomUUID(),
+    pagina: PAGINA,
+    nome: "Maria da Silva",
+    whatsapp: "(11) 91234-5678",
+    whatsapp_digits: "11912345678",
+    email: "maria@gmail.com",
+    checkout_url: "https://pay.hotmart.com/Y74893363S?off=7j2nqptq&checkoutMode=10&utm_source=facebook&sck=criativo-07",
+    visitante_id: randomUUID(),
+    utm_source: "facebook",
+    utm_medium: "cpc",
+    utm_campaign: "viver-de-furo-set",
+    utm_content: "anuncio-b",
+    utm_term: "criativo-07",
+    fbclid: null,
+    gclid: null,
+    page_url: "https://lp.exemplo/viver-de-furo-inscricao?utm_source=facebook",
+    referrer: "https://www.facebook.com/",
+    dispositivo: "mobile",
+    ...sobrescrever
+  };
+}
+
+/** O `p` de hotmart_registrar_compra, como o servidor monta a partir do payload da Hotmart. */
+function compra(sobrescrever = {}) {
+  return {
+    evento: "PURCHASE_APPROVED",
+    hotmart_id: "aviso-1",
+    transacao: "HP1234567890",
+    status: "APPROVED",
+    produto_id: "Y74893363S",
+    produto_nome: "Viver de Furo de Orelha",
+    oferta: "7j2nqptq",
+    valor: 197,
+    moeda: "BRL",
+    comprador_nome: "Maria da Silva",
+    comprador_email: "maria@gmail.com",
+    comprador_telefone: "5511912345678",
+    comprador_digits: "11912345678",
+    sck: "criativo-07",
+    src: "facebook",
+    evento_em: "2026-09-21T14:00:00-03:00",
+    pedido_em: "2026-09-21T13:58:00-03:00",
+    aprovado_em: "2026-09-21T14:00:00-03:00",
+    payload: { event: "PURCHASE_APPROVED", data: { purchase: { transaction: "HP1234567890" } } },
+    ...sobrescrever
+  };
+}
+
+async function linhaInscricao(id) {
+  const r = await chamar("GET", `inscricoes?id=eq.${id}&select=*`);
+  assert.equal(r.status, 200);
+  return r.json[0];
+}
+
+describe("inscrições: instalação e segurança", () => {
+  test("tabelas, índices, RLS sem política e funções invoker; o arquivo roda de novo sem perder inscrição", async () => {
+    await limparInscricoes();
+    const salva = await rpcOk("inscricao_salvar", { p: inscricao() });
+    assert.equal(salva.ok, true);
+    assert.equal(salva.novo, true);
+
+    await stack.aplicarSql();
+    await stack.aplicarSql();
+
+    const [contagem] = await stack.sql("select count(*) as n from public.inscricoes");
+    assert.equal(contagem.n, "1", "reaplicar o supabase.sql não apaga inscrição");
+
+    const [objetos] = await stack.sql(`
+      select
+        (select count(*) from pg_proc where pronamespace = 'public'::regnamespace
+           and proname in ('inscricao_salvar', 'hotmart_registrar_compra', 'inscricoes_resumo')) as funcoes,
+        (select count(*) from pg_indexes where schemaname = 'public' and tablename = 'inscricoes') as indices_inscricoes,
+        (select count(*) from pg_indexes where schemaname = 'public' and tablename = 'compras') as indices_compras,
+        (select relrowsecurity::text from pg_class where oid = 'public.inscricoes'::regclass) as rls_inscricoes,
+        (select relrowsecurity::text from pg_class where oid = 'public.compras'::regclass) as rls_compras,
+        (select count(*) from pg_policies where tablename in ('inscricoes', 'compras')) as politicas
+    `);
+    // inscricoes: pk + chave única + (pagina, criado_em) + whatsapp_digits + email = 5
+    // compras: pk + (transacao, evento) + recebido_em + email + digits = 5
+    assert.deepEqual(objetos, {
+      funcoes: "3",
+      indices_inscricoes: "5",
+      indices_compras: "5",
+      rls_inscricoes: "true",
+      rls_compras: "true",
+      politicas: "0"
+    });
+
+    const funcoes = await stack.sql(`
+      select proname, prosecdef::text as definer, array_to_string(proconfig, ',') as config, pg_get_function_identity_arguments(oid) as args
+      from pg_proc where pronamespace = 'public'::regnamespace
+        and proname in ('inscricao_salvar', 'hotmart_registrar_compra', 'inscricoes_resumo') order by proname
+    `);
+    assert.deepEqual(funcoes, [
+      { proname: "hotmart_registrar_compra", definer: "false", config: "search_path=public", args: "p jsonb" },
+      { proname: "inscricao_salvar", definer: "false", config: "search_path=public", args: "p jsonb" },
+      {
+        proname: "inscricoes_resumo",
+        definer: "false",
+        config: "search_path=public",
+        args: "p_desde timestamp with time zone, p_ate timestamp with time zone, p_pagina text"
+      }
+    ]);
+
+    // A rota nova já responde pelo PostgREST depois de reaplicado (notify pgrst).
+    const resumo = await rpcOk("inscricoes_resumo", { p_pagina: PAGINA });
+    assert.equal(resumo.paginas[0].pagina, PAGINA);
+    assert.equal(resumo.paginas[0].inscritos, 1);
+  });
+
+  test("whatsapp_internacional é coluna gerada ('55' + dígitos)", async () => {
+    await limparInscricoes();
+    const salva = await rpcOk("inscricao_salvar", { p: inscricao({ whatsapp_digits: "21998765432" }) });
+    const linha = await linhaInscricao(salva.id);
+    assert.equal(linha.whatsapp_internacional, "5521998765432");
+    // Coluna gerada de verdade: gravar nela é erro.
+    const r = await chamar("PATCH", `inscricoes?id=eq.${salva.id}`, { corpo: { whatsapp_internacional: "5500000000000" } });
+    assert.equal(r.status, 400);
+  });
+
+  for (const papel of ["anon", "authenticated"]) {
+    test(`${papel}: não lê, não escreve e não executa nada das inscrições nem das compras`, async () => {
+      await limparInscricoes();
+      const salva = await rpcOk("inscricao_salvar", { p: inscricao() });
+      await rpcOk("hotmart_registrar_compra", { p: compra() });
+      const chave = papel === "anon" ? stack.anonKey : stack.authenticatedKey;
+
+      const corpos = {
+        inscricoes: { id: randomUUID(), pagina: PAGINA, whatsapp_digits: "11999999999", email: "invasor@gmail.com" },
+        compras: { evento: "PURCHASE_APPROVED", payload: {} }
+      };
+      for (const tabela of ["inscricoes", "compras"]) {
+        const leitura = await chamar("GET", `${tabela}?select=*`, { chave });
+        assert.ok([401, 403].includes(leitura.status), `${papel} GET ${tabela} -> ${leitura.status}`);
+        assert.ok(!Array.isArray(leitura.json));
+        const escrita = await chamar("POST", tabela, { chave, corpo: corpos[tabela] });
+        assert.ok([401, 403].includes(escrita.status), `${papel} POST ${tabela} -> ${escrita.status}`);
+        const filtro = tabela === "inscricoes" ? "id=neq.00000000-0000-4000-8000-000000000000" : "id=neq.0";
+        const apagar = await chamar("DELETE", `${tabela}?${filtro}`, { chave });
+        assert.ok([401, 403].includes(apagar.status), `${papel} DELETE ${tabela} -> ${apagar.status}`);
+      }
+
+      for (const [funcao, corpo] of [
+        ["inscricao_salvar", { p: inscricao() }],
+        ["hotmart_registrar_compra", { p: compra({ transacao: "HP-INVASOR" }) }],
+        ["inscricoes_resumo", { p_pagina: PAGINA }]
+      ]) {
+        const r = await rpc(funcao, corpo, { chave });
+        assert.ok([401, 403, 404].includes(r.status), `${papel} rpc/${funcao} -> ${r.status} ${JSON.stringify(r.json)}`);
+      }
+
+      const [contagem] = await stack.sql("select (select count(*) from public.inscricoes) || '/' || (select count(*) from public.compras) as n");
+      assert.equal(contagem.n, "1/1", "nada foi criado nem apagado pela chave pública");
+      assert.ok(salva.id);
+    });
+  }
+
+  test("privilégios no catálogo: só service_role (tabelas, sequência e as três funções)", async () => {
+    const [p] = await stack.sql(`
+      select
+        bool_or(has_table_privilege(papel, 'public.inscricoes', 'select,insert,update,delete,truncate,references,trigger'))::text as inscricoes,
+        bool_or(has_table_privilege(papel, 'public.compras', 'select,insert,update,delete,truncate,references,trigger'))::text as compras,
+        bool_or(has_sequence_privilege(papel, 'public.compras_id_seq', 'usage,select,update'))::text as sequencia,
+        bool_or(has_function_privilege(papel, 'public.inscricao_salvar(jsonb)', 'execute')
+             or has_function_privilege(papel, 'public.hotmart_registrar_compra(jsonb)', 'execute')
+             or has_function_privilege(papel, 'public.inscricoes_resumo(timestamptz,timestamptz,text)', 'execute'))::text as funcoes
+      from unnest(array['anon', 'authenticated', 'public']) as papel
+    `);
+    assert.deepEqual(p, { inscricoes: "false", compras: "false", sequencia: "false", funcoes: "false" });
+
+    const [s] = await stack.sql(`
+      select has_table_privilege('service_role', 'public.inscricoes', 'select,insert,update')::text as inscricoes,
+             has_table_privilege('service_role', 'public.compras', 'select,insert,update')::text as compras,
+             has_function_privilege('service_role', 'public.inscricao_salvar(jsonb)', 'execute')::text as salvar,
+             has_function_privilege('service_role', 'public.hotmart_registrar_compra(jsonb)', 'execute')::text as registrar,
+             has_function_privilege('service_role', 'public.inscricoes_resumo(timestamptz,timestamptz,text)', 'execute')::text as resumo
+    `);
+    assert.deepEqual(s, { inscricoes: "true", compras: "true", salvar: "true", registrar: "true", resumo: "true" });
+  });
+});
+
+describe("inscricao_salvar", () => {
+  test("a primeira vez cria a linha com cliques = 1 e o rastreio inteiro", async () => {
+    await limparInscricoes();
+    const p = inscricao();
+    const salva = await rpcOk("inscricao_salvar", { p });
+    assert.equal(salva.ok, true);
+    assert.equal(salva.novo, true);
+    assert.equal(salva.id, p.id, "o id do navegador é usado quando está livre");
+
+    const linha = await linhaInscricao(salva.id);
+    assert.equal(linha.pagina, PAGINA);
+    assert.equal(linha.nome, "Maria da Silva");
+    assert.equal(linha.whatsapp_digits, "11912345678");
+    assert.equal(linha.email, "maria@gmail.com");
+    assert.equal(linha.cliques, 1);
+    assert.equal(linha.checkout_url, p.checkout_url);
+    assert.equal(linha.utm_source, "facebook");
+    assert.equal(linha.utm_term, "criativo-07");
+    assert.equal(linha.dispositivo, "mobile");
+    assert.ok(linha.clicou_em, "clicou_em marcado já no primeiro envio");
+    assert.equal(linha.comprou_em, null);
+  });
+
+  test("reenviar o formulário soma cliques na MESMA inscrição e mantém o rastreio de primeiro toque", async () => {
+    await limparInscricoes();
+    const primeira = await rpcOk("inscricao_salvar", { p: inscricao() });
+
+    // A mesma pessoa volta pelo link direto (sem UTM nenhuma) e envia de novo, duas vezes.
+    const segunda = await rpcOk("inscricao_salvar", {
+      p: inscricao({
+        id: randomUUID(),
+        nome: "MARIA DA SILVA",
+        utm_source: null,
+        utm_medium: null,
+        utm_campaign: null,
+        utm_content: null,
+        utm_term: null,
+        page_url: "https://lp.exemplo/viver-de-furo-inscricao",
+        referrer: null,
+        checkout_url: "https://pay.hotmart.com/Y74893363S?off=7j2nqptq&checkoutMode=10"
+      })
+    });
+    await rpcOk("inscricao_salvar", { p: inscricao({ id: randomUUID() }) });
+
+    assert.equal(segunda.novo, false);
+    assert.equal(segunda.id, primeira.id, "é a mesma linha");
+
+    const [contagem] = await stack.sql("select count(*) as n from public.inscricoes");
+    assert.equal(contagem.n, "1");
+
+    const linha = await linhaInscricao(primeira.id);
+    assert.equal(linha.cliques, 3);
+    assert.equal(linha.utm_source, "facebook", "primeiro toque: a campanha da primeira visita fica");
+    assert.equal(linha.utm_term, "criativo-07");
+    assert.equal(linha.page_url, "https://lp.exemplo/viver-de-furo-inscricao?utm_source=facebook");
+    assert.equal(linha.referrer, "https://www.facebook.com/");
+    assert.equal(linha.checkout_url, inscricao().checkout_url, "o último link aberto é o que fica gravado");
+    assert.ok(new Date(linha.atualizado_em) >= new Date(linha.criado_em));
+  });
+
+  test("o rastreio de primeiro toque é um BLOCO: campanha nova não preenche buraco da antiga", async () => {
+    await limparInscricoes();
+    // Primeiro toque sem utm_term, mas com utm_source: a campanha inteira é essa.
+    const primeira = await rpcOk("inscricao_salvar", { p: inscricao({ utm_source: "instagram", utm_campaign: "bio", utm_term: null, utm_content: null, utm_medium: null }) });
+    await rpcOk("inscricao_salvar", { p: inscricao({ id: randomUUID(), utm_source: "facebook", utm_term: "criativo-09", utm_campaign: "set" }) });
+
+    const linha = await linhaInscricao(primeira.id);
+    assert.equal(linha.utm_source, "instagram");
+    assert.equal(linha.utm_campaign, "bio");
+    assert.equal(linha.utm_term, null, "o termo da segunda campanha NÃO entra no lugar vazio da primeira");
+  });
+
+  test("contato diferente (outro e-mail, outro telefone) é outra inscrição, mesmo com o id repetido", async () => {
+    await limparInscricoes();
+    const id = randomUUID();
+    const primeira = await rpcOk("inscricao_salvar", { p: inscricao({ id }) });
+    // A pessoa corrige o e-mail e reenvia: o navegador manda o MESMO id.
+    const segunda = await rpcOk("inscricao_salvar", { p: inscricao({ id, email: "maria.silva@gmail.com" }) });
+    // E outro telefone também.
+    const terceira = await rpcOk("inscricao_salvar", { p: inscricao({ id, whatsapp_digits: "21998765432", whatsapp: "(21) 99876-5432" }) });
+
+    assert.equal(segunda.novo, true);
+    assert.equal(terceira.novo, true);
+    assert.notEqual(segunda.id, primeira.id, "id repetido não derruba a gravação: a linha nova ganha outro id");
+    assert.notEqual(terceira.id, primeira.id);
+    const [contagem] = await stack.sql("select count(*) as n from public.inscricoes");
+    assert.equal(contagem.n, "3");
+  });
+
+  test("a mesma pessoa em páginas diferentes são inscrições diferentes", async () => {
+    await limparInscricoes();
+    const a = await rpcOk("inscricao_salvar", { p: inscricao() });
+    const b = await rpcOk("inscricao_salvar", { p: inscricao({ id: randomUUID(), pagina: "outra-pagina" }) });
+    assert.notEqual(a.id, b.id);
+    assert.equal(b.novo, true);
+  });
+
+  test("sem página, sem WhatsApp ou sem e-mail é erro (o servidor nunca manda assim)", async () => {
+    for (const p of [inscricao({ pagina: null }), inscricao({ whatsapp_digits: "" }), inscricao({ email: null })]) {
+      const r = await rpc("inscricao_salvar", { p });
+      assert.equal(r.status, 400, JSON.stringify(r.json));
+    }
+  });
+});
+
+describe("hotmart_registrar_compra", () => {
+  test("casa pelo e-mail (sem diferenciar maiúsculas) e marca a inscrição como comprada", async () => {
+    await limparInscricoes();
+    const salva = await rpcOk("inscricao_salvar", { p: inscricao() });
+
+    const resultado = await rpcOk("hotmart_registrar_compra", { p: compra({ comprador_email: "MARIA@GMAIL.COM", comprador_digits: "99999999999" }) });
+    assert.equal(resultado.ok, true);
+    assert.equal(resultado.novo, true);
+    assert.equal(resultado.casou, true);
+    assert.equal(resultado.inscricao_id, salva.id);
+    assert.equal(resultado.pagina, PAGINA);
+
+    const linha = await linhaInscricao(salva.id);
+    assert.equal(new Date(linha.comprou_em).toISOString(), "2026-09-21T17:00:00.000Z");
+    assert.equal(linha.compra_status, "APPROVED");
+    assert.equal(Number(linha.compra_valor), 197);
+    assert.equal(linha.compra_moeda, "BRL");
+    assert.equal(linha.compra_transacao, "HP1234567890");
+
+    // O aviso inteiro ficou guardado, com o payload cru.
+    const [gravada] = (await chamar("GET", "compras?select=*")).json;
+    assert.equal(gravada.evento, "PURCHASE_APPROVED");
+    assert.equal(gravada.comprador_email, "maria@gmail.com", "e-mail normalizado para minúsculas");
+    assert.equal(gravada.inscricao_id, salva.id);
+    assert.equal(gravada.pagina, PAGINA);
+    assert.equal(gravada.sck, "criativo-07");
+    assert.deepEqual(gravada.payload, { event: "PURCHASE_APPROVED", data: { purchase: { transaction: "HP1234567890" } } });
+  });
+
+  test("casa pelos ÚLTIMOS 8 dígitos do telefone quando o e-mail é outro (o 9 e o DDI variam)", async () => {
+    await limparInscricoes();
+    const salva = await rpcOk("inscricao_salvar", { p: inscricao({ whatsapp_digits: "11912345678" }) });
+
+    // Na Hotmart a pessoa digitou outro e-mail e o número com DDI e sem o 9.
+    const resultado = await rpcOk("hotmart_registrar_compra", {
+      p: compra({ comprador_email: "outro-email@gmail.com", comprador_digits: "551112345678", transacao: "HP-TEL" })
+    });
+    assert.equal(resultado.casou, true);
+    assert.equal(resultado.inscricao_id, salva.id);
+    const linha = await linhaInscricao(salva.id);
+    assert.ok(linha.comprou_em);
+  });
+
+  test("o e-mail ganha do telefone, e entre dois telefones iguais vale a inscrição mais recente", async () => {
+    await limparInscricoes();
+    const antiga = await rpcOk("inscricao_salvar", { p: inscricao({ email: "antiga@gmail.com" }) });
+    await stack.sql(`update public.inscricoes set criado_em = now() - interval '10 days' where id = '${antiga.id}'`);
+    const recente = await rpcOk("inscricao_salvar", { p: inscricao({ id: randomUUID(), email: "recente@gmail.com" }) });
+    const outra = await rpcOk("inscricao_salvar", { p: inscricao({ id: randomUUID(), email: "escolhida@gmail.com", whatsapp_digits: "31999998888" }) });
+
+    // Só telefone: a mais recente das duas com o mesmo número.
+    const porTelefone = await rpcOk("hotmart_registrar_compra", { p: compra({ comprador_email: "nao-existe@gmail.com", transacao: "HP-A" }) });
+    assert.equal(porTelefone.inscricao_id, recente.id);
+
+    // Com e-mail que existe, é ele quem manda, mesmo com o telefone de outra pessoa.
+    const porEmail = await rpcOk("hotmart_registrar_compra", {
+      p: compra({ comprador_email: "escolhida@gmail.com", comprador_digits: "11912345678", transacao: "HP-B" })
+    });
+    assert.equal(porEmail.inscricao_id, outra.id);
+  });
+
+  test("compra que não casa com ninguém é gravada assim mesmo (casou = false)", async () => {
+    await limparInscricoes();
+    const resultado = await rpcOk("hotmart_registrar_compra", {
+      p: compra({ comprador_email: "ninguem@gmail.com", comprador_digits: "6299998888" })
+    });
+    assert.equal(resultado.ok, true);
+    assert.equal(resultado.casou, false);
+    assert.equal(resultado.inscricao_id, null);
+    assert.equal(resultado.pagina, null);
+    const [contagem] = await stack.sql("select count(*) as n from public.compras where inscricao_id is null");
+    assert.equal(contagem.n, "1");
+  });
+
+  test("o MESMO (transacao, evento) chegando duas vezes não duplica nem conta duas vezes", async () => {
+    await limparInscricoes();
+    const salva = await rpcOk("inscricao_salvar", { p: inscricao() });
+
+    const primeira = await rpcOk("hotmart_registrar_compra", { p: compra() });
+    const repetida = await rpcOk("hotmart_registrar_compra", { p: compra() });
+    const terceira = await rpcOk("hotmart_registrar_compra", { p: compra({ hotmart_id: "aviso-reenviado" }) });
+
+    assert.equal(primeira.novo, true);
+    assert.equal(repetida.novo, false, "a Hotmart reenvia o aviso até receber 2xx");
+    assert.equal(terceira.novo, false);
+    assert.equal(repetida.casou, true, "mesmo repetido, a resposta diz de quem é a compra");
+
+    const [contagem] = await stack.sql("select count(*) as n from public.compras");
+    assert.equal(contagem.n, "1");
+
+    // Outro EVENTO da mesma transação é outra linha (e outro aviso).
+    await rpcOk("hotmart_registrar_compra", { p: compra({ evento: "PURCHASE_BILLET_PRINTED", status: "PRINTED_BILLET" }) });
+    const [depois] = await stack.sql("select count(*) as n from public.compras");
+    assert.equal(depois.n, "2");
+
+    const linha = await linhaInscricao(salva.id);
+    assert.ok(linha.comprou_em, "boleto impresso não desmarca quem já comprou");
+    assert.equal(linha.compra_status, "APPROVED");
+  });
+
+  test("cancelamento, reembolso e chargeback desmarcam a compra e guardam o status", async () => {
+    for (const [evento, status] of [
+      ["PURCHASE_CANCELED", "CANCELED"],
+      ["PURCHASE_REFUNDED", "REFUNDED"],
+      ["PURCHASE_CHARGEBACK", "CHARGEBACK"],
+      ["PURCHASE_PROTEST", "PROTESTED"]
+    ]) {
+      await limparInscricoes();
+      const salva = await rpcOk("inscricao_salvar", { p: inscricao() });
+      await rpcOk("hotmart_registrar_compra", { p: compra() });
+      assert.ok((await linhaInscricao(salva.id)).comprou_em, evento);
+
+      const resultado = await rpcOk("hotmart_registrar_compra", {
+        p: compra({ evento, status, evento_em: "2026-09-25T10:00:00-03:00", aprovado_em: null })
+      });
+      assert.equal(resultado.casou, true, evento);
+      const linha = await linhaInscricao(salva.id);
+      assert.equal(linha.comprou_em, null, `${evento} desmarca a compra`);
+      assert.equal(linha.compra_status, status);
+      assert.equal(linha.compra_transacao, "HP1234567890", "a transação continua registrada");
+    }
+  });
+
+  test("um aviso MAIS ANTIGO não sobrescreve o estado atual da inscrição", async () => {
+    await limparInscricoes();
+    const salva = await rpcOk("inscricao_salvar", { p: inscricao() });
+
+    // Aprovada (25/09) e depois reembolsada (26/09): o estado é "reembolsada".
+    await rpcOk("hotmart_registrar_compra", { p: compra({ evento_em: "2026-09-25T10:00:00-03:00", transacao: "HP-1" }) });
+    await rpcOk("hotmart_registrar_compra", {
+      p: compra({ evento: "PURCHASE_REFUNDED", status: "REFUNDED", evento_em: "2026-09-26T10:00:00-03:00", transacao: "HP-1", aprovado_em: null })
+    });
+    assert.equal((await linhaInscricao(salva.id)).comprou_em, null);
+
+    // A Hotmart reenvia uma aprovação velha (de outra transação, mas do mesmo comprador): ignorada.
+    await rpcOk("hotmart_registrar_compra", { p: compra({ evento_em: "2026-09-24T10:00:00-03:00", transacao: "HP-VELHA" }) });
+    const linha = await linhaInscricao(salva.id);
+    assert.equal(linha.comprou_em, null, "o evento antigo não ressuscita a compra");
+    assert.equal(linha.compra_status, "REFUNDED");
+    const [contagem] = await stack.sql("select count(*) as n from public.compras");
+    assert.equal(contagem.n, "3", "mas o aviso antigo fica guardado do mesmo jeito");
+  });
+
+  test("aviso sem transação é sempre gravado (não há chave para deduplicar)", async () => {
+    await limparInscricoes();
+    await rpcOk("hotmart_registrar_compra", { p: compra({ transacao: null }) });
+    await rpcOk("hotmart_registrar_compra", { p: compra({ transacao: null }) });
+    const [contagem] = await stack.sql("select count(*) as n from public.compras");
+    assert.equal(contagem.n, "2");
+  });
+
+  test("sem evento é erro", async () => {
+    const r = await rpc("hotmart_registrar_compra", { p: compra({ evento: null }) });
+    assert.equal(r.status, 400, JSON.stringify(r.json));
+  });
+});
+
+describe("inscricoes_resumo", () => {
+  /*
+   * O conjunto abaixo é pequeno de propósito, para os números serem conferidos À MÃO. Tudo no fuso
+   * de São Paulo:
+   *
+   *   A  20/09 10:00  facebook  / set / criativo-07  3 cliques  comprou 20/09 11:00  R$ 197
+   *   B  20/09 12:00  facebook  / set / criativo-07  1 clique   —
+   *   C  20/09 15:00  instagram / bio / (sem termo)  2 cliques  comprou 21/09 09:00  R$ 297
+   *   D  21/09 08:00  facebook  / set / criativo-09  1 clique   —
+   *   E  21/09 09:30  (sem utm nenhuma)              1 clique   —
+   *   F  21/09 23:30  (sem utm nenhuma)              1 clique   comprou 21/09 23:45  R$ 97
+   *   G  (outra-pagina) 21/09 10:00                  1 clique   —
+   *
+   *   inscritos = 6 (A..F)   cliques = 3+1+2+1+1+1 = 9   compras = 3   receita = 591,00
+   *   taxa_compra = 3/6 = 50,0 %
+   */
+  const SP = (texto) => `${texto}-03:00`;
+
+  before(async () => {
+    await limparInscricoes();
+    await inserir("inscricoes", [
+      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-20T10:00:00"), nome: "A", whatsapp_digits: "11900000001", email: "a@gmail.com", cliques: 3, comprou_em: SP("2026-09-20T11:00:00"), compra_valor: 197, compra_status: "APPROVED", utm_source: "facebook", utm_campaign: "set", utm_term: "criativo-07" },
+      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-20T12:00:00"), nome: "B", whatsapp_digits: "11900000002", email: "b@gmail.com", cliques: 1, utm_source: "facebook", utm_campaign: "set", utm_term: "criativo-07" },
+      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-20T15:00:00"), nome: "C", whatsapp_digits: "11900000003", email: "c@gmail.com", cliques: 2, comprou_em: SP("2026-09-21T09:00:00"), compra_valor: 297, compra_status: "APPROVED", utm_source: "instagram", utm_campaign: "bio" },
+      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-21T08:00:00"), nome: "D", whatsapp_digits: "11900000004", email: "d@gmail.com", cliques: 1, utm_source: "facebook", utm_campaign: "set", utm_term: "criativo-09" },
+      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-21T09:30:00"), nome: "E", whatsapp_digits: "11900000005", email: "e@gmail.com", cliques: 1 },
+      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-21T23:30:00"), nome: "F", whatsapp_digits: "11900000006", email: "f@gmail.com", cliques: 1, comprou_em: SP("2026-09-21T23:45:00"), compra_valor: 97, compra_status: "APPROVED" },
+      { id: randomUUID(), pagina: "outra-pagina", criado_em: SP("2026-09-21T10:00:00"), nome: "G", whatsapp_digits: "11900000007", email: "g@gmail.com", cliques: 1 }
+    ]);
+  });
+
+  test("os totais de uma página, com a taxa de compra e a receita", async () => {
+    const resumo = await rpcOk("inscricoes_resumo", { p_pagina: PAGINA });
+    assert.equal(resumo.paginas.length, 1);
+    const [pagina] = resumo.paginas;
+    assert.equal(pagina.pagina, PAGINA);
+    assert.equal(pagina.inscritos, 6);
+    assert.equal(pagina.cliques, 9);
+    assert.equal(pagina.compras, 3);
+    assert.equal(Number(pagina.receita), 591);
+    assert.equal(Number(pagina.taxa_compra), 50.0);
+  });
+
+  test("sem p_pagina, cada página entra separada", async () => {
+    const resumo = await rpcOk("inscricoes_resumo", {});
+    assert.deepEqual(
+      resumo.paginas.map((p) => [p.pagina, p.inscritos, p.cliques, p.compras]),
+      [
+        ["outra-pagina", 1, 1, 0],
+        [PAGINA, 6, 9, 3]
+      ]
+    );
+  });
+
+  test("por origem, campanha e termo — o termo é o sck que a Hotmart devolve", async () => {
+    const [pagina] = (await rpcOk("inscricoes_resumo", { p_pagina: PAGINA })).paginas;
+
+    assert.deepEqual(pagina.por_origem, [
+      { utm_source: "facebook", inscritos: 3, compras: 1 },
+      { utm_source: "(sem utm)", inscritos: 2, compras: 1 },
+      { utm_source: "instagram", inscritos: 1, compras: 1 }
+    ]);
+    assert.deepEqual(pagina.por_campanha, [
+      { utm_campaign: "set", inscritos: 3, compras: 1 },
+      { utm_campaign: "(sem utm)", inscritos: 2, compras: 1 },
+      { utm_campaign: "bio", inscritos: 1, compras: 1 }
+    ]);
+    assert.deepEqual(pagina.por_termo, [
+      { utm_term: "(sem utm)", inscritos: 3, compras: 2 },
+      { utm_term: "criativo-07", inscritos: 2, compras: 1 },
+      { utm_term: "criativo-09", inscritos: 1, compras: 0 }
+    ]);
+  });
+
+  test("por dia no fuso de São Paulo: inscritos pelo cadastro, compras pelo dia da compra", async () => {
+    const [pagina] = (await rpcOk("inscricoes_resumo", { p_pagina: PAGINA })).paginas;
+    // 21/09 23:30 em São Paulo é 22/09 02:30 em UTC: o dia certo é o de cá.
+    assert.deepEqual(pagina.por_dia, [
+      { dia: "2026-09-20", inscritos: 3, compras: 1 },
+      { dia: "2026-09-21", inscritos: 3, compras: 2 }
+    ]);
+  });
+
+  test("o período corta por criado_em, em [desde, ate)", async () => {
+    const soDia21 = (await rpcOk("inscricoes_resumo", { p_desde: SP("2026-09-21T00:00:00"), p_ate: SP("2026-09-22T00:00:00"), p_pagina: PAGINA })).paginas[0];
+    assert.equal(soDia21.inscritos, 3, "D, E e F");
+    assert.equal(soDia21.cliques, 3);
+    assert.equal(soDia21.compras, 1, "só F comprou entre os inscritos do dia 21");
+    assert.equal(Number(soDia21.receita), 97);
+
+    const soDia20 = (await rpcOk("inscricoes_resumo", { p_desde: SP("2026-09-20T00:00:00"), p_ate: SP("2026-09-21T00:00:00"), p_pagina: PAGINA })).paginas[0];
+    assert.equal(soDia20.inscritos, 3);
+    assert.equal(soDia20.compras, 2, "A e C se inscreveram no dia 20 e compraram");
+    assert.equal(Number(soDia20.receita), 494);
+    // C se inscreveu no dia 20 e comprou no 21: a compra aparece no dia dela.
+    assert.deepEqual(soDia20.por_dia, [
+      { dia: "2026-09-20", inscritos: 3, compras: 1 },
+      { dia: "2026-09-21", inscritos: 0, compras: 1 }
+    ]);
+  });
+
+  test("página sem inscrição nenhuma volta zerada, com listas vazias", async () => {
+    const resumo = await rpcOk("inscricoes_resumo", { p_pagina: "pagina-que-ainda-nao-tem-ninguem" });
+    assert.deepEqual(resumo.paginas, [
+      {
+        pagina: "pagina-que-ainda-nao-tem-ninguem",
+        inscritos: 0,
+        cliques: 0,
+        compras: 0,
+        receita: 0,
+        taxa_compra: 0,
+        por_origem: [],
+        por_campanha: [],
+        por_termo: [],
+        por_dia: []
+      }
+    ]);
+    assert.deepEqual(resumo.compras_recentes, []);
+    assert.equal(resumo.compras_sem_inscricao, 0);
+  });
+
+  test("compras recentes e a contagem das que não casaram com ninguém", async () => {
+    await limparInscricoes();
+    const salva = await rpcOk("inscricao_salvar", { p: inscricao() });
+    await rpcOk("hotmart_registrar_compra", { p: compra({ transacao: "HP-CASOU" }) });
+    await rpcOk("hotmart_registrar_compra", { p: compra({ transacao: "HP-ORFA-1", comprador_email: "ninguem@gmail.com", comprador_digits: "6299990000", comprador_nome: "Órfã Um" }) });
+    await rpcOk("hotmart_registrar_compra", { p: compra({ transacao: "HP-ORFA-2", comprador_email: "outro@gmail.com", comprador_digits: "6299991111", evento: "PURCHASE_COMPLETE" }) });
+    // Boleto gerado sem inscrição NÃO conta como "compra sem inscrição": ninguém pagou ainda.
+    await rpcOk("hotmart_registrar_compra", { p: compra({ transacao: "HP-BOLETO", evento: "PURCHASE_BILLET_PRINTED", comprador_email: "boleto@gmail.com", comprador_digits: "6299992222" }) });
+
+    const resumo = await rpcOk("inscricoes_resumo", {});
+    assert.equal(resumo.compras_sem_inscricao, 2, "as duas aprovadas órfãs, e não o boleto");
+    assert.equal(resumo.compras_recentes.length, 4, "todos os avisos aparecem na lista");
+    const casadas = resumo.compras_recentes.filter((c) => c.casou);
+    assert.equal(casadas.length, 1);
+    assert.equal(casadas[0].comprador_email, "maria@gmail.com");
+    assert.equal(casadas[0].pagina, PAGINA);
+    assert.equal(Number(casadas[0].valor), 197);
+    assert.equal(casadas[0].evento, "PURCHASE_APPROVED");
+    assert.ok(resumo.compras_recentes.some((c) => c.comprador_nome === "Órfã Um" && c.casou === false));
+    assert.ok(salva.id);
+  });
+
+  test("compras recentes traz no máximo 20, das mais novas para as mais velhas", async () => {
+    await limparInscricoes();
+    for (let i = 0; i < 25; i += 1) {
+      await rpcOk("hotmart_registrar_compra", { p: compra({ transacao: `HP-${i}`, comprador_email: `pessoa${i}@gmail.com`, comprador_digits: `1190000${String(i).padStart(4, "0")}` }) });
+    }
+    const resumo = await rpcOk("inscricoes_resumo", {});
+    assert.equal(resumo.compras_recentes.length, 20);
+    const datas = resumo.compras_recentes.map((c) => c.recebido_em);
+    assert.deepEqual(datas, [...datas].sort().reverse(), "da mais nova para a mais velha");
+    assert.equal(resumo.compras_sem_inscricao, 25, "a contagem é de todas, não só das 20 mostradas");
+  });
+});

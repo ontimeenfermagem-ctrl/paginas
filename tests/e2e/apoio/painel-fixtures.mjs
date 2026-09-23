@@ -18,8 +18,11 @@ const RAIZ = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".
 const ctx = vm.createContext({});
 vm.runInContext(fs.readFileSync(path.join(RAIZ, "js", "pesquisa-config.js"), "utf8"), ctx);
 vm.runInContext(fs.readFileSync(path.join(RAIZ, "js", "obrigado-config.js"), "utf8"), ctx);
+vm.runInContext(fs.readFileSync(path.join(RAIZ, "js", "lead-rules.js"), "utf8"), ctx);
+vm.runInContext(fs.readFileSync(path.join(RAIZ, "js", "checkout-config.js"), "utf8"), ctx);
 export const EV = ctx.EVPesquisa;
 export const OBR = ctx.EVObrigado;
+export const CHK = ctx.EVCheckout;
 
 function rng(seed) {
   let s = seed >>> 0;
@@ -275,7 +278,77 @@ export function gerar({ seed = 7, pessoas: totalPessoas = 800, agora = new Date(
     evento({ ...comum, evento: "visita", criado_em: criado });
     if (i % 2 === 0) evento({ ...comum, evento: "clique_grupo", criado_em: criado });
   }
-  return { visitantes, pessoas: respostas, eventos };
+  // Página de inscrição com checkout (js/checkout-config.js): semente própria, de novo para não
+  // mexer na sequência de cima. 120 inscritos, ~18% comprando, com origem, campanha e termo (o
+  // `sck`) variados, e 3 compras que NÃO casam com ninguém (comprou por outro link).
+  const r3 = rng(seed + 202);
+  const inscricoes = [];
+  const compras = [];
+  const PAGINA_INSCRICAO = CHK.LISTA[0];
+  const ORIGENS = [
+    { utm_source: "facebook", utm_medium: "paid", utm_campaign: "viver-de-furo-set", utm_term: "criativo-07" },
+    { utm_source: "facebook", utm_medium: "paid", utm_campaign: "viver-de-furo-set", utm_term: "criativo-09" },
+    { utm_source: "instagram", utm_medium: "bio", utm_campaign: "bio-perfil", utm_term: null },
+    { utm_source: null, utm_medium: null, utm_campaign: null, utm_term: null }
+  ];
+  for (let i = 0; i < 120; i++) {
+    const criado = carimbo(Math.floor(Math.pow(r3(), 1.4) * 12));
+    const origem = ORIGENS[Math.floor(Math.pow(r3(), 1.5) * ORIGENS.length)];
+    const comprou = r3() < 0.18;
+    const nome = `${NOMES[Math.floor(r3() * NOMES.length)]} ${SOBRENOMES[Math.floor(r3() * SOBRENOMES.length)]}`;
+    const digits = `${DDD[Math.floor(r3() * DDD.length)]}9${String(10000000 + Math.floor(r3() * 89999999))}`.slice(0, 11);
+    const valor = [97, 197, 297][Math.floor(r3() * 3)];
+    const compradoEm = comprou ? new Date(Math.min(new Date(criado).getTime() + 600000, agoraMs - 1000)).toISOString() : null;
+    inscricoes.push({
+      id: `20000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+      pagina: PAGINA_INSCRICAO.id,
+      criado_em: criado,
+      atualizado_em: criado,
+      nome,
+      whatsapp: `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`,
+      whatsapp_digits: digits,
+      whatsapp_internacional: `55${digits}`,
+      email: `${nome.split(" ")[0].toLowerCase()}${i}@${DOMINIOS[Math.floor(r3() * DOMINIOS.length)]}`,
+      cliques: 1 + (r3() < 0.25 ? 1 : 0) + (r3() < 0.08 ? 1 : 0),
+      clicou_em: criado,
+      comprou_em: compradoEm,
+      compra_status: comprou ? "APPROVED" : null,
+      compra_valor: comprou ? valor : null,
+      compra_transacao: comprou ? `HP${100000 + i}` : null,
+      ...origem,
+      utm_content: null,
+      fbclid: null,
+      gclid: null,
+      page_url: `https://lp.exemplo${PAGINA_INSCRICAO.rota}`,
+      referrer: null,
+      dispositivo: "mobile"
+    });
+    if (comprou) {
+      compras.push({
+        recebido_em: compradoEm,
+        evento: "PURCHASE_APPROVED",
+        status: "APPROVED",
+        comprador_nome: nome,
+        comprador_email: inscricoes[inscricoes.length - 1].email,
+        valor,
+        pagina: PAGINA_INSCRICAO.id,
+        casou: true
+      });
+    }
+  }
+  for (let i = 0; i < 3; i++) {
+    compras.push({
+      recebido_em: carimbo(i),
+      evento: "PURCHASE_APPROVED",
+      status: "APPROVED",
+      comprador_nome: `Comprou Por Fora ${i + 1}`,
+      comprador_email: `porfora${i}@gmail.com`,
+      valor: 197,
+      pagina: null,
+      casou: false
+    });
+  }
+  return { visitantes, pessoas: respostas, eventos, inscricoes, compras };
 }
 
 /* ------------------------------------------------------------------ Agregados (espelho do SQL) */
@@ -518,4 +591,78 @@ export function paginas(dados, { desde, ate } = {}) {
       })).sort((a, b) => a.dia.localeCompare(b.dia))
     };
   });
+}
+
+
+/* ------------------------------------------------------------------ Inscrições (espelho do SQL) */
+
+const diaDe = (iso) => diaSP(iso);
+
+/** O que inscricoes_resumo devolve, calculado em JS sobre as fixtures. */
+export function inscricoesResumo(dados, { desde, ate, pagina } = {}) {
+  const todas = (dados.inscricoes || []).filter(
+    (i) => noRecorte(i.criado_em, desde, ate) && (!pagina || i.pagina === pagina)
+  );
+  const compras = (dados.compras || []).filter(
+    (c) => noRecorte(c.recebido_em, desde, ate) && (!pagina || c.pagina === pagina || c.pagina == null)
+  );
+  const paginas = pagina ? [pagina] : Array.from(new Set(todas.map((i) => i.pagina))).sort();
+
+  const divisao = (lista, campo, chave) => {
+    const grupos = new Map();
+    for (const i of lista) {
+      const k = (i[campo] && String(i[campo]).trim()) || "(sem utm)";
+      if (!grupos.has(k)) grupos.set(k, { inscritos: 0, compras: 0 });
+      const g = grupos.get(k);
+      g.inscritos += 1;
+      if (i.comprou_em) g.compras += 1;
+    }
+    return Array.from(grupos, ([valor, g]) => ({ [chave]: valor, inscritos: g.inscritos, compras: g.compras }))
+      .sort((a, b) => b.inscritos - a.inscritos || b.compras - a.compras || (a[chave] < b[chave] ? -1 : 1))
+      .slice(0, 50);
+  };
+
+  return {
+    paginas: paginas.map((id) => {
+      const minhas = todas.filter((i) => i.pagina === id);
+      const compradas = minhas.filter((i) => i.comprou_em);
+      const dias = new Map();
+      for (const i of minhas) {
+        const d = diaDe(i.criado_em);
+        if (!dias.has(d)) dias.set(d, { inscritos: 0, compras: 0 });
+        dias.get(d).inscritos += 1;
+      }
+      for (const i of compradas) {
+        const d = diaDe(i.comprou_em);
+        if (!dias.has(d)) dias.set(d, { inscritos: 0, compras: 0 });
+        dias.get(d).compras += 1;
+      }
+      const inscritos = minhas.length;
+      return {
+        pagina: id,
+        inscritos,
+        cliques: minhas.reduce((s, i) => s + i.cliques, 0),
+        compras: compradas.length,
+        receita: Math.round(compradas.reduce((s, i) => s + Number(i.compra_valor || 0), 0) * 100) / 100,
+        taxa_compra: inscritos ? Math.round((compradas.length / inscritos) * 1000) / 10 : 0,
+        por_origem: divisao(minhas, "utm_source", "utm_source"),
+        por_campanha: divisao(minhas, "utm_campaign", "utm_campaign"),
+        por_termo: divisao(minhas, "utm_term", "utm_term"),
+        por_dia: Array.from(dias, ([dia, g]) => ({ dia, ...g })).sort((a, b) => a.dia.localeCompare(b.dia))
+      };
+    }),
+    compras_sem_inscricao: compras.filter((c) => !c.casou && ["PURCHASE_APPROVED", "PURCHASE_COMPLETE"].includes(c.evento)).length,
+    compras_recentes: compras
+      .slice()
+      .sort((a, b) => b.recebido_em.localeCompare(a.recebido_em))
+      .slice(0, 20)
+  };
+}
+
+/** A lista de inscritos de /api/painel/inscricoes (mais recentes primeiro). */
+export function listaInscricoes(dados, { desde, ate, pagina } = {}, { limite = 100, offset = 0 } = {}) {
+  const todas = (dados.inscricoes || [])
+    .filter((i) => noRecorte(i.criado_em, desde, ate) && (!pagina || i.pagina === pagina))
+    .sort((a, b) => b.criado_em.localeCompare(a.criado_em) || b.id.localeCompare(a.id));
+  return { itens: todas.slice(offset, offset + limite), total: todas.length };
 }

@@ -1,4 +1,4 @@
-# Deploy — Pesquisa de ICP + páginas de obrigado + painel
+# Deploy — Pesquisa de ICP + páginas de obrigado + inscrição/checkout + painel
 
 Um serviço só no Railway (este repositório, com o `Dockerfile` na raiz) e um projeto no Supabase. Não há build, `npm install` nem banco para administrar no Railway: o servidor não tem dependências e todos os dados ficam no Supabase.
 
@@ -24,7 +24,8 @@ O que o arquivo cria (tudo com os prefixos `pesquisa_` e `pagina_`/`paginas_`, p
 
 - tabelas `pesquisa_visitas`, `pesquisa_respostas` e `pagina_eventos` (visitas e cliques no grupo das páginas de obrigado), com **RLS ligado e sem políticas**;
 - views `pesquisa_pessoas` (uma linha por pessoa) e `pesquisa_planilha` (uma coluna por pergunta), as duas `security_invoker`;
-- funções `pesquisa_salvar`, `pesquisa_registrar_evento`, `pesquisa_painel`, `pesquisa_cruzamento`, `pesquisa_abertas`, `pesquisa_valores`, `pagina_registrar_evento` e `paginas_resumo`, executáveis **só pela service_role**.
+- tabelas `inscricoes` (uma linha por pessoa em cada página de inscrição) e `compras` (um evento da Hotmart por linha, com o **payload cru**), também com RLS ligado e sem políticas;
+- funções `pesquisa_salvar`, `pesquisa_registrar_evento`, `pesquisa_painel`, `pesquisa_cruzamento`, `pesquisa_abertas`, `pesquisa_valores`, `pagina_registrar_evento`, `paginas_resumo`, `inscricao_salvar`, `hotmart_registrar_compra` e `inscricoes_resumo`, executáveis **só pela service_role**.
 
 **Banco que já tem a pesquisa rodando (atualização das páginas de obrigado):** rode o `supabase.sql` inteiro de novo (é idempotente) **ou** só a seção "5. Páginas de obrigado" do fim do arquivo — ela é autossuficiente e termina com `notify pgrst, 'reload schema'`. Faça isso **antes** de publicar o servidor novo; sem a tabela, as páginas abrem normalmente, mas as visitas e os cliques não são contados e a aba "Páginas de obrigado" do painel responde erro. Para conferir:
 
@@ -33,6 +34,14 @@ select public.paginas_resumo(null, null, '{"Cuidador(a)": "cuidador"}'::jsonb);
 ```
 
 Tem que voltar `{"paginas" : [{"pagina" : "cuidador", "visitas" : 0, ...}]}`.
+
+**Banco que já tem a pesquisa rodando (atualização da página de inscrição + webhook da Hotmart):** rode o `supabase.sql` inteiro de novo **ou** só a seção **"6. Inscrições com checkout na Hotmart"** do fim do arquivo — ela é autossuficiente e termina com `notify pgrst, 'reload schema'`. Faça isso **antes** de publicar o servidor novo; sem as tabelas, a página de inscrição responde 502 ao enviar o formulário e a aba de inscrições do painel dá erro. Para conferir:
+
+```sql
+select public.inscricoes_resumo(null, null, 'viver-de-furo');
+```
+
+Tem que voltar `{"paginas" : [{"pagina" : "viver-de-furo", "inscritos" : 0, "cliques" : 0, "compras" : 0, ...}], "compras_sem_inscricao" : 0, "compras_recentes" : []}`.
 
 No Supabase, tudo o que nasce no schema `public` ganha acesso automático da chave pública (anon). O arquivo revoga esse acesso em cada tabela, view e função: a chave pública do projeto não lê, não grava e não executa nada da pesquisa. Isso é testado em `tests/e2e/sql.e2e.mjs` contra um Postgres com os mesmos grants padrão do Supabase.
 
@@ -90,6 +99,8 @@ A senha em si não é guardada em lugar nenhum, só o hash. Guarde a senha num g
    | `PAINEL_SESSAO_SEGREDO` | a linha do passo 3 |
    | `PESQUISA_WEBHOOK_URL` | opcional: vazio = `https://n8n.tecnicadevalor.com.br/webhook/pesquisa-icp`; outro endereço troca; `off` desliga. Recebe **um** aviso `pesquisa_concluida` por pessoa, quando ela chega à tela de fim. Se o n8n estiver fora, o servidor reenvia sozinho (varredura 30 s depois de subir e a cada 10 min, até 7 dias). A varredura também manda quem respondeu todas as obrigatórias e fechou antes da tela de fim, depois de 30 min parada |
    | `SITE_URL` | opcional, recomendado assim que o domínio existir (ex.: `https://pesquisa.seudominio.com.br`): fixa o endereço do `og:url`, do `canonical` e da imagem da prévia do WhatsApp. Sem ele, o servidor usa o endereço pelo qual a página foi pedida (cabeçalho `X-Forwarded-Host`/`Host`, validado), então a prévia já sai com imagem no domínio do Railway |
+   | `HOTMART_HOTTOK` | o *Hottok* da Hotmart (Ferramentas > Webhook/Postback > aba **Autenticação**). Sem ele **e** sem `HOTMART_WEBHOOK_CHAVE`, `POST /api/hotmart/venda` responde 503 |
+   | `HOTMART_WEBHOOK_CHAVE` | um segredo **nosso**, que vai na URL do webhook (`?chave=...`). Gere com `node -e "console.log(require('node:crypto').randomBytes(24).toString('base64url'))"` |
    | `META_PIXEL_ID` | opcional: vazio = `538380380948773` (pixel da Enfermagem de Valor); `off` desliga |
 
    `PORT` não precisa: o Railway define sozinho.
@@ -125,6 +136,43 @@ Os convites dos três grupos ficam em `js/obrigado-config.js`, no objeto `LINKS_
 
 ---
 
+## 5.2 Webhook de venda da Hotmart
+
+A página `/viver-de-furo-inscricao` grava a inscrição e manda a pessoa para o checkout; quem diz que a venda aconteceu é a Hotmart, no webhook. **Nada disso passa pelo n8n.**
+
+**O endereço para colar na Hotmart:**
+
+```
+https://SEU-DOMINIO/api/hotmart/venda?chave=O-VALOR-DE-HOTMART_WEBHOOK_CHAVE
+```
+
+(em produção hoje: `https://lp.escolaenfermagemdevalor.com.br/api/hotmart/venda?chave=...`)
+
+1. Gere a chave e cadastre-a no Railway como `HOTMART_WEBHOOK_CHAVE` (veja o passo 4). Ela existe para o endereço funcionar **no minuto em que for colado**, antes de o hottok estar configurado.
+2. Hotmart > **Ferramentas > Webhook (Postback)** > **Cadastrar webhook**: cole o endereço acima, escolha a **versão 2.0** e marque os eventos de compra — no mínimo **Compra aprovada**, **Compra completa**, **Compra cancelada**, **Reembolso**, **Chargeback**. Boleto gerado e carrinho abandonado também podem ser marcados: eles são gravados, mas não marcam ninguém como comprador.
+3. Na aba **Autenticação** da mesma tela, copie o **Hottok** e cadastre-o no Railway como `HOTMART_HOTTOK`. A partir daí, o aviso é aceito tanto pelo header `X-HOTMART-HOTTOK` quanto pela `?chave=` — basta **uma** das duas bater.
+
+**Como testar sem esperar uma venda de verdade** (troque o endereço e a chave):
+
+```bash
+curl -i -X POST "https://SEU-DOMINIO/api/hotmart/venda?chave=SUA-CHAVE" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"teste-1","event":"PURCHASE_APPROVED","creation_date":1758600000000,
+       "data":{"product":{"id":"Y74893363S","name":"Viver de Furo de Orelha"},
+               "buyer":{"name":"Maria da Silva","email":"maria@gmail.com","checkout_phone_code":"55","checkout_phone":"11912345678"},
+               "purchase":{"transaction":"HP-TESTE-1","status":"APPROVED","order_date":1758600000000,"approved_date":1758600060000,
+                           "price":{"value":197,"currency_value":"BRL"},"offer":{"code":"7j2nqptq"},
+                           "tracking":{"source":"facebook","source_sck":"criativo-07"}}}}'
+```
+
+- Resposta esperada: `200 {"ok":true}`.
+- Chave errada: `401`. Nenhuma das duas variáveis cadastradas: `503`. `GET` no endereço: `405`.
+- Mandar **o mesmo corpo de novo** não duplica nada (a chave é `transacao` + `evento`) — é o que faz o reenvio da Hotmart ser seguro.
+- Confira no painel, aba de inscrição: a compra aparece em "Compras recentes". Se o e-mail/telefone do teste não existir como inscrito, ela aparece marcada como **"sem inscrição"** — é exatamente o aviso que o cliente precisa ver.
+- Para apagar o teste do banco: `delete from public.compras where transacao = 'HP-TESTE-1';` (e, se ele tiver casado com alguém, `update public.inscricoes set comprou_em = null, compra_status = null, compra_valor = null, compra_transacao = null, compra_evento_em = null where compra_transacao = 'HP-TESTE-1';`).
+
+---
+
 ## 6. Checklist depois do deploy
 
 Faça pelo celular, de preferência abrindo o link de dentro do Instagram ou do WhatsApp (é onde o público vai estar).
@@ -133,6 +181,9 @@ Faça pelo celular, de preferência abrindo o link de dentro do Instagram ou do 
 - [ ] Abrir `https://SEU-DOMINIO/?utm_source=teste&utm_campaign=deploy`: vai para `/pesquisa-icp` e a URL mantém as UTMs. Logo, foto da Iza e botão "Começar" aparecem.
 - [ ] O link colado no WhatsApp mostra a prévia com imagem e título.
 - [ ] Contato: WhatsApp sem DDD, e-mail `maria@gmial.com` e nome com número são recusados com mensagem clara; o e-mail com erro de digitação sugere a correção.
+- [ ] Abrir `https://SEU-DOMINIO/viver-de-furo-inscricao?utm_source=teste&utm_term=criativo-07`, preencher e enviar: o checkout da Hotmart abre **com nome, e-mail e telefone preenchidos** e a URL dele tem `off=7j2nqptq`, `checkoutMode=10`, `utm_source=teste`, `utm_term=criativo-07` e `sck=criativo-07`.
+- [ ] Enviar o formulário de novo com o mesmo contato: no painel, a pessoa continua **uma** inscrita e os "cliques no checkout" sobem para 2.
+- [ ] O `curl` de teste do webhook (seção 5.2) responde `200 {"ok":true}` e a compra aparece na aba de inscrição do painel.
 - [ ] Contato válido (use um número seu) → a pesquisa começa. Responda 3 ou 4 perguntas e **feche a página**.
 - [ ] No Supabase > Table Editor > `pesquisa_respostas`: a linha está lá, com nome, WhatsApp formatado `(xx) xxxxx-xxxx`, e-mail, as respostas dadas e `utm_source = teste`. Em `pesquisa_visitas`, o visitante com `comecou_em` preenchido.
 - [ ] Reabrir o link no mesmo celular: aparece "Que bom te ver de novo" e "Continuar de onde parei" volta para a pergunta certa.

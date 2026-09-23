@@ -57,7 +57,17 @@ const EVENTO_RATE_LIMIT_WINDOW_MS = 60_000;
 // atrás do mesmo IP de operadora (CGNAT), comum em disparo de campanha.
 const SALVAR_RATE_LIMIT_MAX = 600;
 const SALVAR_RATE_LIMIT_WINDOW_MS = 60_000;
+// A página de inscrição grava uma vez por envio (mais os reenvios de quem volta e clica de novo).
+const INSCRICAO_RATE_LIMIT_MAX = 240;
+const INSCRICAO_RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_KEYS = 5_000;
+
+// O payload da Hotmart é grande (produto, comprador, comissões, assinatura) e guardamos ele CRU.
+// 256 KB dá folga de sobra sem virar porta aberta.
+const HOTMART_MAX_BODY_BYTES = 256 * 1024;
+// Só evento de compra interessa (PURCHASE_APPROVED, PURCHASE_REFUNDED, PURCHASE_BILLET_PRINTED...).
+// Prefixo, e não lista fechada: evento novo da Hotmart que comece com PURCHASE_ já entra gravado.
+const HOTMART_EVENTO_COMPRA = /^PURCHASE_[A-Z_]+$/;
 
 const SEQ_MAX = 1_000_000;
 const TEMPO_MAX_SEGUNDOS = 86_400;
@@ -166,12 +176,15 @@ function loadBrowserScript(relativePath, globalName, context = {}) {
   return context[globalName];
 }
 
-const leadRules = loadBrowserScript("js/lead-rules.js", "EVLeadRules");
-// obrigado-config.js lê EVPesquisa (os rótulos dos perfis): roda no MESMO contexto, depois dele,
-// exatamente como no navegador.
-const contextoPesquisa = {};
-const pesquisa = loadBrowserScript("js/pesquisa-config.js", "EVPesquisa", contextoPesquisa);
-const obrigado = loadBrowserScript("js/obrigado-config.js", "EVObrigado", contextoPesquisa);
+// UM contexto para todos os configs, na ordem em que o navegador os carrega: obrigado-config.js lê
+// EVPesquisa (os rótulos dos perfis) e checkout-config.js lê EVLeadRules (para formatar o contato
+// que vai na URL do checkout). O contexto NÃO tem URL nem URLSearchParams — é justamente por isso
+// que checkout-config.js monta a query string na mão (ver tests/checkout-config.test.mjs).
+const contextoNavegador = {};
+const leadRules = loadBrowserScript("js/lead-rules.js", "EVLeadRules", contextoNavegador);
+const pesquisa = loadBrowserScript("js/pesquisa-config.js", "EVPesquisa", contextoNavegador);
+const obrigado = loadBrowserScript("js/obrigado-config.js", "EVObrigado", contextoNavegador);
+const checkout = loadBrowserScript("js/checkout-config.js", "EVCheckout", contextoNavegador);
 
 const PERGUNTAS = pesquisa.PERGUNTAS;
 const POSICAO_FIM = PERGUNTAS.length + 1;
@@ -191,12 +204,24 @@ const MAPA_PERFIL_PAGINA = Object.freeze(
   Object.fromEntries(Array.from(obrigado.LISTA).flatMap((pagina) => Array.from(pagina.perfis, (perfil) => [perfil, pagina.id])))
 );
 
+// Páginas de inscrição com checkout na Hotmart (js/checkout-config.js). Hoje é uma só
+// (/viver-de-furo-inscricao), mas nada aqui usa o nome dela: a LISTA manda. Cada rota serve o
+// arquivo de mesmo nome (/viver-de-furo-inscricao → viver-de-furo-inscricao.html).
+const PAGINAS_CHECKOUT = Array.from(checkout.LISTA);
+const ARQUIVO_INSCRICAO = new Map(PAGINAS_CHECKOUT.map((pagina) => [pagina.rota, `${pagina.rota}.html`]));
+// O caminho do arquivo → a rota pública dele (para og:url, canonical e o cache do estático).
+const ROTA_DA_INSCRICAO = new Map(PAGINAS_CHECKOUT.map((pagina) => [`${pagina.rota}.html`, pagina.rota]));
+
 const routeAliases = new Map([
   [PESQUISA_ROTA, PESQUISA_PAGE],
   [`${PESQUISA_ROTA}/`, PESQUISA_PAGE],
   ...Array.from(ROTAS_OBRIGADO).flatMap((rota) => [
     [rota, OBRIGADO_PAGE],
     [`${rota}/`, OBRIGADO_PAGE]
+  ]),
+  ...Array.from(ARQUIVO_INSCRICAO).flatMap(([rota, arquivo]) => [
+    [rota, arquivo],
+    [`${rota}/`, arquivo]
   ]),
   ["/painel", PAINEL_PAGE],
   ["/painel/", PAINEL_PAGE],
@@ -254,7 +279,7 @@ function isoDateOrNull(value) {
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
 }
 
-async function readJsonBody(request) {
+async function readJsonBody(request, maxBytes = MAX_BODY_BYTES) {
   return await new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -262,7 +287,7 @@ async function readJsonBody(request) {
 
     request.on("data", (chunk) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > maxBytes) {
         tooLarge = true;
         return;
       }
@@ -288,10 +313,10 @@ async function readJsonBody(request) {
 
 // Lê o corpo e já responde os erros de transporte (413, 400, 422 para quem não manda objeto).
 // Devolve null quando a resposta já foi enviada.
-async function readObjectBody(request, response) {
+async function readObjectBody(request, response, maxBytes = MAX_BODY_BYTES) {
   let body;
   try {
-    body = await readJsonBody(request);
+    body = await readJsonBody(request, maxBytes);
   } catch (error) {
     const statusCode = Number(error?.statusCode) || 400;
     sendJson(response, statusCode, { ok: false, error: error?.message === "payload_too_large" ? "payload_too_large" : "invalid_json" });
@@ -1143,6 +1168,227 @@ async function handleSalvar(request, response, options) {
 }
 
 /* ------------------------------------------------------------------------------------------ */
+/* Inscrição com checkout na Hotmart                                                           */
+/* ------------------------------------------------------------------------------------------ */
+
+/**
+ * POST /api/inscricao — o formulário de /viver-de-furo-inscricao.
+ *
+ * Quem monta o link do checkout é o SERVIDOR (EVCheckout.montarUrlCheckout), e é essa URL que a
+ * resposta devolve: o navegador não remonta nada, então uma UTM não se perde por causa de um
+ * bloqueador nem um campo do contato chega diferente do que foi gravado. O contato passa pela
+ * MESMA régua do /api/pesquisa/salvar, inclusive a checagem de domínio do e-mail.
+ */
+async function handleInscricao(request, response, options) {
+  if (request.method !== "POST") return methodNotAllowed(response, "POST");
+  if (!acceptsJsonBody(request, response)) return;
+
+  if (!options.allowInscricao(request)) {
+    sendJson(response, 429, { ok: false, error: "too_many_requests" });
+    return;
+  }
+
+  const body = await readObjectBody(request, response);
+  if (!body) return;
+
+  // Contra a LISTA, e não pelo id cru: paginaPorId lê um objeto literal, e "toString" devolveria
+  // uma função herdada.
+  const pagina = PAGINAS_CHECKOUT.find((item) => item.id === body.pagina) || null;
+  if (!pagina) {
+    sendJson(response, 422, { ok: false, error: "invalid_page" });
+    return;
+  }
+
+  const validacao = validarContato(body.contato);
+  if (validacao.campos) {
+    sendJson(response, 422, { ok: false, error: "invalid_contact", campos: validacao.campos });
+    return;
+  }
+  const { contato } = validacao;
+  if ((await options.checkEmailDomain(leadRules.emailDomain(contato.email))) === "missing") {
+    sendJson(response, 422, { ok: false, error: "invalid_contact", campos: { email: leadRules.MESSAGES.email.domain } });
+    return;
+  }
+
+  // Validado antes de olhar o banco: sem Supabase a tela ainda recebe o erro de contato certo.
+  if (!supabaseEnabled(options)) {
+    sendJson(response, 503, { ok: false, error: "database_not_configured" });
+    return;
+  }
+
+  const rastreio = normalizarRastreio(body.rastreio);
+  const checkoutUrl = checkout.montarUrlCheckout(pagina.checkout, { utm: rastreio, contato });
+
+  try {
+    await callRpc(options, "inscricao_salvar", {
+      p: {
+        id: normalizarUuid(body.id),
+        pagina: pagina.id,
+        visitante_id: normalizarUuid(body.visitante_id),
+        ...contato,
+        checkout_url: checkoutUrl,
+        ...rastreio
+      }
+    });
+  } catch (error) {
+    console.error(`Falha ao salvar inscrição: ${error?.message || "erro"}`);
+    sendJson(response, 502, { ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  sendJson(response, 200, { ok: true, checkout: checkoutUrl });
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Webhook de venda da Hotmart                                                                 */
+/* ------------------------------------------------------------------------------------------ */
+
+/** Comparação de segredo em tempo constante (o tamanho já é público pelo tempo de resposta). */
+function segredoIgual(recebido, esperado) {
+  const a = Buffer.from(String(recebido ?? ""), "utf8");
+  const b = Buffer.from(String(esperado ?? ""), "utf8");
+  if (!b.length || a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * Data da Hotmart: epoch em milissegundos (o normal), epoch em segundos ou texto ISO. Qualquer
+ * outra coisa vira null — um campo de data estranho não pode derrubar o aviso.
+ */
+export function dataHotmart(valor) {
+  if (typeof valor === "number" && Number.isFinite(valor)) {
+    const data = new Date(valor > 1e11 ? valor : valor * 1_000);
+    return Number.isNaN(data.getTime()) ? null : data.toISOString();
+  }
+  if (typeof valor === "string" && valor.trim()) {
+    const texto = valor.trim();
+    if (/^\d{10,16}$/.test(texto)) return dataHotmart(Number(texto));
+    const data = new Date(texto);
+    return Number.isNaN(data.getTime()) ? null : data.toISOString();
+  }
+  return null;
+}
+
+function numeroOuNull(valor) {
+  const numero = typeof valor === "string" ? Number(valor.replace(",", ".")) : valor;
+  return typeof numero === "number" && Number.isFinite(numero) ? numero : null;
+}
+
+function texto(valor, tamanho = 500) {
+  if (typeof valor === "number" && Number.isFinite(valor)) return String(valor);
+  return nullableString(valor, tamanho);
+}
+
+/**
+ * Os campos que importam do payload da Hotmart (Webhook 2.0), tolerando as variações de formato:
+ * o comprador vem em data.buyer OU em data.purchase.buyer; o rastreio em
+ * data.purchase.tracking.{source,source_sck,external_code} OU em data.purchase.sckPaymentLink.
+ * O que não for reconhecido não se perde: o payload CRU vai inteiro para compras.payload.
+ */
+export function extrairVendaHotmart(corpo) {
+  const b = isPlainObject(corpo) ? corpo : {};
+  const d = isPlainObject(b.data) ? b.data : {};
+  const purchase = isPlainObject(d.purchase) ? d.purchase : {};
+  const buyer = isPlainObject(d.buyer) ? d.buyer : isPlainObject(purchase.buyer) ? purchase.buyer : {};
+  const product = isPlainObject(d.product) ? d.product : {};
+  const price = isPlainObject(purchase.price) ? purchase.price : {};
+  const offer = isPlainObject(purchase.offer) ? purchase.offer : {};
+  const tracking = isPlainObject(purchase.tracking) ? purchase.tracking : {};
+
+  // checkout_phone_code é o DDI (55) e vem separado do número: juntar é o que faz os dígitos
+  // baterem com o WhatsApp da inscrição.
+  const ddi = texto(buyer.checkout_phone_code, 10) || "";
+  const numero = texto(buyer.checkout_phone, 40) || texto(buyer.phone, 40) || "";
+  const telefone = numero && ddi && !numero.replace(/\D/g, "").startsWith(ddi.replace(/\D/g, "")) ? `${ddi}${numero}` : numero;
+
+  return {
+    // Só texto vira evento: um `event` numérico é payload estranho, e vira 422 em vez de "42".
+    evento: (nullableString(b.event, 60) || "").toUpperCase(),
+    hotmart_id: texto(b.id, 120),
+    evento_em: dataHotmart(b.creation_date),
+    transacao: texto(purchase.transaction, 120),
+    status: texto(purchase.status, 60),
+    produto_id: texto(product.id ?? product.ucode, 120),
+    produto_nome: texto(product.name, 300),
+    oferta: texto(offer.code ?? offer.key, 120),
+    valor: numeroOuNull(price.value ?? price.total),
+    moeda: texto(price.currency_value ?? price.currency_code, 10),
+    comprador_nome: texto(buyer.name, 200),
+    comprador_email: leadRules.normalizeEmail(texto(buyer.email, 254) || "") || null,
+    comprador_telefone: telefone || null,
+    comprador_digits: telefone ? leadRules.normalizePhoneDigits(telefone) || null : null,
+    sck: texto(tracking.source_sck ?? purchase.sckPaymentLink ?? tracking.external_code, 500),
+    src: texto(tracking.source, 500),
+    pedido_em: dataHotmart(purchase.order_date),
+    aprovado_em: dataHotmart(purchase.approved_date)
+  };
+}
+
+/**
+ * POST /api/hotmart/venda — o endereço que o cliente cola na Hotmart.
+ *
+ * Autentica pelo header X-HOTMART-HOTTOK (o token da aba Autenticação) OU por ?chave= (um segredo
+ * nosso, para o endereço já funcionar antes de o hottok estar configurado). Sem nenhuma das duas
+ * variáveis: 503 — melhor a Hotmart reter e reenviar do que aceitar aviso de qualquer um.
+ * Content-Type não é exigido de propósito: quem manda é um servidor da Hotmart, autenticado por
+ * segredo, e recusar por causa de um cabeçalho perderia venda.
+ */
+async function handleHotmartVenda(request, response, options) {
+  if (request.method !== "POST") return methodNotAllowed(response, "POST");
+
+  const hottok = String(options.hotmartHottok || "").trim();
+  const chave = String(options.hotmartChave || "").trim();
+  if (!hottok && !chave) {
+    sendJson(response, 503, { ok: false, error: "webhook_not_configured" });
+    return;
+  }
+
+  const recebido = request.headers["x-hotmart-hottok"];
+  const chaveDaUrl = new URL(request.url, "http://localhost").searchParams.get("chave");
+  const autorizado = (hottok && segredoIgual(recebido, hottok)) || (chave && segredoIgual(chaveDaUrl, chave));
+  if (!autorizado) {
+    sendJson(response, 401, { ok: false, error: "unauthorized" });
+    return;
+  }
+
+  const body = await readObjectBody(request, response, HOTMART_MAX_BODY_BYTES);
+  if (!body) return;
+
+  const venda = extrairVendaHotmart(body);
+  if (!venda.evento) {
+    sendJson(response, 422, { ok: false, error: "invalid_event" });
+    return;
+  }
+  // Aviso que não é de compra (acesso ao clube, assinatura) é aceito e ignorado: responder erro
+  // faria a Hotmart reenviar para sempre.
+  if (!HOTMART_EVENTO_COMPRA.test(venda.evento)) {
+    sendJson(response, 200, { ok: true, ignorado: true });
+    return;
+  }
+
+  if (!supabaseEnabled(options)) {
+    sendJson(response, 503, { ok: false, error: "database_not_configured" });
+    return;
+  }
+
+  let resultado;
+  try {
+    resultado = await readObjectResponse(await callRpc(options, "hotmart_registrar_compra", { p: { ...venda, payload: body } }));
+  } catch (error) {
+    // 502 de propósito: a Hotmart reenvia o aviso, e nenhuma venda se perde.
+    console.error(`Falha ao registrar compra da Hotmart: ${error?.message || "erro"}`);
+    sendJson(response, 502, { ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  if (resultado.casou !== true) {
+    // Sem dado pessoal no log: só o evento e a transação.
+    console.warn(`Compra sem inscrição correspondente (${venda.evento}${venda.transacao ? ` ${venda.transacao}` : ""}).`);
+  }
+  sendJson(response, 200, { ok: true });
+}
+
+/* ------------------------------------------------------------------------------------------ */
 /* Painel: sessão                                                                              */
 /* ------------------------------------------------------------------------------------------ */
 
@@ -1492,6 +1738,55 @@ function handlePaginas(request, response, options) {
   });
 }
 
+/** A página de inscrição pedida no filtro (?pagina=). Vazio = todas. Página que não existe → 422. */
+function lerPaginaCheckout(params) {
+  const pedida = safeString(params.get("pagina"), 60);
+  if (!pedida) return null;
+  const pagina = PAGINAS_CHECKOUT.find((item) => item.id === pedida);
+  if (!pagina) invalido();
+  return pagina.id;
+}
+
+/**
+ * Inscrições e compras da(s) página(s) de checkout: os números vêm do SQL (inscricoes_resumo, o
+ * período inteiro) e a lista de inscritos vem da tabela, paginada — os mesmos filtros nos dois.
+ */
+function handleInscricoesPainel(request, response, options) {
+  return rotaDoPainel(request, response, options, "as inscrições", async (params) => {
+    const { desde, ate } = lerPeriodo(params);
+    const pagina = lerPaginaCheckout(params);
+    const limite = lerInteiro(params, "limite", { padrao: PAINEL_LIST_PADRAO, minimo: 1, maximo: PAINEL_LIST_MAX });
+    const offset = lerInteiro(params, "offset", { padrao: 0, minimo: 0 });
+
+    const query = new URLSearchParams();
+    query.set("select", "*");
+    // id desempata quem entrou no mesmo instante: sem ele, "Carregar mais" repetiria ou pularia gente.
+    query.set("order", "criado_em.desc,id.desc");
+    query.set("limit", String(limite));
+    query.set("offset", String(offset));
+    if (pagina) query.set("pagina", `eq.${pagina}`);
+    if (desde) query.append("criado_em", `gte.${desde}`);
+    if (ate) query.append("criado_em", `lt.${ate}`);
+
+    // As duas idas ao banco vão juntas: os números e a lista chegam no mesmo tempo de uma.
+    const [resumoResponse, listaResponse] = await Promise.all([
+      callRpc(options, "inscricoes_resumo", { p_desde: desde, p_ate: ate, p_pagina: pagina }),
+      supabaseRequest(options, `inscricoes?${query.toString()}`, { headers: { Prefer: "count=exact" } })
+    ]);
+    const resumo = await readObjectResponse(resumoResponse);
+    if (!Array.isArray(resumo.paginas)) throw new Error("supabase_unexpected_shape");
+    const itens = await listaResponse.json();
+    if (!Array.isArray(itens)) throw new Error("supabase_unexpected_shape");
+
+    return {
+      resumo,
+      itens,
+      total: totalFromContentRange(listaResponse, offset + itens.length),
+      gerado_em: new Date(options.now()).toISOString()
+    };
+  });
+}
+
 /* ------------------------------------------------------------------------------------------ */
 /* Exportação CSV                                                                              */
 /* ------------------------------------------------------------------------------------------ */
@@ -1627,7 +1922,12 @@ function escrever(response, texto) {
   });
 }
 
-async function handleExportarCsv(request, response, options) {
+/**
+ * Molde comum dos dois CSV do painel: 302 para quem clicou com a sessão vencida, 401/503/422,
+ * primeira página antes do cabeçalho HTTP (para o erro do banco ainda virar 502) e corte da
+ * conexão se o banco cair no meio, em vez de uma planilha pela metade parecendo completa.
+ */
+async function exportarCsv(request, response, options, { rotulo, colunas, nomeArquivo, paginaDeDados }) {
   if (request.method !== "GET") return methodNotAllowed(response, "GET");
   // O botão "Baixar CSV" é um link comum: com a sessão vencida, o navegador baixaria o JSON do
   // erro como se fosse a planilha. Quem veio de um clique (pede HTML) volta para o login.
@@ -1648,43 +1948,19 @@ async function handleExportarCsv(request, response, options) {
   }
 
   const params = new URL(request.url, "http://localhost").searchParams;
-  let base;
-  let filtros;
+  let pagina;
   try {
-    const tentativas = safeString(params.get("tentativas"), 20);
-    if (tentativas && tentativas !== "todas") invalido();
-    // "todas" = cada tentativa numa linha (tabela crua); o padrão é uma linha por pessoa (view).
-    base = tentativas === "todas" ? "pesquisa_respostas" : "pesquisa_pessoas";
-    filtros = { ...lerFiltrosComuns(params), status: lerStatus(params), busca: lerBusca(params) };
+    pagina = paginaDeDados(params);
   } catch {
     sendJson(response, 422, { ok: false, error: "invalid_filters" });
     return;
   }
 
-  // Ordem crescente de propósito: com offset, quem se inscrever durante a exportação entra no
-  // FIM da lista, e nenhuma linha já baixada escorrega de página (em ordem decrescente, cada
-  // inscrição nova empurraria uma linha para a página seguinte e ela sairia repetida).
-  function pagina(offset) {
-    const query = new URLSearchParams();
-    query.set("select", "*");
-    query.set("order", "criado_em.asc,id.asc");
-    query.set("limit", String(EXPORT_PAGE_SIZE));
-    query.set("offset", String(offset));
-    filtrosPostgrest(query, filtros);
-    return supabaseRequest(options, `${base}?${query.toString()}`).then(async (resposta) => {
-      const linhas = await resposta.json();
-      if (!Array.isArray(linhas)) throw new Error("supabase_unexpected_shape");
-      return linhas;
-    });
-  }
-
-  // A primeira página vem antes do cabeçalho HTTP: se o banco falhar logo de cara, a resposta
-  // ainda pode ser um 502 decente em vez de um arquivo vazio.
   let linhas;
   try {
     linhas = await pagina(0);
   } catch (error) {
-    console.error(`Falha ao exportar o CSV: ${error?.message || "erro"}`);
+    console.error(`Falha ao exportar ${rotulo}: ${error?.message || "erro"}`);
     sendJson(response, 502, { ok: false, error: "database_unavailable" });
     return;
   }
@@ -1697,20 +1973,20 @@ async function handleExportarCsv(request, response, options) {
   const dia = DIA_BRASILIA.format(new Date(options.now()));
   response.writeHead(200, {
     "Content-Type": "text/csv; charset=utf-8",
-    "Content-Disposition": `attachment; filename="pesquisa-icp-${dia}.csv"`,
+    "Content-Disposition": `attachment; filename="${nomeArquivo}-${dia}.csv"`,
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff"
   });
 
   // BOM: sem ele o Excel abre o UTF-8 como Latin-1 e "Técnico" vira "TÃ©cnico".
-  await escrever(response, `\uFEFF${linhaCsv(COLUNAS_CSV.map((coluna) => coluna.cabecalho))}`);
+  await escrever(response, `﻿${linhaCsv(colunas.map((coluna) => coluna.cabecalho))}`);
 
   let offset = 0;
   try {
     for (;;) {
       for (const linha of linhas) {
         if (cancelado) return;
-        await escrever(response, linhaCsv(COLUNAS_CSV.map((coluna) => coluna.valor(linha))));
+        await escrever(response, linhaCsv(colunas.map((coluna) => coluna.valor(linha))));
       }
       if (linhas.length < EXPORT_PAGE_SIZE || cancelado) break;
       offset += EXPORT_PAGE_SIZE;
@@ -1718,11 +1994,97 @@ async function handleExportarCsv(request, response, options) {
     }
     response.end();
   } catch (error) {
-    // O 200 já saiu. Cortar a conexão faz o navegador marcar o download como falho, em vez de
-    // entregar uma planilha pela metade parecendo completa.
-    console.error(`Falha ao exportar o CSV no meio: ${error?.message || "erro"}`);
+    console.error(`Falha ao exportar ${rotulo} no meio: ${error?.message || "erro"}`);
     response.destroy();
   }
+}
+
+function handleExportarCsv(request, response, options) {
+  return exportarCsv(request, response, options, {
+    rotulo: "o CSV da pesquisa",
+    colunas: COLUNAS_CSV,
+    nomeArquivo: "pesquisa-icp",
+    paginaDeDados: (params) => {
+      const tentativas = safeString(params.get("tentativas"), 20);
+      if (tentativas && tentativas !== "todas") invalido();
+      // "todas" = cada tentativa numa linha (tabela crua); o padrão é uma linha por pessoa (view).
+      const base = tentativas === "todas" ? "pesquisa_respostas" : "pesquisa_pessoas";
+      const filtros = { ...lerFiltrosComuns(params), status: lerStatus(params), busca: lerBusca(params) };
+      return (offset) => {
+        const query = new URLSearchParams();
+        query.set("select", "*");
+        query.set("order", "criado_em.asc,id.asc");
+        query.set("limit", String(EXPORT_PAGE_SIZE));
+        query.set("offset", String(offset));
+        filtrosPostgrest(query, filtros);
+        return supabaseRequest(options, `${base}?${query.toString()}`).then(async (resposta) => {
+          const linhas = await resposta.json();
+          if (!Array.isArray(linhas)) throw new Error("supabase_unexpected_shape");
+          return linhas;
+        });
+      };
+    }
+  });
+}
+
+/**
+ * As colunas do CSV de inscrições. `sck` é o utm_term: é ele que vai no link do checkout e volta
+ * no aviso de venda da Hotmart — a coluna existe com o nome que o cliente vê no relatório de lá.
+ */
+export const COLUNAS_CSV_INSCRICOES = Object.freeze(
+  [
+    ["data", (l) => dataHoraBrasilia(l.criado_em)],
+    ["nome", (l) => l.nome],
+    ["whatsapp", (l) => l.whatsapp],
+    ["whatsapp_internacional", (l) => l.whatsapp_internacional],
+    ["email", (l) => l.email],
+    ["pagina", (l) => l.pagina],
+    ["cliques", (l) => l.cliques],
+    ["comprou_em", (l) => dataHoraBrasilia(l.comprou_em)],
+    ["compra_status", (l) => l.compra_status],
+    ["compra_valor", (l) => (l.compra_valor == null || l.compra_valor === "" ? "" : String(l.compra_valor).replace(".", ","))],
+    ["compra_transacao", (l) => l.compra_transacao],
+    ["utm_source", (l) => l.utm_source],
+    ["utm_medium", (l) => l.utm_medium],
+    ["utm_campaign", (l) => l.utm_campaign],
+    ["utm_term", (l) => l.utm_term],
+    ["utm_content", (l) => l.utm_content],
+    ["sck", (l) => l.utm_term],
+    ["fbclid", (l) => l.fbclid],
+    ["gclid", (l) => l.gclid],
+    ["page_url", (l) => l.page_url],
+    ["referrer", (l) => l.referrer],
+    ["dispositivo", (l) => l.dispositivo]
+  ].map(([cabecalho, valor]) => Object.freeze({ cabecalho, valor }))
+);
+
+function handleExportarInscricoesCsv(request, response, options) {
+  return exportarCsv(request, response, options, {
+    rotulo: "o CSV de inscrições",
+    colunas: COLUNAS_CSV_INSCRICOES,
+    nomeArquivo: "inscricoes",
+    paginaDeDados: (params) => {
+      const { desde, ate } = lerPeriodo(params);
+      const pagina = lerPaginaCheckout(params);
+      // Ordem crescente: com offset, quem se inscrever durante a exportação entra no FIM da lista,
+      // e nenhuma linha já baixada escorrega de página.
+      return (offset) => {
+        const query = new URLSearchParams();
+        query.set("select", "*");
+        query.set("order", "criado_em.asc,id.asc");
+        query.set("limit", String(EXPORT_PAGE_SIZE));
+        query.set("offset", String(offset));
+        if (pagina) query.set("pagina", `eq.${pagina}`);
+        if (desde) query.append("criado_em", `gte.${desde}`);
+        if (ate) query.append("criado_em", `lt.${ate}`);
+        return supabaseRequest(options, `inscricoes?${query.toString()}`).then(async (resposta) => {
+          const linhas = await resposta.json();
+          if (!Array.isArray(linhas)) throw new Error("supabase_unexpected_shape");
+          return linhas;
+        });
+      };
+    }
+  });
 }
 
 /* ------------------------------------------------------------------------------------------ */
@@ -1804,8 +2166,9 @@ export function origemDaRequisicao(headers = {}) {
 // O Pixel entra só na pesquisa e nas páginas de obrigado. O painel tem dado pessoal na tela: nada
 // de terceiros ali. `rota` é o endereço público (as 3 páginas de obrigado são o mesmo arquivo).
 function transformPage(source, pathname, pixelId, siteUrl, rota) {
-  if (pathname !== PESQUISA_PAGE && pathname !== OBRIGADO_PAGE) return source;
-  let saida = metaDoSite(source, siteUrl, pathname === OBRIGADO_PAGE ? rota : PESQUISA_ROTA);
+  const inscricao = ROTA_DA_INSCRICAO.get(pathname) || "";
+  if (pathname !== PESQUISA_PAGE && pathname !== OBRIGADO_PAGE && !inscricao) return source;
+  let saida = metaDoSite(source, siteUrl, pathname === OBRIGADO_PAGE ? rota : inscricao || PESQUISA_ROTA);
   if (pixelId && !saida.includes("fbq('init'")) saida = saida.replace("</head>", `${metaPixelCode(pixelId)}</head>`);
   return saida;
 }
@@ -1949,7 +2312,7 @@ async function serveStatic(request, response, config) {
     // requisição, e por isso ENTRA NA CHAVE do cache: um Host forjado só muda a página de quem o
     // forjou, nunca a de outra pessoa. A rota também entra: as 3 páginas de obrigado são o mesmo
     // arquivo com og:url/canonical diferentes.
-    const comOrigem = pathname === PESQUISA_PAGE || pathname === OBRIGADO_PAGE;
+    const comOrigem = pathname === PESQUISA_PAGE || pathname === OBRIGADO_PAGE || ROTA_DA_INSCRICAO.has(pathname);
     const origem = comOrigem ? config.siteUrl || origemDaRequisicao(request.headers) : "";
     const rota = pathname === OBRIGADO_PAGE ? requestedPath.replace(/\/+$/, "") : "";
     // Cada arquivo é transformado e comprimido uma única vez por versão (mtime + tamanho).
@@ -2020,6 +2383,9 @@ export function createServerApp({
   painelEmail = "",
   painelSenhaHash = "",
   painelSessaoSegredo = "",
+  // Webhook de venda da Hotmart. Sem nenhuma das duas, POST /api/hotmart/venda responde 503.
+  hotmartHottok = "",
+  hotmartChave = "",
   webhookUrl = "",
   webhookEsperasMs = WEBHOOK_ESPERAS_MS,
   siteUrl = "",
@@ -2043,6 +2409,8 @@ export function createServerApp({
     painelEmail,
     painelSenhaHash,
     painelSessaoSegredo,
+    hotmartHottok,
+    hotmartChave,
     webhookUrl: String(webhookUrl || "").trim().toLowerCase() === "off" ? "" : webhookUrl,
     webhookEsperasMs: Array.isArray(webhookEsperasMs) && webhookEsperasMs.length ? webhookEsperasMs : WEBHOOK_ESPERAS_MS,
     siteUrl: normalizarSiteUrl(siteUrl),
@@ -2054,6 +2422,7 @@ export function createServerApp({
     allowEvento: createRateLimiter({ windowMs: EVENTO_RATE_LIMIT_WINDOW_MS, max: EVENTO_RATE_LIMIT_MAX, now: agora }),
     allowPaginaEvento: createRateLimiter({ windowMs: EVENTO_RATE_LIMIT_WINDOW_MS, max: EVENTO_RATE_LIMIT_MAX, now: agora }),
     allowSalvar: createRateLimiter({ windowMs: SALVAR_RATE_LIMIT_WINDOW_MS, max: SALVAR_RATE_LIMIT_MAX, now: agora }),
+    allowInscricao: createRateLimiter({ windowMs: INSCRICAO_RATE_LIMIT_WINDOW_MS, max: INSCRICAO_RATE_LIMIT_MAX, now: agora }),
     allowLogin: createRateLimiter({ windowMs: PAINEL_LOGIN_WINDOW_MS, max: PAINEL_LOGIN_MAX, now: agora })
   };
 
@@ -2061,6 +2430,8 @@ export function createServerApp({
     ["/api/pesquisa/evento", handleEvento],
     ["/api/pesquisa/salvar", handleSalvar],
     ["/api/pagina/evento", handlePaginaEvento],
+    ["/api/inscricao", handleInscricao],
+    ["/api/hotmart/venda", handleHotmartVenda],
     ["/api/painel/login", handleLogin],
     ["/api/painel/logout", handleLogout],
     [
@@ -2076,7 +2447,9 @@ export function createServerApp({
     ["/api/painel/abertas", handleAbertas],
     ["/api/painel/cruzamento", handleCruzamento],
     ["/api/painel/paginas", handlePaginas],
-    ["/api/painel/exportar.csv", handleExportarCsv]
+    ["/api/painel/inscricoes", handleInscricoesPainel],
+    ["/api/painel/exportar.csv", handleExportarCsv],
+    ["/api/painel/exportar-inscricoes.csv", handleExportarInscricoesCsv]
   ]);
 
   const server = createServer(async (request, response) => {
@@ -2184,12 +2557,18 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (!normalizarSiteUrl(env.SITE_URL)) console.warn("Aviso: SITE_URL ausente — og:url, canonical e a imagem da prévia usam o endereço de cada requisição (Host/X-Forwarded-Host).");
   if (!normalizarPixelId(metaPixelId)) console.warn("Aviso: Meta Pixel desligado (META_PIXEL_ID = off ou inválido).");
 
+  if (!env.HOTMART_HOTTOK && !env.HOTMART_WEBHOOK_CHAVE) {
+    console.warn("Aviso: HOTMART_HOTTOK e HOTMART_WEBHOOK_CHAVE ausentes — o webhook de venda da Hotmart responde 503 e nenhuma compra é registrada.");
+  }
+
   const server = createServerApp({
     supabaseUrl: env.SUPABASE_URL || "",
     supabaseKey: env.SUPABASE_SERVICE_ROLE_KEY || "",
     painelEmail: env.PAINEL_EMAIL || "",
     painelSenhaHash: env.PAINEL_SENHA_HASH || "",
     painelSessaoSegredo: env.PAINEL_SESSAO_SEGREDO || "",
+    hotmartHottok: env.HOTMART_HOTTOK || "",
+    hotmartChave: env.HOTMART_WEBHOOK_CHAVE || "",
     webhookUrl,
     siteUrl: env.SITE_URL || "",
     metaPixelId,
