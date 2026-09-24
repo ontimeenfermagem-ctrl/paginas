@@ -11,7 +11,7 @@
  * js/lead-rules.js (nome, WhatsApp, e-mail) são os mesmos arquivos que rodam no navegador,
  * carregados com vm. O que a tela aceita é exatamente o que o servidor grava.
  */
-import { createHmac, scrypt, timingSafeEqual } from "node:crypto";
+import { createHmac, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import { Resolver } from "node:dns/promises";
 import { createReadStream, readFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
@@ -156,6 +156,11 @@ const PESQUISA_ROTAS_ANTIGAS = new Set(["/pesquisa", "/pesquisa/"]);
 // As 3 páginas de obrigado são UM arquivo (obrigado.html); a rota diz qual delas mostrar. As rotas
 // vêm de js/obrigado-config.js (mais abaixo, em routeAliases).
 const OBRIGADO_PAGE = "/obrigado.html";
+// Atualização de perfil: o caminho curto do UnniChat (contato + profissão). Grava na mesma tabela
+// da pesquisa, com um id de pesquisa próprio, para não misturar com o mapeamento de ICP.
+const PERFIL_ROTA = "/atualizacao-perfil";
+const PERFIL_PAGE = "/atualizacao-perfil.html";
+const PESQUISA_ATUALIZACAO = "atualizacao-perfil";
 
 const brotliCompressAsync = promisify(brotliCompress);
 const gzipAsync = promisify(gzip);
@@ -225,6 +230,8 @@ const routeAliases = new Map([
     [rota, arquivo],
     [`${rota}/`, arquivo]
   ]),
+  [PERFIL_ROTA, PERFIL_PAGE],
+  [`${PERFIL_ROTA}/`, PERFIL_PAGE],
   ["/painel", PAINEL_PAGE],
   ["/painel/", PAINEL_PAGE],
   ["/favicon.ico", "/img/favicon-32.png"]
@@ -2266,8 +2273,10 @@ export function origemDaRequisicao(headers = {}) {
 // de terceiros ali. `rota` é o endereço público (as 3 páginas de obrigado são o mesmo arquivo).
 function transformPage(source, pathname, pixelId, siteUrl, rota) {
   const inscricao = ROTA_DA_INSCRICAO.get(pathname) || "";
-  if (pathname !== PESQUISA_PAGE && pathname !== OBRIGADO_PAGE && !inscricao) return source;
-  let saida = metaDoSite(source, siteUrl, pathname === OBRIGADO_PAGE ? rota : inscricao || PESQUISA_ROTA);
+  if (pathname !== PESQUISA_PAGE && pathname !== OBRIGADO_PAGE && pathname !== PERFIL_PAGE && !inscricao) return source;
+  const rotaDaPagina =
+    pathname === OBRIGADO_PAGE ? rota : pathname === PERFIL_PAGE ? PERFIL_ROTA : inscricao || PESQUISA_ROTA;
+  let saida = metaDoSite(source, siteUrl, rotaDaPagina);
   if (pixelId && !saida.includes("fbq('init'")) saida = saida.replace("</head>", `${metaPixelCode(pixelId)}</head>`);
   return saida;
 }
@@ -2316,7 +2325,7 @@ function staticHeaders(pathname, extension) {
 
   const doPainel = PAINEL_PATHS.has(pathname);
   // Página de obrigado não é porta de entrada: sem índice de busca (quem chega é quem terminou).
-  if (pathname === OBRIGADO_PAGE) headers["X-Robots-Tag"] = "noindex, nofollow, noarchive";
+  if (pathname === OBRIGADO_PAGE || pathname === PERFIL_PAGE) headers["X-Robots-Tag"] = "noindex, nofollow, noarchive";
   if (doPainel) {
     // O X-Robots-Tag repete no cabeçalho o que a meta tag diz no HTML. O no-referrer impede que o
     // endereço do painel vaze quando alguém clica, de dentro dele, no WhatsApp de um lead.
@@ -2472,6 +2481,93 @@ function normalizarPixelId(valor) {
 }
 
 /* ------------------------------------------------------------------------------------------ */
+/* POST /api/atualizacao-perfil — o caminho curto do UnniChat                                   */
+/*                                                                                              */
+/* Contato + profissão, nada mais. Grava na MESMA tabela da pesquisa (pesquisa_salvar), com      */
+/* pesquisa = "atualizacao-perfil": a view pesquisa_pessoas continua sendo uma linha por pessoa  */
+/* por pesquisa, o GET /api/leads/perfil acha as duas, e os números do painel de ICP não são     */
+/* contaminados por quem respondeu só uma pergunta.                                             */
+/* ------------------------------------------------------------------------------------------ */
+
+async function handleAtualizacaoPerfil(request, response, options) {
+  if (request.method !== "POST") return methodNotAllowed(response, "POST");
+  if (!acceptsJsonBody(request, response)) return;
+
+  if (!options.allowSalvar(request)) {
+    sendJson(response, 429, { ok: false, error: "too_many_requests" });
+    return;
+  }
+
+  const body = await readObjectBody(request, response);
+  if (!body) return;
+
+  const validacao = validarContato(body.contato);
+  if (validacao.campos) {
+    sendJson(response, 422, { ok: false, error: "invalid_contact", campos: validacao.campos });
+    return;
+  }
+  const { contato } = validacao;
+  if ((await options.checkEmailDomain(leadRules.emailDomain(contato.email))) === "missing") {
+    sendJson(response, 422, { ok: false, error: "invalid_contact", campos: { email: leadRules.MESSAGES.email.domain } });
+    return;
+  }
+
+  // O perfil vem como o rótulo da tela e é conferido contra a pergunta 1 da pesquisa: uma lista só
+  // no projeto. O código interno (auxiliar_atendente, cuidador, ...) sai do mesmo PERFIL_CODIGO.
+  const perfil = typeof body.perfil === "string" ? body.perfil.trim() : "";
+  const profession = valorDoPerfil(pesquisa.PERFIL_CODIGO, perfil);
+  if (!profession) {
+    sendJson(response, 422, { ok: false, error: "invalid_perfil" });
+    return;
+  }
+
+  if (!supabaseEnabled(options)) {
+    sendJson(response, 503, { ok: false, error: "database_not_configured" });
+    return;
+  }
+
+  const rastreio = normalizarRastreio(body.rastreio);
+  const paginaObrigado = paginaObrigadoDoPerfil(perfil);
+
+  try {
+    await callRpc(options, "pesquisa_salvar", {
+      p: {
+        id: normalizarUuid(body.id) || randomUUID(),
+        pesquisa: PESQUISA_ATUALIZACAO,
+        pesquisa_versao: pesquisa.VERSAO,
+        visitante_id: normalizarUuid(body.visitante_id),
+        // seq alto e fixo: esta pesquisa tem uma resposta só, e um reenvio nunca "volta no tempo".
+        seq: 1,
+        ...contato,
+        perfil,
+        respostas: { perfil },
+        pergunta_atual: "fim",
+        etapa_atual: 1,
+        posicao: 1,
+        pergunta_posicao: "fim",
+        etapa_posicao: 1,
+        respondidas: 1,
+        obrigatorias: 1,
+        obrigatorias_respondidas: 1,
+        total_perguntas: 1,
+        progresso_percentual: 100,
+        completa: true,
+        finalizou: true,
+        tempos: {},
+        ...rastreio
+      }
+    });
+  } catch (error) {
+    console.error(`Falha ao salvar a atualização de perfil: ${error?.message || "erro"}`);
+    sendJson(response, 502, { ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  console.log(`atualizacao-perfil: perfil ${profession} gravado`);
+  sendJson(response, 200, { ok: true, profession, obrigado: paginaObrigado ? paginaObrigado.rota : null });
+}
+
+/* ------------------------------------------------------------------------------------------ */
 /* GET /api/leads/perfil — a consulta do UnniChat                                              */
 /*                                                                                              */
 /* O UnniChat dispara o template no WhatsApp, a pessoa responde a pesquisa aqui e ele volta para */
@@ -2545,7 +2641,10 @@ async function handleLeadPerfil(request, response, options, idDireto = "") {
   try {
     const filtro = idDireto
       ? `id=eq.${encodeURIComponent(idDireto)}`
-      : `pesquisa=eq.${encodeURIComponent(pesquisa.ID)}&whatsapp_digits=eq.${encodeURIComponent(digitos)}`;
+      : // As duas pesquisas: o mapeamento completo (/pesquisa-icp) e a atualização curta
+        // (/atualizacao-perfil). Quem respondeu nas duas volta pela linha que TEM perfil.
+        `pesquisa=in.(${encodeURIComponent(pesquisa.ID)},${encodeURIComponent(PESQUISA_ATUALIZACAO)})` +
+        `&whatsapp_digits=eq.${encodeURIComponent(digitos)}&order=perfil.asc.nullslast,atualizado_em.desc`;
     const pessoa = await primeiraLinha(
       options,
       `pesquisa_pessoas?${filtro}&select=id,whatsapp_digits,whatsapp_internacional,perfil,concluido_em&limit=1`
@@ -2660,6 +2759,7 @@ export function createServerApp({
     ["/api/pagina/evento", handlePaginaEvento],
     ["/api/inscricao", handleInscricao],
     ["/api/hotmart/venda", handleHotmartVenda],
+    ["/api/atualizacao-perfil", handleAtualizacaoPerfil],
     ["/api/leads/perfil", handleLeadPerfil],
     ["/api/painel/login", handleLogin],
     ["/api/painel/logout", handleLogout],

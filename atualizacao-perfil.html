@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!--
+      Atualização de perfil de aluna: o caminho curto do UnniChat.
+
+      A pessoa recebe o template no WhatsApp, toca em "Atualizar perfil" e cai aqui. São duas telas:
+      contato (nome, WhatsApp, e-mail) e a profissão. No fim, vai para a mesma página de obrigado da
+      pesquisa de ICP, pelo perfil, e o GET /api/leads/perfil passa a devolver a profissão dela.
+
+      Quem quer o mapeamento completo (33 perguntas) continua em /pesquisa-icp: esta página existe
+      justamente para NÃO pedir tudo aquilo quando a gente só precisa do funil.
+    -->
+    <title>Atualizar perfil de aluno | Escola Enfermagem de Valor</title>
+    <meta
+      name="description"
+      content="Atualize seu perfil de aluno da Escola Enfermagem de Valor: nome, WhatsApp, e-mail e sua profissão."
+    />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="theme-color" content="#f4ebdd" />
+    <meta name="format-detection" content="telephone=no" />
+
+    <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/img/apple-touch-icon.png" />
+    <link rel="preload" href="/fonts/parkinsans-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <!-- Reaproveita a folha da página de inscrição (mesmos tokens e campos) e acrescenta só as
+         opções de profissão e o passo 2. -->
+    <link rel="stylesheet" href="/css/inscricao.css" />
+    <link rel="stylesheet" href="/css/atualizacao.css" />
+    <noscript><style>.ins-form{display:none !important}.ins-sem-js{display:flex !important}</style></noscript>
+
+    <script src="/js/lead-rules.js" defer></script>
+    <script src="/js/pesquisa-config.js" defer></script>
+    <script src="/js/obrigado-config.js" defer></script>
+    <script src="/js/atualizacao.js" defer></script>
+  </head>
+  <body class="grao">
+    <a class="pular-link" href="#conteudo">Pular para o conteúdo</a>
+
+    <main id="conteudo" class="palco">
+      <section class="ins" aria-labelledby="ins-titulo">
+        <img class="ins-logo" src="/img/ev-logo-color.png" alt="Escola Enfermagem de Valor" width="414" height="252" />
+
+        <p class="eyebrow" id="ins-eyebrow"><span>Perfil de aluno ·</span> <span>Escola Enfermagem de Valor</span></p>
+
+        <!-- Passo 1: contato -->
+        <div class="passo" id="passo-contato">
+          <h1 class="ins-titulo" id="ins-titulo" tabindex="-1">Atualize seu perfil</h1>
+          <p class="ins-apoio">Leva menos de um minuto: seus dados e a sua profissão hoje.</p>
+
+          <form class="ins-form" id="form-contato" novalidate>
+            <div class="campo" data-campo="nome">
+              <label for="campo-nome">Nome completo</label>
+              <input
+                id="campo-nome"
+                name="nome"
+                type="text"
+                autocomplete="name"
+                autocapitalize="words"
+                enterkeyhint="next"
+                maxlength="120"
+                aria-describedby="erro-nome"
+                placeholder="Como você se chama?"
+              />
+              <p class="campo-erro" id="erro-nome" role="alert" hidden></p>
+            </div>
+
+            <div class="campo" data-campo="whatsapp">
+              <label for="campo-whatsapp">WhatsApp com DDD</label>
+              <input
+                id="campo-whatsapp"
+                name="whatsapp"
+                type="tel"
+                inputmode="numeric"
+                autocomplete="tel-national"
+                enterkeyhint="next"
+                maxlength="25"
+                aria-describedby="erro-whatsapp"
+                placeholder="(00) 00000-0000"
+              />
+              <p class="campo-erro" id="erro-whatsapp" role="alert" hidden></p>
+            </div>
+
+            <div class="campo" data-campo="email">
+              <label for="campo-email">E-mail</label>
+              <input
+                id="campo-email"
+                name="email"
+                type="email"
+                inputmode="email"
+                autocomplete="email"
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck="false"
+                enterkeyhint="go"
+                maxlength="254"
+                aria-describedby="erro-email"
+                placeholder="seuemail@exemplo.com"
+              />
+              <p class="campo-erro" id="erro-email" role="alert" hidden></p>
+              <div class="sugestao" id="sugestao-email" role="group" aria-labelledby="sugestao-texto" hidden>
+                <p id="sugestao-texto">Você quis dizer <strong id="sugestao-valor"></strong>?</p>
+                <div class="sugestao-botoes">
+                  <button type="button" class="sugestao-sim" id="sugestao-sim">Sim, corrigir</button>
+                  <button type="button" class="sugestao-nao" id="sugestao-nao">Não, meu e-mail está certo</button>
+                </div>
+              </div>
+            </div>
+
+            <p class="form-status" id="contato-status" role="alert"></p>
+
+            <button type="submit" class="botao-checkout" id="botao-continuar">
+              <span class="botao-checkout-texto">CONTINUAR</span>
+              <span class="botao-carregando" aria-hidden="true"></span>
+            </button>
+          </form>
+        </div>
+
+        <!-- Passo 2: a profissão, que decide o funil -->
+        <div class="passo" id="passo-perfil" hidden>
+          <h2 class="ins-titulo" id="perfil-titulo" tabindex="-1">Hoje você é:</h2>
+          <p class="ins-apoio" id="perfil-apoio">Toque na opção que combina com você.</p>
+
+          <div class="opcoes" id="opcoes-perfil" role="radiogroup" aria-labelledby="perfil-titulo"></div>
+
+          <p class="form-status" id="perfil-status" role="alert"></p>
+        </div>
+
+        <div class="ins-sem-js">
+          <p>
+            Para atualizar seu perfil, esta página precisa do JavaScript do navegador. Se você abriu pelo Instagram ou
+            pelo WhatsApp, toque nos três pontinhos e escolha “Abrir no navegador”.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <div class="sr-only" id="ins-aviso" aria-live="polite"></div>
+  </body>
+</html>
