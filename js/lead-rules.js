@@ -6,7 +6,9 @@
  * (quintino-landing/js/lead-rules.js), com duas diferenças de propósito:
  *
  *   . o e-mail aceita qualquer domínio real (.net, .org, .edu.br, .gov.br...), e não só .com e
- *     .com.br — tem muita profissional de saúde com e-mail de prefeitura e de hospital;
+ *     .com.br — tem muita profissional de saúde com e-mail de prefeitura e de hospital. A régua do
+ *     Preparatório (só .com e .com.br) continua disponível por página: emailError(valor,
+ *     { somenteComBr: true }), usada na Imersão GPS;
  *   . o nome pede sobrenome, como a sala da Enfermagem de Valor já pede.
  *
  * Nenhuma função aqui lança erro nem toca em DOM ou rede.
@@ -116,7 +118,8 @@
       empty: "Informe seu e-mail.",
       invalid: "Confere o e-mail, parece que tem algo errado.",
       typo: "Confere o final do e-mail, parece que tem um erro de digitação.",
-      domain: "Não encontramos esse endereço de e-mail. Confere se está certinho?"
+      domain: "Não encontramos esse endereço de e-mail. Confere se está certinho?",
+      com_br: "Use um e-mail que termine em .com ou .com.br."
     })
   });
 
@@ -222,12 +225,21 @@
     return { user: email.slice(0, at), domain: email.slice(at + 1) };
   }
 
+  /** O domínio termina em .com ou .com.br (a régua do Preparatório e do site da Escola). */
+  function isComOrComBr(domain) {
+    return /\.com(\.br)?$/.test(toText(domain).trim().toLowerCase());
+  }
+
   /**
-   * "" | "empty" | "invalid" | "typo".
+   * "" | "empty" | "invalid" | "typo" | "com_br".
    * "typo" é um endereço bem formado que com certeza não existe (gmail.com.br, hotmail.con):
    * bloqueia igual a "invalid", mas a tela pode oferecer a correção de suggestEmail.
+   * "com_br" só existe com { somenteComBr: true }: o endereço é válido, mas a página só aceita
+   * domínio terminado em .com ou .com.br. Vem depois de "typo", para gmail.con ainda ganhar a
+   * sugestão de correção em vez de só ser recusado.
    */
-  function emailError(value) {
+  function emailError(value, options) {
+    const somenteComBr = Boolean(options && options.somenteComBr === true);
     const email = normalizeEmail(value);
     if (!email) return "empty";
     if (email.length > 254) return "invalid";
@@ -244,6 +256,7 @@
 
     if (TLD_TYPOS.has(tld)) return "typo";
     if (STRICT_PROVIDERS.has(labels[0]) && !KNOWN_DOMAINS.has(domain)) return "typo";
+    if (somenteComBr && !isComOrComBr(domain)) return "com_br";
     return "";
   }
 
@@ -309,6 +322,7 @@
     formatName,
     formatPhone,
     formatPhoneWhileTyping,
+    isComOrComBr,
     message,
     nameError,
     normalizeEmail,

@@ -443,7 +443,10 @@ caso(
 /** Confere a URL montada no navegador: oferta, modo, UTMs, sck=utm_term e o contato. */
 function conferirUrlMontada(url) {
   assert.equal(url.origin + url.pathname, "https://pay.hotmart.com/Y74893363S");
-  assert.equal(url.searchParams.get("off"), PAGINA.oferta);
+  // A oferta sai do próprio link do config (o campo `oferta` separado deixou de existir): é a mesma
+  // que o webhook usa para reconhecer a venda como desta página.
+  assert.equal(url.searchParams.get("off"), C.ofertaDoLink(PAGINA.checkout));
+  assert.ok(PAGINA.hotmart.ofertas.includes(url.searchParams.get("off")), "a oferta do link é uma das que o webhook reconhece");
   assert.equal(url.searchParams.get("checkoutMode"), "10");
   assert.equal(url.searchParams.get("utm_source"), "meta");
   assert.equal(url.searchParams.get("utm_medium"), "cpc");

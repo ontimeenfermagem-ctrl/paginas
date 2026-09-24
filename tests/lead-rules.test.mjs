@@ -170,6 +170,120 @@ test("e-mail: sugere correção para domínios parecidos com os populares, sem b
   assert.equal(L.suggestEmail("sem-arroba"), "");
 });
 
+/* ------------------------------------------------------------------ régua .com/.com.br (Imersão GPS) */
+
+const SO_COM_BR = { somenteComBr: true };
+// Endereços válidos que a régua da página toda (a pesquisa, a Viver de Furo) aceita, mas que não
+// terminam em .com nem em .com.br.
+const FORA_DO_COM_BR = [
+  "x@provedor.net",
+  "enf@hospital.org",
+  "maria@saude.sp.gov.br",
+  "joao@usp.edu.br",
+  "a.b+c@mail.hospital.org.br",
+  "maria@empresa.co",
+  "maria@empresa.com.pt",
+  "maria@empresa.net.br",
+  "ana@proton.me",
+  "maria@hotmail.es"
+];
+
+test("e-mail com { somenteComBr: true }: .com e .com.br passam", () => {
+  for (const email of [
+    "maria@gmail.com",
+    "ana@uol.com.br",
+    "enf@hospital.com.br",
+    "maria_2@yahoo.com.br",
+    "maria@outlook.com.br",
+    "maria@me.com",
+    "x@uai.com.br",
+    "a.b+c@mail.hospital.com.br",
+    "  MARIA@GMAIL.COM ",
+    "Enf@Hospital.COM.BR"
+  ]) {
+    assert.equal(L.emailError(email, SO_COM_BR), "", email);
+  }
+});
+
+test("e-mail com { somenteComBr: true }: .net, .org, .gov.br, .edu.br e outros viram com_br", () => {
+  for (const email of FORA_DO_COM_BR) {
+    assert.equal(L.emailError(email, SO_COM_BR), "com_br", email);
+    // É um endereço válido: não há correção para sugerir.
+    assert.equal(L.suggestEmail(email), "", email);
+  }
+});
+
+test("e-mail com { somenteComBr: true }: typo, invalid e empty vêm antes de com_br", () => {
+  // gmail.con continua "typo" — e com a sugestão, que é o que a tela oferece para corrigir.
+  const casos = {
+    "maria@gmail.con": "maria@gmail.com",
+    "maria@hotmail.con": "maria@hotmail.com",
+    "maria@gmail.com.br": "maria@gmail.com",
+    "maria@gmail.co": "maria@gmail.com",
+    "maria@bol.com": "maria@bol.com.br",
+    "maria@icloud.com.br": "maria@icloud.com"
+  };
+  for (const [email, sugestao] of Object.entries(casos)) {
+    assert.equal(L.emailError(email, SO_COM_BR), "typo", email);
+    assert.equal(L.suggestEmail(email), sugestao, email);
+  }
+  // Terminação que não existe, mesmo fora dos provedores estritos.
+  assert.equal(L.emailError("maria@empresa.con", SO_COM_BR), "typo");
+  assert.equal(L.emailError("maria@empresa.cmo", SO_COM_BR), "typo");
+
+  assert.equal(L.emailError("", SO_COM_BR), "empty");
+  assert.equal(L.emailError(null, SO_COM_BR), "empty");
+  for (const email of ["maria", "maria@gmail", "maria@@gmail.com", "@gmail.com", "maria@gmail..com", "maria@gmail.c"]) {
+    assert.equal(L.emailError(email, SO_COM_BR), "invalid", email);
+  }
+});
+
+test("e-mail sem a opção (ou com ela desligada): nada muda, qualquer domínio real passa", () => {
+  for (const email of FORA_DO_COM_BR) {
+    assert.equal(L.emailError(email), "", email);
+    for (const opcoes of [undefined, null, {}, { somenteComBr: false }, { somenteComBr: 0 }, { outra: true }]) {
+      assert.equal(L.emailError(email, opcoes), "", `${email} ${JSON.stringify(opcoes)}`);
+    }
+  }
+  // Os outros códigos também são os mesmos com e sem a opção.
+  for (const email of ["", "maria", "maria@gmail.con", "maria@gmail.com.br", "maria@gmail.com"]) {
+    assert.equal(L.emailError(email, SO_COM_BR), L.emailError(email), email);
+  }
+});
+
+test("mensagem com_br e isComOrComBr", () => {
+  assert.equal(L.message("email", "com_br"), "Use um e-mail que termine em .com ou .com.br.");
+  assert.equal(L.message("email", "com_br"), L.MESSAGES.email.com_br);
+  assert.ok(Object.isFrozen(L.MESSAGES.email));
+
+  for (const dominio of ["gmail.com", "uol.com.br", "mail.hospital.com.br", "a.com"]) {
+    assert.equal(L.isComOrComBr(dominio), true, dominio);
+  }
+  for (const dominio of ["hospital.org", "saude.sp.gov.br", "usp.edu.br", "provedor.net", "empresa.com.pt", "empresa.combr", "empresa.com.bra", "empresa.company", "x.com.br.net", "com", "com.br", "", null, undefined, 42]) {
+    assert.equal(L.isComOrComBr(dominio), false, String(dominio));
+  }
+});
+
+test("isComOrComBr: maiúsculas e espaços em volta não mudam a resposta", () => {
+  for (const dominio of ["GMAIL.COM", "Gmail.Com", "UOL.COM.BR", "Hospital.Com.Br", "  gmail.com  ", "\tuol.com.br\n"]) {
+    assert.equal(L.isComOrComBr(dominio), true, JSON.stringify(dominio));
+  }
+  for (const dominio of ["HOSPITAL.ORG", "SAUDE.SP.GOV.BR", "EMPRESA.COM.PT", "GMAIL.COM.BR.NET", "   ", "COM"]) {
+    assert.equal(L.isComOrComBr(dominio), false, JSON.stringify(dominio));
+  }
+  // O mesmo que emailError usa: o domínio já sai minúsculo de normalizeEmail, mas a função não depende disso.
+  assert.equal(L.emailError("MARIA@GMAIL.COM", SO_COM_BR), "");
+  assert.equal(L.emailError("ENF@HOSPITAL.ORG", SO_COM_BR), "com_br");
+});
+
+test("emailError: opções null, de outro tipo ou sem protótipo não lançam e valem como sem opção", () => {
+  for (const opcoes of [null, 0, "", "somenteComBr", true, 42, [], Object.create(null), { somenteComBr: "true" }]) {
+    const rotulo = opcoes === null ? "null" : typeof opcoes === "object" ? JSON.stringify(opcoes) : String(opcoes);
+    assert.doesNotThrow(() => L.emailError("ana@hospital.org", opcoes), rotulo);
+    assert.equal(L.emailError("ana@hospital.org", opcoes), "", rotulo);
+  }
+});
+
 test("mensagens para a tela saem do mesmo arquivo", () => {
   assert.equal(L.message("email", "typo"), L.MESSAGES.email.typo);
   assert.equal(L.message("phone", "ddd"), L.MESSAGES.phone.ddd);

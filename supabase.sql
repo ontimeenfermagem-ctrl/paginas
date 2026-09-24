@@ -1250,8 +1250,11 @@ notify pgrst, 'reload schema';
 --
 -- Depois a Hotmart avisa cada evento de compra no webhook POST /api/hotmart/venda. O payload CRU
 -- fica em compras.payload (jsonb): se a Hotmart mudar um campo de lugar, nada se perde e dá para
--- reprocessar. O casamento com a inscrição é por e-mail OU pelos ÚLTIMOS 8 dígitos do telefone —
--- o 9 e o DDI variam, os 8 finais não.
+-- reprocessar. Cada aviso é primeiro atribuído à PÁGINA do produto (oferta/produto do
+-- js/checkout-config.js, ou a oferta dos links que as páginas abriram) e só então casado com uma
+-- inscrição DAQUELA página, por e-mail OU pelos ÚLTIMOS 8 dígitos do telefone — o 9 e o DDI variam,
+-- os 8 finais não. Venda de produto que não é de página nenhuma (a Formação vendida no fim da
+-- imersão, um order bump) fica gravada e não mexe em inscrito nenhum.
 --
 -- Mesmas barreiras das outras seções: RLS ligado e SEM política, revoke de public/anon/
 -- authenticated, grant só para service_role, funções security invoker com search_path fixo.
@@ -1289,7 +1292,7 @@ create table if not exists public.inscricoes (
   utm_medium text,
   utm_campaign text,
   utm_content text,
-  utm_term text,                                     -- é também o `sck` que vai para a Hotmart
+  utm_term text,                                     -- ele OU o utm_content vira o `sck` (depende da página)
   fbclid text,
   gclid text,
   page_url text,
@@ -1335,14 +1338,41 @@ create table if not exists public.compras (
   comprador_email text,
   comprador_telefone text,
   comprador_digits text,                             -- só dígitos, para casar com a inscrição
-  sck text,                                          -- o que mandamos no link (= utm_term)
+  sck text,                                          -- o sck que a Hotmart devolveu (purchase.origin.sck)
   src text,
   pedido_em timestamptz,
   aprovado_em timestamptz,
   inscricao_id uuid,                                 -- null = compra que não casou com ninguém
-  pagina text,
+  pagina text,                                       -- a página do PRODUTO (null = produto de fora)
+  pagina_por text,                                   -- como a página foi achada (ver abaixo)
+  evento_em timestamptz,                             -- a hora do EVENTO na Hotmart (creation_date)
   payload jsonb not null
 );
+
+-- Banco que já tinha a tabela (versão anterior): as duas colunas entram sem mexer em nada.
+--   pagina_por = 'config' (a oferta/produto está no js/checkout-config.js), 'oferta' (a oferta de um
+--                link que uma inscrição abriu) ou 'produto' (um aviso anterior do mesmo produto).
+--                null = aviso gravado pela versão ANTERIOR, em que `pagina` era a página da inscrição
+--                que casou, qualquer que fosse o produto: por isso nunca se aprende com ele.
+--   evento_em  = quando o evento aconteceu na Hotmart. É por ele, e não pela chegada, que se sabe o
+--                estado de uma venda: a Hotmart reenvia aviso velho depois do novo.
+alter table public.compras add column if not exists pagina_por text;
+alter table public.compras add column if not exists evento_em timestamptz;
+
+-- Avisos gravados antes desta versão, completados a partir do payload cru (idempotente: só preenche
+-- o que está vazio). O sck ficava null porque a versão anterior não lia purchase.origin.sck; a oferta
+-- do carrinho abandonado vem em data.offer; a hora do evento é o creation_date (epoch em ms).
+update public.compras set sck = btrim(payload #>> '{data,purchase,origin,sck}')
+where sck is null and nullif(btrim(payload #>> '{data,purchase,origin,sck}'), '') is not null;
+update public.compras set src = btrim(payload #>> '{data,purchase,origin,src}')
+where src is null and nullif(btrim(payload #>> '{data,purchase,origin,src}'), '') is not null;
+update public.compras set oferta = btrim(payload #>> '{data,offer,code}')
+where oferta is null and nullif(btrim(payload #>> '{data,offer,code}'), '') is not null;
+update public.compras
+set evento_em = to_timestamp(case when (payload ->> 'creation_date')::numeric > 100000000000
+                                  then (payload ->> 'creation_date')::numeric / 1000
+                                  else (payload ->> 'creation_date')::numeric end)
+where evento_em is null and (payload ->> 'creation_date') ~ '^[0-9]{10,16}$';
 
 -- Idempotência. Parcial porque evento sem transação (um payload estranho) não pode bloquear os
 -- outros: sem transação, cada aviso é uma linha.
@@ -1476,10 +1506,26 @@ $$;
 -- `p` vem do servidor com os campos já extraídos do payload da Hotmart e o payload CRU em
 -- `payload`. Devolve {ok, novo, casou, inscricao_id, pagina}.
 --
+--   pagina = de qual página é o PRODUTO. Nesta ordem:
+--              1. p.pagina, que o servidor tira do js/checkout-config.js (oferta ou id do produto);
+--              0. a mesma transação num aviso anterior (fica na mesma página e na mesma inscrição);
+--              2. a oferta (off=) do link de checkout que o PRÓPRIO comprador (mesmo e-mail ou 8
+--                 últimos dígitos) abriu numa página — é o que faz a oferta de um lote novo ser
+--                 reconhecida sem mexer no config. Só do próprio comprador: o link gravado vem do
+--                 /api/inscricao, que qualquer um chama; uma inscrição inventada com a oferta da
+--                 Formação não pode transformar a Formação dos outros em ingresso;
+--              3. o mesmo produto num aviso anterior que o CONFIG reconheceu (pagina_por 'config').
+--                 Nem 'oferta' nem 'produto' ensinam (não se espalha um erro), nem aviso da versão
+--                 anterior (pagina_por null: nele `pagina` era a página da inscrição que casou,
+--                 qualquer que fosse o produto), nem o produto '0' (o "Enviar teste" da Hotmart).
+--            Nenhuma das três = produto de fora (a Formação, um order bump): o aviso é gravado com
+--            pagina null e NÃO casa com inscrição nenhuma — senão a compra do curso marcaria o
+--            ingresso como comprado, com o valor do curso, e o reembolso dele desmarcaria.
 --   novo   = false quando o mesmo (transacao, evento) já estava gravado. A Hotmart repete o aviso
 --            até receber 2xx; repetir não pode virar duas compras nem somar duas vezes.
---   casou  = achou a inscrição pelo e-mail (igual, minúsculo) OU pelos ÚLTIMOS 8 dígitos do
---            telefone. Havendo mais de uma, vale a mais recente.
+--   casou  = achou, NA PÁGINA do produto, a inscrição pelo e-mail (igual, minúsculo) OU pelos
+--            ÚLTIMOS 8 dígitos do telefone. Havendo mais de uma, vale a do e-mail, e depois a mais
+--            recente.
 --
 -- Só PURCHASE_APPROVED e PURCHASE_COMPLETE marcam comprou_em. Cancelamento, reembolso, chargeback
 -- e disputa limpam comprou_em e guardam o status. Um evento MAIS ANTIGO do que o que já está
@@ -1502,11 +1548,15 @@ declare
   v_pedido_em timestamptz := (nullif(btrim(d ->> 'pedido_em'), ''))::timestamptz;
   v_aprovado_em timestamptz := (nullif(btrim(d ->> 'aprovado_em'), ''))::timestamptz;
   v_evento_em timestamptz := (nullif(btrim(d ->> 'evento_em'), ''))::timestamptz;
+  v_oferta text := nullif(btrim(d ->> 'oferta'), '');
+  v_produto text := nullif(btrim(d ->> 'produto_id'), '');
   v_momento timestamptz;
   v_inscricao_id uuid;
-  v_pagina text;
+  v_pagina text := nullif(btrim(d ->> 'pagina'), '');
+  v_pagina_por text;
   v_compra_id bigint;
   v_novo boolean;
+  v_outra record;
   aprovados constant text[] := array['PURCHASE_APPROVED', 'PURCHASE_COMPLETE'];
   cancelados constant text[] := array['PURCHASE_CANCELED', 'PURCHASE_REFUNDED', 'PURCHASE_CHARGEBACK', 'PURCHASE_PROTEST'];
 begin
@@ -1515,27 +1565,81 @@ begin
   end if;
   v_momento := coalesce(v_evento_em, v_aprovado_em, v_pedido_em, now());
 
-  -- 1. De quem é esta compra? E-mail primeiro; senão, os últimos 8 dígitos do telefone.
-  select i.id, i.pagina into v_inscricao_id, v_pagina
-  from public.inscricoes as i
-  where (v_email is not null and lower(i.email) = v_email)
-     or (v_fim8 is not null and i.whatsapp_digits is not null and right(i.whatsapp_digits, 8) = v_fim8)
-  order by (v_email is not null and lower(i.email) = v_email) desc, i.criado_em desc
-  limit 1;
+  -- 0. A mesma venda já chegou antes (APPROVED antes do COMPLETE, do REFUNDED...)? Fica na mesma
+  --    inscrição e na mesma página: casar de novo a cada aviso podia cair em outra inscrição da
+  --    mesma pessoa (reenviou o formulário com outro WhatsApp) e contar uma venda duas vezes.
+  --    Aviso da versão anterior (pagina_por null) só vale se for da mesma página que o servidor já
+  --    mandou: a página dele era a da inscrição que casou, qualquer que fosse o produto.
+  if v_pagina is not null then
+    v_pagina_por := 'config';
+  end if;
+  if v_transacao is not null then
+    select c.inscricao_id, c.pagina, c.pagina_por into v_outra
+    from public.compras as c
+    where c.transacao = v_transacao
+      and c.pagina is not null
+      and (c.pagina_por is not null or c.pagina = v_pagina)
+    order by (c.inscricao_id is not null) desc, c.id
+    limit 1;
+    if found and (v_pagina is null or v_outra.pagina = v_pagina) then
+      v_inscricao_id := v_outra.inscricao_id;
+      if v_pagina is null then
+        v_pagina := v_outra.pagina;
+        v_pagina_por := v_outra.pagina_por;
+      end if;
+    end if;
+  end if;
 
-  -- 2. Grava o aviso. O mesmo (transacao, evento) só entra uma vez.
+  -- 1. De qual página é este produto? O servidor já mandou o que o config sabe; senão, a oferta
+  --    de um link que o PRÓPRIO comprador abriu numa página (lote novo); senão, um aviso anterior
+  --    do mesmo produto que o config reconheceu. Nada aqui aprende com dado que qualquer um pode
+  --    mandar ao /api/inscricao: uma inscrição inventada com a oferta da Formação no link não faz a
+  --    Formação dos outros virar ingresso.
+  if v_pagina is null and v_oferta is not null and (v_email is not null or v_fim8 is not null) then
+    select i.pagina into v_pagina
+    from public.inscricoes as i
+    where i.checkout_url is not null
+      and substring(i.checkout_url from '[?&]off=([^&#]+)') = v_oferta
+      and ((v_email is not null and lower(i.email) = v_email)
+        or (v_fim8 is not null and i.whatsapp_digits is not null and right(i.whatsapp_digits, 8) = v_fim8))
+    order by (v_email is not null and lower(i.email) = v_email) desc, i.criado_em desc
+    limit 1;
+    if v_pagina is not null then v_pagina_por := 'oferta'; end if;
+  end if;
+  if v_pagina is null and v_produto is not null and v_produto <> '0' then
+    select c.pagina into v_pagina
+    from public.compras as c
+    where c.produto_id = v_produto and c.pagina is not null and c.pagina_por = 'config'
+    order by c.recebido_em desc, c.id desc
+    limit 1;
+    if v_pagina is not null then v_pagina_por := 'produto'; end if;
+  end if;
+
+  -- 2. De quem é esta compra, NA página do produto? E-mail primeiro; senão, os últimos 8 dígitos
+  --    do telefone. Produto de fora (v_pagina null) não casa com ninguém.
+  if v_pagina is not null and v_inscricao_id is null then
+    select i.id into v_inscricao_id
+    from public.inscricoes as i
+    where i.pagina = v_pagina
+      and ((v_email is not null and lower(i.email) = v_email)
+        or (v_fim8 is not null and i.whatsapp_digits is not null and right(i.whatsapp_digits, 8) = v_fim8))
+    order by (v_email is not null and lower(i.email) = v_email) desc, i.criado_em desc
+    limit 1;
+  end if;
+
+  -- 3. Grava o aviso. O mesmo (transacao, evento) só entra uma vez.
   insert into public.compras (
     evento, hotmart_id, transacao, status, produto_id, produto_nome, oferta, valor, moeda,
     comprador_nome, comprador_email, comprador_telefone, comprador_digits, sck, src,
-    pedido_em, aprovado_em, inscricao_id, pagina, payload
+    pedido_em, aprovado_em, inscricao_id, pagina, pagina_por, evento_em, payload
   ) values (
     v_evento,
     nullif(btrim(d ->> 'hotmart_id'), ''),
     v_transacao,
     nullif(btrim(d ->> 'status'), ''),
-    nullif(btrim(d ->> 'produto_id'), ''),
+    v_produto,
     nullif(btrim(d ->> 'produto_nome'), ''),
-    nullif(btrim(d ->> 'oferta'), ''),
+    v_oferta,
     (nullif(btrim(d ->> 'valor'), ''))::numeric,
     nullif(btrim(d ->> 'moeda'), ''),
     nullif(btrim(d ->> 'comprador_nome'), ''),
@@ -1548,34 +1652,81 @@ begin
     v_aprovado_em,
     v_inscricao_id,
     v_pagina,
+    v_pagina_por,
+    v_momento,
     case when jsonb_typeof(d -> 'payload') is null then '{}'::jsonb else d -> 'payload' end
   )
   on conflict (transacao, evento) where transacao is not null do nothing
   returning id into v_compra_id;
   v_novo := found;
 
-  -- 3. Marca a inscrição. Aviso repetido não mexe em nada.
-  if v_novo and v_inscricao_id is not null then
+  -- 4. Marca a inscrição. Aviso repetido não mexe em nada, e aviso sem transação também não (um
+  --    payload estranho não entra em "vendas", então também não vira "compra de inscrito").
+  --    O estado segue a TRANSAÇÃO: quem comprou duas vezes (ou um 2º ingresso no order bump) fica
+  --    com a primeira compra; reembolso de uma transação só desmarca se for a que está marcada, e aí
+  --    a inscrição volta para outra transação dela que continua aprovada, se houver.
+  if v_novo and v_inscricao_id is not null and v_transacao is not null then
     if v_evento = any (aprovados) then
       update public.inscricoes as i set
         comprou_em = coalesce(v_aprovado_em, v_momento),
         compra_status = coalesce(nullif(btrim(d ->> 'status'), ''), v_evento),
         compra_valor = coalesce((nullif(btrim(d ->> 'valor'), ''))::numeric, i.compra_valor),
         compra_moeda = coalesce(nullif(btrim(d ->> 'moeda'), ''), i.compra_moeda),
-        compra_transacao = coalesce(v_transacao, i.compra_transacao),
+        compra_transacao = v_transacao,
         compra_evento_em = v_momento,
         atualizado_em = now()
       where i.id = v_inscricao_id
-        and (i.compra_evento_em is null or i.compra_evento_em <= v_momento);
+        and (
+          -- a mesma transação: vale o evento mais novo
+          (i.compra_transacao = v_transacao and (i.compra_evento_em is null or i.compra_evento_em <= v_momento))
+          -- outra transação: só se a pessoa não está com uma compra valendo
+          or (i.compra_transacao is distinct from v_transacao and i.comprou_em is null)
+        );
     elsif v_evento = any (cancelados) then
       update public.inscricoes as i set
         comprou_em = null,
         compra_status = coalesce(nullif(btrim(d ->> 'status'), ''), v_evento),
-        compra_transacao = coalesce(v_transacao, i.compra_transacao),
+        compra_transacao = v_transacao,
         compra_evento_em = v_momento,
         atualizado_em = now()
       where i.id = v_inscricao_id
+        and (i.compra_transacao is null or i.compra_transacao = v_transacao)
         and (i.compra_evento_em is null or i.compra_evento_em <= v_momento);
+      if found then
+        -- Outra transação desta inscrição que continua aprovada (último evento dela, pela hora do
+        -- evento, é compra aprovada/completa)? A inscrição volta a ser compradora por ela.
+        select t.transacao, t.aprovada_em, t.valor, t.moeda, t.status into v_outra
+        from (
+          select c.transacao,
+                 (array_agg(c.evento order by coalesce(c.evento_em, c.recebido_em) desc, c.id desc))[1] as ultimo,
+                 min(coalesce(c.aprovado_em, c.evento_em, c.recebido_em)) filter (where c.evento = any (aprovados)) as aprovada_em,
+                 (array_agg(c.valor order by coalesce(c.evento_em, c.recebido_em) desc, c.id desc)
+                    filter (where c.evento = any (aprovados) and c.valor is not null))[1] as valor,
+                 (array_agg(c.moeda order by coalesce(c.evento_em, c.recebido_em) desc, c.id desc)
+                    filter (where c.evento = any (aprovados) and c.moeda is not null))[1] as moeda,
+                 (array_agg(coalesce(c.status, c.evento) order by coalesce(c.evento_em, c.recebido_em) desc, c.id desc)
+                    filter (where c.evento = any (aprovados)))[1] as status
+          from public.compras as c
+          where c.inscricao_id = v_inscricao_id
+            and c.transacao is not null
+            and c.transacao <> v_transacao
+            and c.evento = any (aprovados || cancelados)
+          group by c.transacao
+        ) as t
+        where t.ultimo = any (aprovados)
+        order by t.aprovada_em, t.transacao
+        limit 1;
+        if found then
+          update public.inscricoes as i set
+            comprou_em = v_outra.aprovada_em,
+            compra_status = v_outra.status,
+            compra_valor = coalesce(v_outra.valor, i.compra_valor),
+            compra_moeda = coalesce(v_outra.moeda, i.compra_moeda),
+            compra_transacao = v_outra.transacao,
+            atualizado_em = now()
+          where i.id = v_inscricao_id;
+        end if;
+      end if;
     end if;
   end if;
 
@@ -1601,14 +1752,23 @@ $$;
 --   compras        = inscritos com comprou_em preenchido
 --   receita        = soma de compra_valor desses inscritos
 --   taxa_compra    = compras / inscritos em PORCENTAGEM, com 1 casa (ex.: 12.5)
---   por_origem / por_campanha / por_termo = utm_source, utm_campaign e utm_term ('(sem utm)' quando
---                    vazio). O termo é o que vira `sck` no checkout: é por ele que o cliente sabe
---                    qual criativo vendeu.
+--   por_origem / por_midia / por_campanha / por_conteudo / por_termo = utm_source, utm_medium,
+--                    utm_campaign, utm_content e utm_term dos inscritos ('(sem utm)' quando vazio).
+--                    Uma delas vira o `sck` no checkout (utm_term na Viver de Furo, utm_content na
+--                    Imersão GPS): é por ela que se sabe qual criativo vendeu.
+--   vendas / vendas_receita / vendas_por_sck = o lado da HOTMART: transações do produto da página
+--                    APROVADAS no período e que continuam aprovadas (o último evento delas até o fim
+--                    do período, pela hora do evento, é compra aprovada/completa: reembolso,
+--                    cancelamento e chargeback tiram), com o `sck` que a Hotmart devolveu. Conta
+--                    também quem comprou sem passar pelo formulário (casadas = quantas têm inscrição).
 --   por_dia        = inscritos pelo dia da INSCRIÇÃO e compras pelo dia da COMPRA, no fuso de
 --                    São Paulo (um dia pode ter compra sem inscrição nova, e vice-versa)
---   compras_sem_inscricao = avisos de compra aprovada no período que não casaram com ninguém
---                    (comprou pelo link de outro lugar, ou com outro e-mail e outro telefone)
---   compras_recentes = os 20 avisos mais recentes do período, com `casou`
+--   compras_sem_inscricao = as vendas acima que não casaram com ninguém (comprou pelo link de outro
+--                    lugar, ou com outro e-mail e outro telefone) = vendas − casadas
+--   compras_recentes = os 20 avisos mais recentes do período, com `casou` e o `sck`
+--
+-- Com p_pagina, os avisos são só os do produto DAQUELA página: a venda de outro produto (a
+-- Formação, um order bump, a outra página) não aparece como "sem inscrição" aqui.
 --
 -- Listas vazias voltam como [], nunca null.
 -- --------------------------------------------------------------------------------------------
@@ -1631,17 +1791,55 @@ as $$
       and (p_desde is null or i.criado_em >= p_desde)
       and (p_ate is null or i.criado_em < p_ate)
   ),
+  eventos as materialized (
+    select c.*
+    from public.compras as c
+    where (p_pagina is null or c.pagina = p_pagina)
+      and (p_desde is null or c.recebido_em >= p_desde)
+      and (p_ate is null or c.recebido_em < p_ate)
+  ),
+  -- Cada venda (transação) do lado da Hotmart. O ESTADO sai do histórico inteiro dela até o fim do
+  -- período (não só dos avisos do período), na ordem em que os eventos ACONTECERAM (evento_em, que a
+  -- Hotmart manda; a chegada só desempata): um APPROVED velho reenviado depois do REFUNDED não
+  -- ressuscita a venda. A venda conta no período da PRIMEIRA aprovação: o PURCHASE_COMPLETE (fim da
+  -- garantia, dias depois) não faz uma venda antiga aparecer como venda de hoje.
+  historico as materialized (
+    select c.*, coalesce(c.evento_em, c.recebido_em) as momento
+    from public.compras as c
+    where (p_pagina is null or c.pagina = p_pagina)
+      -- pela hora do EVENTO: a venda de 23:59 cujo aviso chega 00:00 continua no dia dela
+      and (p_ate is null or coalesce(c.evento_em, c.recebido_em) < p_ate)
+      and c.transacao is not null
+      and c.evento in ('PURCHASE_APPROVED', 'PURCHASE_COMPLETE', 'PURCHASE_CANCELED', 'PURCHASE_REFUNDED', 'PURCHASE_CHARGEBACK', 'PURCHASE_PROTEST')
+  ),
+  vendas as materialized (
+    select v.*
+    from (
+      select h.transacao,
+             (array_agg(h.evento order by h.momento desc, h.recebido_em desc, h.id desc))[1] as evento,
+             (array_agg(h.pagina order by h.momento desc, h.recebido_em desc, h.id desc))[1] as pagina,
+             (array_agg(h.sck order by h.momento desc, h.recebido_em desc, h.id desc)
+                filter (where nullif(btrim(h.sck), '') is not null))[1] as sck,
+             (array_agg(h.valor order by h.momento desc, h.recebido_em desc, h.id desc)
+                filter (where h.valor is not null and h.evento in ('PURCHASE_APPROVED', 'PURCHASE_COMPLETE')))[1] as valor,
+             (array_agg(h.inscricao_id order by h.momento desc, h.recebido_em desc, h.id desc)
+                filter (where h.inscricao_id is not null))[1] as inscricao_id,
+             min(coalesce(h.aprovado_em, h.momento)) filter (where h.evento in ('PURCHASE_APPROVED', 'PURCHASE_COMPLETE')) as aprovada_em
+      from historico as h
+      group by h.transacao
+    ) as v
+    where v.evento in ('PURCHASE_APPROVED', 'PURCHASE_COMPLETE')
+      and v.aprovada_em is not null
+      and (p_desde is null or v.aprovada_em >= p_desde)
+      and (p_ate is null or v.aprovada_em < p_ate)
+  ),
+  -- Com p_pagina, só ela (mesmo zerada). Sem, toda página que teve inscrição OU venda no período.
   paginas as (
     select p_pagina as pagina where p_pagina is not null
     union
     select distinct b.pagina from base as b where p_pagina is null
-  ),
-  eventos as materialized (
-    select c.*
-    from public.compras as c
-    where (p_pagina is null or c.pagina = p_pagina or c.pagina is null)
-      and (p_desde is null or c.recebido_em >= p_desde)
-      and (p_ate is null or c.recebido_em < p_ate)
+    union
+    select distinct vs.pagina from vendas as vs where p_pagina is null and vs.pagina is not null
   )
   select json_build_object(
     'paginas', coalesce((
@@ -1668,6 +1866,20 @@ as $$
             limit 50
           ) as x
         ),
+        'por_midia', (
+          select coalesce(json_agg(json_build_object('utm_medium', x.valor, 'inscritos', x.inscritos, 'compras', x.compras)
+                                   order by x.inscritos desc, x.compras desc, x.valor collate "C"), '[]'::json)
+          from (
+            select * from (
+              select coalesce(nullif(btrim(b.utm_medium), ''), '(sem utm)') as valor,
+                     count(*)::int as inscritos,
+                     count(*) filter (where b.comprou_em is not null)::int as compras
+              from base as b where b.pagina = pg.pagina group by 1
+            ) as y
+            order by y.inscritos desc, y.compras desc, y.valor collate "C"
+            limit 50
+          ) as x
+        ),
         'por_campanha', (
           select coalesce(json_agg(json_build_object('utm_campaign', x.valor, 'inscritos', x.inscritos, 'compras', x.compras)
                                    order by x.inscritos desc, x.compras desc, x.valor collate "C"), '[]'::json)
@@ -1676,6 +1888,20 @@ as $$
             -- e não do apelido do select.
             select * from (
               select coalesce(nullif(btrim(b.utm_campaign), ''), '(sem utm)') as valor,
+                     count(*)::int as inscritos,
+                     count(*) filter (where b.comprou_em is not null)::int as compras
+              from base as b where b.pagina = pg.pagina group by 1
+            ) as y
+            order by y.inscritos desc, y.compras desc, y.valor collate "C"
+            limit 50
+          ) as x
+        ),
+        'por_conteudo', (
+          select coalesce(json_agg(json_build_object('utm_content', x.valor, 'inscritos', x.inscritos, 'compras', x.compras)
+                                   order by x.inscritos desc, x.compras desc, x.valor collate "C"), '[]'::json)
+          from (
+            select * from (
+              select coalesce(nullif(btrim(b.utm_content), ''), '(sem utm)') as valor,
                      count(*)::int as inscritos,
                      count(*) filter (where b.comprou_em is not null)::int as compras
               from base as b where b.pagina = pg.pagina group by 1
@@ -1698,6 +1924,27 @@ as $$
             ) as y
             order by y.inscritos desc, y.compras desc, y.valor collate "C"
             limit 50
+          ) as x
+        ),
+        'vendas', v.vendas,
+        'vendas_receita', v.receita,
+        'vendas_por_sck', (
+          select coalesce(json_agg(json_build_object('sck', x.valor, 'vendas', x.vendas, 'receita', x.receita, 'casadas', x.casadas)
+                                   order by x.vendas desc, x.receita desc, x.valor collate "C"), '[]'::json)
+          from (
+            select * from (
+              select coalesce(nullif(btrim(vs.sck), ''), '(sem sck)') as valor,
+                     count(*)::int as vendas,
+                     coalesce(sum(vs.valor), 0)::numeric(12, 2) as receita,
+                     count(*) filter (where vs.inscricao_id is not null)::int as casadas
+              from vendas as vs
+              where vs.pagina = pg.pagina and vs.evento in ('PURCHASE_APPROVED', 'PURCHASE_COMPLETE')
+              group by 1
+            ) as y
+            order by y.vendas desc, y.receita desc, y.valor collate "C"
+            -- É por venda, não por pessoa: com utm_content={{ad.name}} passa fácil de 50 criativos,
+            -- e a tabela cortada não somaria o total.
+            limit 500
           ) as x
         ),
         'por_dia', (
@@ -1725,20 +1972,29 @@ as $$
         from base as b
         where b.pagina = pg.pagina
       ) as t
+      cross join lateral (
+        select count(*)::int as vendas, coalesce(sum(vs.valor), 0)::numeric(12, 2) as receita
+        from vendas as vs
+        where vs.pagina = pg.pagina and vs.evento in ('PURCHASE_APPROVED', 'PURCHASE_COMPLETE')
+      ) as v
     ), '[]'::json),
+    -- As vendas de cima que não casaram com inscrição nenhuma: a mesma régua de vendas (uma por
+    -- transação, reembolso tira, conta no período da aprovação). Sem p_pagina entram também as de
+    -- produto de fora (pagina null), que não são de página nenhuma.
     'compras_sem_inscricao', (
-      select count(*)::int from eventos as e
-      where e.inscricao_id is null and e.evento in ('PURCHASE_APPROVED', 'PURCHASE_COMPLETE')
+      select count(*)::int from vendas as vs where vs.inscricao_id is null
     ),
     'compras_recentes', coalesce((
       select json_agg(json_build_object(
         'recebido_em', x.recebido_em,
+        'evento_em', x.evento_em,
         'evento', x.evento,
         'status', x.status,
         'comprador_nome', x.comprador_nome,
         'comprador_email', x.comprador_email,
         'valor', x.valor,
         'pagina', x.pagina,
+        'sck', x.sck,
         'casou', x.inscricao_id is not null
       ) order by x.recebido_em desc, x.id desc)
       from (select * from eventos order by recebido_em desc, id desc limit 20) as x

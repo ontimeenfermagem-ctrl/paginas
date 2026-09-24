@@ -5,7 +5,10 @@
 // As páginas vêm do server.mjs de verdade (CSP, cabeçalhos, allowlist); os números do SQL de
 // verdade são provados em sql.e2e.mjs e no fluxo.e2e.mjs. Aqui: login e seus erros, placar, funil,
 // abas dos 4 perfis, a aba "Páginas de obrigado" (funil por página, % com base, perfis, origem,
-// dia, link do grupo), filtros e URL, corrida de respostas, sessão expirada, atualização automática,
+// dia, link do grupo), UMA ABA POR PÁGINA DE INSCRIÇÃO (Viver de Furo e Imersão GPS: números do
+// formulário e da Hotmart, divisões por UTM com o sck de cada página marcado, vendas por sck,
+// troca de página sem número de uma na outra, teclado, link antigo ?pagina=inscricoes, servidor
+// com o SQL antigo), filtros e URL, corrida de respostas, sessão expirada, atualização automática,
 // lista e "Ver tudo", quadros, cruzamento, abertas, tráfego, copiar ICP, estados vazio/erro/sem
 // rede, celular e desktop, e nenhum erro de JavaScript.
 //
@@ -20,7 +23,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 import { createServerApp } from "../../server.mjs";
-import { abertas, CHK, cruzamento, EV, gerar, inscricoesResumo, lista, listaInscricoes, OBR, paginas, painel } from "./apoio/painel-fixtures.mjs";
+import { abertas, CHK, comoSqlAntigo, cruzamento, EV, gerar, inscricoesResumo, lista, listaInscricoes, OBR, paginas, painel } from "./apoio/painel-fixtures.mjs";
 
 const RAIZ = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const TELAS = process.env.E2E_SCREENS ? path.join(process.env.E2E_SCREENS, "painel") : "";
@@ -68,6 +71,7 @@ function criarMock(page, { dados = DADOS, logado = true } = {}) {
     chamadas: [],
     forcar: {}, // rota → status
     atraso: {}, // rota → ms (ou função(url) → ms)
+    sqlAntigo: false, // true = /inscricoes responde como o SQL de antes (sem mídia, conteúdo e vendas)
     login: "ok",
     async instalar() {
       await page.route("**/api/painel/**", async (route) => {
@@ -108,7 +112,8 @@ function criarMock(page, { dados = DADOS, logado = true } = {}) {
           if (q.pagina && !CHK.LISTA.some((p) => p.id === q.pagina)) return json(422, { ok: false, error: "invalid_filters" });
           const recorte = { desde: q.desde, ate: q.ate, pagina: q.pagina };
           const listaIns = listaInscricoes(mock.dados, recorte, { limite: Number(q.limite || 100), offset: Number(q.offset || 0) });
-          return json(200, { ok: true, resumo: inscricoesResumo(mock.dados, recorte), ...listaIns, gerado_em: new Date().toISOString() });
+          const resumo = inscricoesResumo(mock.dados, recorte);
+          return json(200, { ok: true, resumo: mock.sqlAntigo ? comoSqlAntigo(resumo, mock.dados, recorte) : resumo, ...listaIns, gerado_em: new Date().toISOString() });
         }
         if (rota === "cruzamento") {
           const ids = EV.perguntasAnalisaveis().map((p) => p.id);
@@ -869,7 +874,7 @@ cenario("obrigado", async () => {
 
     const abas = await page.$$eval("[data-paginas] [data-pagina]", (els) => els.map((e) => `${e.dataset.pagina}|${e.textContent}`));
     confere(
-      abas.length === 3 && abas[0].startsWith("pesquisa-icp|") && abas[1] === "obrigado|Páginas de obrigadorota /obrigado-*",
+      abas.length === 2 + CHK.LISTA.length && abas[0].startsWith("pesquisa-icp|") && abas[1] === "obrigado|Páginas de obrigadorota /obrigado-*",
       `faixa de páginas (${abas.join(" / ")})`
     );
     confere(!mock.chamadas.some((c) => c.rota === "paginas"), "a aba de obrigado só busca dados quando é aberta");
@@ -1041,141 +1046,314 @@ cenario("obrigado", async () => {
 });
 
 
-/* ---------------------------------------------------------------- Inscrições e vendas */
+/* ---------------------------------------------------------------- Inscrições e vendas: uma aba por página */
 cenario("inscricoes", async () => {
-  const PAGINA = CHK.LISTA[0];
-  const moeda = (valor) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(valor);
+  const fmt = (x) => new Intl.NumberFormat("pt-BR").format(x);
+  // O real do Intl vem com espaço fino inquebrável: tudo é comparado com os espaços normalizados.
+  const limpo = (t) => String(t).replace(/\s+/g, " ").trim();
+  const moeda = (valor) => limpo(new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(valor));
+  const VDF = CHK.PAGINAS["viver-de-furo"];
+  const GPS = CHK.PAGINAS["imersao-gps"];
+  const idAba = (pagina) => `inscricoes-${pagina.id}`;
+  const cartao = (pagina) => `[data-inscricao-pagina='${pagina.id}']`;
+  const texto = (page, seletor) => page.textContent(seletor).then(limpo);
+  const tabela = (page, seletor) =>
+    page.$$eval(`${seletor} tbody tr`, (trs) => trs.map((tr) => Array.from(tr.children).map((c) => c.textContent.replace(/\s+/g, " ").trim())));
+  const DIVISOES = [
+    ["origem", "por_origem", "utm_source"],
+    ["midia", "por_midia", "utm_medium"],
+    ["campanha", "por_campanha", "utm_campaign"],
+    ["conteudo", "por_conteudo", "utm_content"],
+    ["termo", "por_termo", "utm_term"]
+  ];
+
+  // Os dados que a fixture tem de ter para o cenário valer alguma coisa (senão o teste passa à toa).
+  const rVdf = inscricoesResumo(DADOS, { pagina: VDF.id }).paginas[0];
+  const rGps = inscricoesResumo(DADOS, { pagina: GPS.id }).paginas[0];
+  confere(CHK.sckDaPagina(VDF) === "utm_term" && CHK.sckDaPagina(GPS) === "utm_content", "o sck é utm_term na Viver de Furo e utm_content na Imersão GPS");
+  confere(rVdf.inscritos === 120 && rGps.inscritos === 90, `fixture: 120 e 90 inscritos (${rVdf.inscritos}, ${rGps.inscritos})`);
+  confere(rGps.vendas > rGps.compras && rVdf.vendas > rVdf.compras, `fixture: a Hotmart tem venda sem inscrição (${rGps.vendas} > ${rGps.compras})`);
+  confere(rGps.vendas_por_sck.reduce((s, x) => s + x.vendas, 0) === rGps.vendas, "fixture: vendas por sck somam as vendas");
+  confere(rGps.vendas_por_sck.reduce((s, x) => s + x.casadas, 0) === rGps.compras, "fixture: as casadas da Hotmart são as compras de inscritos (no período inteiro)");
+  confere(rGps.vendas_por_sck.some((x) => x.sck === "(sem sck)") && rGps.vendas_por_sck.some((x) => x.sck === "HOTMART_SALES_AGENT"), "fixture: venda sem sck e da própria Hotmart");
+  // À mão: GPS = 32 ingressos casados, 1 reembolsado (sai), 3 vendas sem inscrição e 1 chargeback
+  // (sai); a completa repete a transação e não soma. Viver de Furo = 16 casadas, 1 reembolso, 2 de fora.
+  const aprovadasGps = new Set(DADOS.compras.filter((c) => c.pagina === GPS.id && c.evento === "PURCHASE_APPROVED").map((c) => c.transacao));
+  const desfeitasGps = new Set(DADOS.compras.filter((c) => c.pagina === GPS.id && ["PURCHASE_REFUNDED", "PURCHASE_CHARGEBACK"].includes(c.evento)).map((c) => c.transacao));
+  confere(rGps.vendas === aprovadasGps.size - desfeitasGps.size && desfeitasGps.size === 2, `vendas GPS contadas à mão: ${aprovadasGps.size} aprovadas - ${desfeitasGps.size} desfeitas = ${rGps.vendas}`);
+  confere(rVdf.vendas === rVdf.compras + 2, `vendas Viver de Furo = compras + 2 de fora (${rVdf.vendas})`);
+  confere(!inscricoesResumo(DADOS, { pagina: GPS.id }).compras_recentes.some((c) => c.pagina !== GPS.id), "fixture: a aba GPS só recebe avisos do produto dela");
+  for (const pagina of [VDF, GPS]) {
+    const r = inscricoesResumo(DADOS, { pagina: pagina.id });
+    const [l] = r.paginas;
+    confere(r.compras_sem_inscricao === l.vendas - l.vendas_por_sck.reduce((s, x) => s + x.casadas, 0), `fixture ${pagina.id}: compras_sem_inscricao = vendas − casadas (${r.compras_sem_inscricao})`);
+  }
+  // A régua das vendas do SQL (estado pela hora do EVENTO, contada no período da aprovação), com os
+  // casos que a régua de antes ("último aviso que chegou no período") erraria:
+  const avisosDe = (transacao) => DADOS.compras.filter((c) => c.transacao === transacao);
+  const ms = (iso) => new Date(iso).getTime();
+  //  . o APPROVED reenviado DEPOIS do REFUNDED (a primeira entrega falhou) não ressuscita a venda;
+  const reenviada = DADOS.compras.find((c) => c.evento === "PURCHASE_REFUNDED" && avisosDe(c.transacao).some((a) => a.evento === "PURCHASE_APPROVED" && ms(a.recebido_em) > ms(c.recebido_em)));
+  const aprovadasVdf = new Set(DADOS.compras.filter((c) => c.pagina === VDF.id && c.evento === "PURCHASE_APPROVED").map((c) => c.transacao));
+  const desfeitasVdf = new Set(DADOS.compras.filter((c) => c.pagina === VDF.id && c.evento === "PURCHASE_REFUNDED").map((c) => c.transacao));
+  confere(reenviada && reenviada.pagina === VDF.id && rVdf.vendas === aprovadasVdf.size - desfeitasVdf.size, `fixture: APPROVED que chegou depois do REFUNDED não conta (${rVdf.vendas} = ${aprovadasVdf.size} − ${desfeitasVdf.size})`);
+  //  . a completa que chegou sem sck deixa a venda no sck da aprovada;
+  const completaSemSck = DADOS.compras.find((c) => c.evento === "PURCHASE_COMPLETE" && !c.sck);
+  const sckDaAprovada = avisosDe(completaSemSck.transacao).find((c) => c.evento === "PURCHASE_APPROVED").sck;
+  const vendasGps = [...aprovadasGps].filter((t) => !desfeitasGps.has(t));
+  const porSckAMao = {};
+  for (const t of vendasGps) {
+    const sck = avisosDe(t).find((c) => c.evento === "PURCHASE_APPROVED").sck || "(sem sck)";
+    porSckAMao[sck] = (porSckAMao[sck] || 0) + 1;
+  }
+  confere(
+    Boolean(sckDaAprovada) && rGps.vendas_por_sck.every((x) => porSckAMao[x.sck] === x.vendas) && Object.keys(porSckAMao).length === rGps.vendas_por_sck.length,
+    `fixture: a completa sem sck fica no sck da aprovada (${sckDaAprovada})`
+  );
+  //  . e a completa, dias depois, não vira venda do período dela.
+  const completa = DADOS.compras.find((c) => c.evento === "PURCHASE_COMPLETE");
+  const depoisDaAprovacao = new Date(ms(completa.aprovado_em) + 60000).toISOString();
+  const aprovadasDepois = vendasGps.filter((t) => ms(avisosDe(t).find((c) => c.evento === "PURCHASE_APPROVED").aprovado_em) >= ms(depoisDaAprovacao));
+  confere(
+    ms(completa.evento_em) > ms(depoisDaAprovacao) && inscricoesResumo(DADOS, { desde: depoisDaAprovacao, pagina: GPS.id }).paginas[0].vendas === aprovadasDepois.length,
+    `fixture: a completa não vira venda do período dela (${aprovadasDepois.length})`
+  );
+
+  /** Confere a aba aberta inteira contra o que o SQL devolveria para esta página e recorte. */
+  async function conferirAba(page, mock, pagina, recorte, rotulo) {
+    const r = inscricoesResumo(DADOS, { ...recorte, pagina: pagina.id });
+    const linha = r.paginas[0];
+    const sck = CHK.sckDaPagina(pagina);
+    const c = cartao(pagina);
+    const pedido = mock.chamadas.filter((x) => x.rota === "inscricoes").at(-1);
+    const q = new URL(BASE + pedido.url).searchParams;
+    confere(q.get("pagina") === pagina.id && (q.get("desde") || "") === (recorte.desde || ""), `${rotulo}: pediu ?pagina=${pagina.id} (${pedido.url})`);
+    confere((await page.$$("[data-inscricao-pagina]")).length === 1 && (await page.$$(c)).length === 1, `${rotulo}: um cartão só, o da página`);
+
+    // Placar: formulário x Hotmart, lado a lado.
+    const placar = await page.$$eval("[data-inscricoes] .ins-placar li", (lis) =>
+      lis.map((li) => ({ chave: li.dataset.placarIns, valor: li.querySelector(".valor").textContent.trim(), detalhe: li.querySelector(".detalhe").textContent.replace(/\s+/g, " ").trim() }))
+    );
+    confere(placar.map((p) => p.chave).join() === "inscritos,cliques,compras,vendas", `${rotulo}: placar (${placar.map((p) => p.chave)})`);
+    confere(placar[0].valor === fmt(linha.inscritos) && placar[1].valor === fmt(linha.cliques), `${rotulo}: placar inscritos ${linha.inscritos}, cliques ${linha.cliques}`);
+    const taxa = `${Math.round((linha.compras / linha.inscritos) * 100)}% dos ${fmt(linha.inscritos)} inscritos`;
+    confere(placar[2].valor === fmt(linha.compras) && placar[2].detalhe.includes(taxa) && placar[2].detalhe.includes(moeda(linha.receita)), `${rotulo}: compras de inscritos ${linha.compras} (${placar[2].detalhe})`);
+    // O mesmo número do SQL: compras_sem_inscricao (= vendas − casadas quando a tabela tem todos os sck).
+    const semInscricao = r.compras_sem_inscricao;
+    confere(semInscricao === linha.vendas - linha.vendas_por_sck.reduce((s, x) => s + x.casadas, 0), `${rotulo}: sem inscrição = vendas − casadas (${semInscricao})`);
+    confere(
+      placar[3].valor === fmt(linha.vendas) && placar[3].detalhe.includes(moeda(linha.vendas_receita)) && placar[3].detalhe.includes(`${fmt(semInscricao)} sem inscrição`),
+      `${rotulo}: vendas na Hotmart ${linha.vendas}, ${semInscricao} sem inscrição (${placar[3].detalhe})`
+    );
+
+    // Funil do formulário.
+    const etapa = (nome) => texto(page, `${c} [data-etapa='${nome}'] .num strong`);
+    confere((await etapa("inscritos")) === fmt(linha.inscritos) && (await etapa("cliques")) === fmt(linha.cliques) && (await etapa("compras")) === fmt(linha.compras), `${rotulo}: funil`);
+    const subCompras = await texto(page, `${c} [data-etapa='compras'] .rotulo small`);
+    confere(subCompras.includes(`${Math.round((linha.compras / linha.inscritos) * 100)}% dos ${fmt(linha.inscritos)} inscritos`), `${rotulo}: taxa com a base escrita (${subCompras})`);
+    confere((await texto(page, `${c} [data-etapa='compras'] .rotulo`)).startsWith("Compras de inscritos"), `${rotulo}: o funil diz "compras de inscritos"`);
+
+    // Lado da Hotmart: de onde veio cada venda, pelo sck.
+    confere((await texto(page, `${c} [data-vendas]`)) === fmt(linha.vendas) && (await texto(page, `${c} [data-vendas-receita]`)) === moeda(linha.vendas_receita), `${rotulo}: total da Hotmart`);
+    const textoHotmart = await texto(page, `${c} [data-ins-hotmart]`);
+    confere(textoHotmart.includes("inclusive de quem comprou sem passar pelo formulário") && textoHotmart.includes("compras de inscritos"), `${rotulo}: a diferença entre vendas e compras de inscritos está escrita`);
+    confere(
+      (await texto(page, `${c} [data-vendas-casadas]`)) === `${fmt(linha.vendas - semInscricao)} ${linha.vendas - semInscricao === 1 ? "casada" : "casadas"} com inscrição · ${fmt(semInscricao)} sem inscrição`,
+      `${rotulo}: casadas x sem inscrição`
+    );
+    const porSck = await tabela(page, `${c} [data-ins-hotmart]`);
+    confere(porSck.length === linha.vendas_por_sck.length, `${rotulo}: ${linha.vendas_por_sck.length} linhas por sck`);
+    confere(
+      linha.vendas_por_sck.every((x, i) => porSck[i][0] === x.sck && porSck[i][1] === fmt(x.vendas) && porSck[i][2] === moeda(x.receita) && porSck[i][3] === fmt(x.casadas)),
+      `${rotulo}: cada linha por sck (${porSck.map((l) => l.join("|")).join(" / ")})`
+    );
+    confere((await texto(page, `${c} [data-ins-hotmart] caption`)).includes(`O sck é o ${sck}`), `${rotulo}: a legenda diz de qual UTM sai o sck`);
+
+    // Divisões dos inscritos por UTM, a do sck marcada.
+    for (const [divisao, lista, campo] of DIVISOES) {
+      const linhas = await tabela(page, `${c} [data-divisao='${divisao}']`);
+      const dados = linha[lista];
+      confere(
+        linhas.length === dados.length && dados.every((x, i) => linhas[i][0] === String(x[campo]) && linhas[i][1] === fmt(x.inscritos) && linhas[i][2].startsWith(fmt(x.compras))),
+        `${rotulo}: por ${divisao} (${linhas.map((l) => l[0]).join(", ")})`
+      );
+    }
+    const marcadas = await page.$$eval(`${c} [data-divisao][data-sck]`, (els) => els.map((e) => ({ id: e.dataset.divisao, titulo: e.querySelector("h5").textContent, legenda: e.querySelector("caption")?.textContent || "" })));
+    const esperada = sck === "utm_content" ? "conteudo" : "termo";
+    confere(marcadas.length === 1 && marcadas[0].id === esperada && marcadas[0].titulo.includes("(sck)"), `${rotulo}: só a divisão ${esperada} é o sck (${JSON.stringify(marcadas)})`);
+    confere(marcadas[0].legenda.includes(`O ${sck} vai para a Hotmart como sck: é o criativo que aparece no relatório de vendas de lá`), `${rotulo}: legenda do sck`);
+    const outrosTitulos = await page.$$eval(`${c} [data-divisao]:not([data-sck]) h5`, (els) => els.map((e) => e.textContent));
+    confere(outrosTitulos.length === 5 && outrosTitulos.every((t) => !t.includes("(sck)")), `${rotulo}: as outras divisões sem a marca (${outrosTitulos.join(" / ")})`);
+    confere((await page.getAttribute(`${c} [data-sck-da-pagina]`, "data-sck-da-pagina")) === sck, `${rotulo}: o cartão diz qual UTM é o sck`);
+    const dias = await page.$$eval(`${c} [data-divisao='dia'] tbody tr`, (trs) => trs.length);
+    confere(dias === Math.min(14, linha.por_dia.length), `${rotulo}: por dia até 14 linhas (${dias})`);
+
+    // Compras recentes: o sck de cada aviso, compacto embaixo do nome.
+    const recentes = await tabela(page, "[data-inscricoes] .ins-compras");
+    confere(recentes.length === r.compras_recentes.length, `${rotulo}: ${r.compras_recentes.length} avisos recentes`);
+    const sckAvisos = await page.$$eval("[data-inscricoes] .ins-compras tbody tr [data-sck-aviso]", (els) => els.map((e) => e.textContent.trim()));
+    confere(
+      sckAvisos.length === r.compras_recentes.length && r.compras_recentes.every((x, i) => sckAvisos[i] === (x.sck ? `sck ${x.sck}` : "sem sck")),
+      `${rotulo}: o sck de cada aviso (${sckAvisos.slice(0, 4).join(" / ")}...)`
+    );
+    const orfas = await page.$$eval("[data-inscricoes] .ins-compras tbody tr.ins-orfa", (trs) => trs.length);
+    confere(orfas === r.compras_recentes.filter((x) => !x.casou).length, `${rotulo}: avisos sem inscrição destacados (${orfas})`);
+    if (semInscricao) {
+      const aviso = await texto(page, "[data-ins-aviso]");
+      confere(aviso.includes(`${fmt(semInscricao)} ${semInscricao === 1 ? "venda da Hotmart não casou" : "vendas da Hotmart não casaram"}`), `${rotulo}: aviso com o mesmo número do placar (${aviso.slice(0, 60)})`);
+    } else {
+      confere((await page.$$("[data-ins-aviso]")).length === 0, `${rotulo}: sem venda órfã, sem aviso`);
+    }
+
+    // Inscritos: a origem mostra o valor do sck DESTA página.
+    const listaEsperada = listaInscricoes(DADOS, { ...recorte, pagina: pagina.id }, { limite: 50 });
+    const pessoas = await page.$$eval("[data-inscricoes] .ins-pessoa", (els) => els.map((e) => ({ id: e.dataset.inscrito, origem: e.querySelector(".pessoa-origem").textContent })));
+    confere(pessoas.length === listaEsperada.itens.length && pessoas.every((p, i) => p.id === listaEsperada.itens[i].id), `${rotulo}: lista com os ${listaEsperada.itens.length} mais recentes`);
+    confere(
+      listaEsperada.itens.every((item, i) => (item[sck] ? pessoas[i].origem.includes(`sck ${item[sck]}`) : !pessoas[i].origem.includes("sck "))),
+      `${rotulo}: origem mostra o ${sck} como sck`
+    );
+    const outra = sck === "utm_content" ? "utm_term" : "utm_content";
+    confere(listaEsperada.itens.every((item, i) => !item[outra] || !pessoas[i].origem.includes(item[outra])), `${rotulo}: a outra UTM (${outra}) não aparece como sck`);
+    confere((await texto(page, "[data-ins-contador]")).includes(`de ${fmt(listaEsperada.total)}`), `${rotulo}: contador`);
+    const csv = new URL(BASE + (await page.getAttribute("[data-inscricoes-csv]", "href"))).searchParams;
+    confere(csv.get("pagina") === pagina.id && (csv.get("desde") || "") === (recorte.desde || ""), `${rotulo}: CSV da página e do período`);
+    return linha;
+  }
 
   for (const largura of [1280, 390]) {
     const { page, mock, erros } = await novaPagina(browser, { largura, altura: largura < 500 ? 844 : 900 });
     await page.waitForSelector("[data-panel-view]:not([hidden])");
     await esperarCalmo(page);
 
-    // A aba nasce da LISTA do js/checkout-config.js, com o nome e a rota de lá.
-    const abas = await page.$$eval("[data-paginas] [data-pagina]", (els) => els.map((e) => `${e.dataset.pagina}|${e.textContent}`));
-    confere(abas.length === 3 && abas[2] === `inscricoes|${PAGINA.nome}rota ${PAGINA.rota}`, `faixa com a aba de inscrição (${abas.join(" / ")})`);
-    confere(!mock.chamadas.some((c) => c.rota === "inscricoes"), "a aba de inscrição só busca dados quando é aberta");
+    // Uma aba por página do js/checkout-config.js, com o nome e a rota de lá (host para a de fora).
+    const abas = await page.$$eval("[data-paginas] [data-pagina]", (els) =>
+      els.map((e) => ({ id: e.dataset.pagina, dom: e.id, role: e.getAttribute("role"), controla: e.getAttribute("aria-controls"), nome: e.querySelector(".pagina-nome").textContent, rota: e.querySelector(".pagina-rota").textContent }))
+    );
+    confere(JSON.stringify(abas.map((a) => a.id)) === JSON.stringify(["pesquisa-icp", "obrigado", idAba(VDF), idAba(GPS)]), `${largura}: faixa (${abas.map((a) => a.id).join(" / ")})`);
+    confere(abas[2].nome === VDF.nome && abas[2].rota === `rota ${VDF.rota}`, `${largura}: aba Viver de Furo (${abas[2].nome} · ${abas[2].rota})`);
+    confere(abas[3].nome === GPS.nome && abas[3].rota === "rota io.escolaenfermagemdevalor.com.br/igps_set_lp_26-ingresso", `${largura}: aba GPS com o host (${abas[3].rota})`);
+    confere(abas.slice(2).every((a) => a.role === "tab" && a.controla === "pagina-inscricoes-painel" && a.dom === `pagina-${a.id}`), `${largura}: as duas abas controlam o mesmo bloco`);
+    confere(!mock.chamadas.some((c) => c.rota === "inscricoes"), `${largura}: a aba de inscrição só busca dados quando é aberta`);
 
-    await page.click("[data-paginas] [data-pagina='inscricoes']");
-    await page.waitForSelector("[data-inscricoes] .ins-cartao [data-etapa]");
+    // Viver de Furo.
+    await page.click(`[data-paginas] [data-pagina='${idAba(VDF)}']`);
+    await page.waitForSelector(`${cartao(VDF)} [data-etapa]`);
     await esperarCalmo(page);
-    confere(new URL(page.url()).searchParams.get("pagina") === "inscricoes", `a URL guarda a aba (${page.url()})`);
-    confere((await page.getAttribute("#pagina-inscricoes", "aria-selected")) === "true", "aba de inscrição selecionada");
-    confere(await page.isHidden("[data-pagina-conteudo='pesquisa-icp']"), "o conteúdo da pesquisa some");
-    confere((await page.isHidden("[data-perfis]")) && (await page.isHidden(".filtros-pessoa")), "perfil, busca e situação somem na aba de inscrição");
+    confere(new URL(page.url()).searchParams.get("pagina") === idAba(VDF), `${largura}: a URL guarda a aba (${new URL(page.url()).search})`);
+    confere((await page.getAttribute(`#pagina-${idAba(VDF)}`, "aria-selected")) === "true" && (await page.getAttribute(`#pagina-${idAba(GPS)}`, "aria-selected")) === "false", `${largura}: aba Viver de Furo selecionada`);
+    confere((await page.getAttribute("#pagina-inscricoes-painel", "aria-labelledby")) === `pagina-${idAba(VDF)}`, `${largura}: o bloco é rotulado pela aba aberta`);
+    confere(await page.isHidden("[data-pagina-conteudo='pesquisa-icp']"), `${largura}: a pesquisa some`);
+    confere((await page.isHidden("[data-perfis]")) && (await page.isHidden(".filtros-pessoa")), `${largura}: perfil, busca e situação somem`);
+    await conferirAba(page, mock, VDF, {}, `${largura} Viver de Furo`);
+    await tela(page, `inscricoes-viver-de-furo-${largura}`, { full: true });
+    await recorte(page, cartao(VDF), `inscricoes-viver-de-furo-cartao-${largura}`);
 
-    // Os números conferidos contra as fixtures (o mesmo que o SQL devolveria).
-    const r = inscricoesResumo(DADOS, {});
-    const linha = r.paginas[0];
-    const numero = (etapa) => page.textContent(`[data-inscricao-pagina='${PAGINA.id}'] [data-etapa='${etapa}'] .num strong`).then((t) => t.trim());
-    confere((await numero("inscritos")) === String(linha.inscritos), `inscritos = ${linha.inscritos}`);
-    confere((await numero("cliques")) === String(linha.cliques), `cliques no checkout = ${linha.cliques}`);
-    confere((await numero("compras")) === String(linha.compras), `compras = ${linha.compras}`);
-    confere(
-      (await page.textContent(`[data-inscricao-pagina='${PAGINA.id}'] [data-receita]`)).includes(moeda(linha.receita).replace(/\u00a0/g, " ").split(" ")[1]),
-      `receita = ${linha.receita}`
-    );
-    // A taxa vem escrita COM a base ("x% dos N inscritos"): o cliente lê o número e o denominador.
-    const subCompras = await page.textContent(`[data-inscricao-pagina='${PAGINA.id}'] [data-etapa='compras'] .rotulo small`);
-    const esperado = `${Math.round((linha.compras / linha.inscritos) * 100)}%`;
-    confere(subCompras.includes(esperado) && subCompras.includes(String(linha.inscritos)), `taxa com base escrita (${subCompras.trim()})`);
+    // Imersão GPS pelo teclado: a outra página é pedida e, enquanto não chega, nada da anterior fica.
+    mock.atraso.inscricoes = (url) => (url.searchParams.get("pagina") === GPS.id ? 700 : 0);
+    await page.focus(`#pagina-${idAba(VDF)}`);
+    await page.keyboard.press("ArrowRight");
+    confere((await page.$$(cartao(VDF))).length === 0 && (await page.$$("[data-inscricoes] .esqueleto")).length === 1, `${largura}: trocar de página limpa os números da anterior (esqueleto)`);
+    confere((await page.evaluate(() => document.activeElement && document.activeElement.id)) === `pagina-${idAba(GPS)}`, `${largura}: a seta leva o foco para a aba GPS`);
+    confere((await page.getAttribute("[data-inscricoes-csv]", "href")).includes(`pagina=${GPS.id}`), `${largura}: o CSV já é da página nova`);
+    await page.waitForSelector(`${cartao(GPS)} [data-etapa]`);
+    await esperarCalmo(page);
+    mock.atraso = {};
+    confere(new URL(page.url()).searchParams.get("pagina") === idAba(GPS), `${largura}: URL da aba GPS`);
+    confere((await page.getAttribute("#pagina-inscricoes-painel", "aria-labelledby")) === `pagina-${idAba(GPS)}`, `${largura}: bloco rotulado pela aba GPS`);
+    await conferirAba(page, mock, GPS, {}, `${largura} GPS`);
+    // O criativo com HTML no nome aparece como texto em todos os lugares (escapeHtml).
+    confere((await page.evaluate(() => window.__xss)) === undefined, `${largura}: sck com <img onerror> não executa`);
+    confere((await page.textContent(`${cartao(GPS)} [data-divisao='conteudo']`)).includes("<img src=x"), `${largura}: sck malicioso aparece como texto`);
 
-    // Tabelas por origem, campanha e termo (o sck).
-    for (const [divisao, dados, chave] of [
-      ["origem", linha.por_origem, "utm_source"],
-      ["campanha", linha.por_campanha, "utm_campaign"],
-      ["termo", linha.por_termo, "utm_term"]
-    ]) {
-      const linhas = await page.$$eval(`[data-inscricao-pagina='${PAGINA.id}'] [data-divisao='${divisao}'] tbody tr`, (trs) =>
-        trs.map((tr) => Array.from(tr.children).map((c) => c.textContent.trim()))
-      );
-      confere(linhas.length === dados.length, `${divisao}: ${dados.length} linhas`);
-      confere(linhas[0][0] === String(dados[0][chave]) && linhas[0][1] === String(dados[0].inscritos), `${divisao}: a maior é ${dados[0][chave]} com ${dados[0].inscritos}`);
-      confere(linhas[0][2].startsWith(String(dados[0].compras)), `${divisao}: compras da maior = ${dados[0].compras}`);
-    }
-    confere(
-      (await page.textContent(`[data-inscricao-pagina='${PAGINA.id}'] [data-divisao='termo'] caption`)).includes("sck"),
-      "a tabela de termo explica que ele vira o sck na Hotmart"
-    );
-
-    // Por dia, no fuso de Brasília, do mais recente para o mais antigo.
-    const dias = await page.$$eval(`[data-inscricao-pagina='${PAGINA.id}'] [data-divisao='dia'] tbody tr`, (trs) => trs.map((tr) => tr.children[0].textContent.trim()));
-    confere(dias.length > 0 && dias.length <= 14, `por dia mostra no máximo 14 linhas (${dias.length})`);
-
-    // Compras recentes, com o aviso de quem não casou com inscrição.
-    const recentes = await page.$$eval("[data-inscricoes] .ins-compras tbody tr", (trs) => trs.length);
-    confere(recentes === r.compras_recentes.length, `compras recentes = ${r.compras_recentes.length}`);
-    const orfas = await page.$$eval("[data-inscricoes] .ins-compras tbody tr.ins-orfa", (trs) => trs.length);
-    confere(orfas === r.compras_recentes.filter((c) => !c.casou).length, `compras órfãs destacadas (${orfas})`);
-    confere((await page.textContent("[data-ins-aviso]")).includes("não casaram"), "o aviso conta quantas compras não casaram com inscrição");
-
-    // Lista de inscritos: selo comprou/não comprou e link de WhatsApp.
-    const inscritos = await page.$$("[data-inscricoes] .ins-pessoa");
-    confere(inscritos.length === 50, `a lista traz as 50 primeiras (${inscritos.length})`);
-    const compraram = await page.$$eval("[data-inscricoes] .ins-pessoa .selo.ok", (els) => els.map((e) => e.textContent));
-    const naoCompraram = await page.$$eval("[data-inscricoes] .ins-pessoa .selo.meio", (els) => els.map((e) => e.textContent));
-    confere(compraram.length + naoCompraram.length === 50, "cada inscrito tem um selo");
-    confere(compraram.every((t) => t.includes("Comprou")) && naoCompraram.every((t) => t.includes("Não comprou")), "os selos dizem comprou / não comprou");
-    const wa = await page.getAttribute("[data-inscricoes] .ins-pessoa a[href^='https://wa.me/']", "href");
-    confere(/^https:\/\/wa\.me\/55\d{10,11}$/.test(wa), `link de WhatsApp pronto (${wa})`);
-    confere((await page.textContent("[data-ins-contador]")).includes(String(linha.inscritos)), "o contador diz quantos são no total");
-
-    // Placar somado e CSV com os filtros da tela.
-    const placar = await page.$$eval("[data-inscricoes] .ins-placar .valor", (els) => els.map((e) => e.textContent.trim()));
-    confere(placar[0] === String(linha.inscritos) && placar[2] === String(linha.compras), `placar (${placar.join(" / ")})`);
-    confere((await page.getAttribute("[data-inscricoes-csv]", "href")) === "/api/painel/exportar-inscricoes.csv", "CSV sem filtro nenhum");
-
-    // Sem rolagem horizontal, nem tabela transbordando.
+    // Sem rolagem horizontal, nem tabela transbordando, nas duas páginas.
     const larguraDoc = await page.evaluate(() => document.documentElement.scrollWidth);
-    confere(larguraDoc <= largura, `inscrição: sem rolagem horizontal em ${largura}px (scrollWidth ${larguraDoc})`);
+    confere(larguraDoc <= largura, `${largura}: GPS sem rolagem horizontal (scrollWidth ${larguraDoc})`);
     const transbordam = await page.$$eval("[data-inscricoes] .tabela-rolagem", (els) => els.filter((e) => e.scrollWidth > e.clientWidth + 1).length);
-    confere(transbordam === 0, `inscrição: nenhuma tabela rola de lado em ${largura}px (${transbordam})`);
-    await tela(page, `inscricoes-${largura}`, { full: true });
-    await recorte(page, `[data-inscricao-pagina='${PAGINA.id}']`, `inscricoes-cartao-${largura}`);
+    confere(transbordam === 0, `${largura}: GPS sem tabela rolando de lado (${transbordam})`);
+    await tela(page, `inscricoes-gps-${largura}`, { full: true });
+    await tela(page, `inscricoes-gps-topo-${largura}`);
+    await recorte(page, `${cartao(GPS)} [data-ins-hotmart]`, `inscricoes-gps-hotmart-${largura}`);
+    await recorte(page, `${cartao(GPS)} .ins-bloco`, `inscricoes-gps-divisoes-${largura}`);
+    await recorte(page, "[data-inscricoes] .ins-compras", `inscricoes-gps-compras-${largura}`);
+    await recorte(page, "[data-paginas]", `inscricoes-faixa-${largura}`);
+
+    // De volta à Viver de Furo pelo clique: de novo sem resto da GPS.
+    await page.click(`[data-paginas] [data-pagina='${idAba(VDF)}']`);
+    await page.waitForSelector(`${cartao(VDF)} [data-etapa]`);
+    await esperarCalmo(page);
+    confere((await page.$$(cartao(GPS))).length === 0 && !(await page.textContent("[data-inscricoes]")).includes("video-iza-01"), `${largura}: Viver de Furo sem nada da GPS`);
+    const larguraVdf = await page.evaluate(() => document.documentElement.scrollWidth);
+    const transbordamVdf = await page.$$eval("[data-inscricoes] .tabela-rolagem", (els) => els.filter((e) => e.scrollWidth > e.clientWidth + 1).length);
+    confere(larguraVdf <= largura && transbordamVdf === 0, `${largura}: Viver de Furo sem rolagem lateral (${larguraVdf}, ${transbordamVdf})`);
 
     if (largura === 1280) {
       // "Carregar mais" traz a página seguinte sem perder o que já estava na tela.
       await page.click("[data-ins-mais]");
       await page.waitForFunction(() => document.querySelectorAll("[data-inscricoes] .ins-pessoa").length > 50);
       confere((await page.$$("[data-inscricoes] .ins-pessoa")).length === 100, "Carregar mais soma mais 50");
+      confere(mock.chamadas.some((c) => c.rota === "inscricoes" && c.url.includes("offset=50") && c.url.includes(`pagina=${VDF.id}`)), "Carregar mais pede a mesma página");
 
-      // O período muda só esta aba, e o CSV acompanha.
+      // Resposta atrasada da página anterior não pinta a página nova.
+      mock.atraso.inscricoes = (url) => (url.searchParams.get("pagina") === VDF.id ? 1500 : 0);
+      await page.click("[data-atualizar]");
+      await page.waitForTimeout(80);
+      await page.click(`[data-paginas] [data-pagina='${idAba(GPS)}']`);
+      await page.waitForTimeout(1900);
+      await esperarCalmo(page);
+      mock.atraso = {};
+      confere((await page.$$(cartao(VDF))).length === 0 && (await page.$$(cartao(GPS))).length === 1, "resposta atrasada da Viver de Furo não sobrescreve a GPS");
+      confere((await texto(page, `${cartao(GPS)} [data-etapa='inscritos'] .num strong`)) === fmt(rGps.inscritos), "a GPS continua com os números dela");
+
+      // Período: vale na aba aberta, com a página junto; o CSV acompanha.
       mock.chamadas.length = 0;
       await page.click("[data-periodo='7']");
-      await page.waitForFunction(() => !document.querySelector("[aria-busy='true']"));
+      await page.waitForFunction(() => document.querySelector("[data-periodo='7']").getAttribute("aria-pressed") === "true");
+      await esperarCalmo(page);
       const chamada = mock.chamadas.find((c) => c.rota === "inscricoes");
-      confere(Boolean(chamada) && chamada.url.includes("desde="), `o período vai na requisição (${chamada && chamada.url})`);
-      confere(!mock.chamadas.some((c) => c.rota === "resumo"), "trocar o período na aba de inscrição não recarrega a pesquisa");
-      const r7 = inscricoesResumo(DADOS, { desde: new URL(BASE + chamada.url).searchParams.get("desde") });
-      await page.waitForFunction(
-        (esperado) => document.querySelector("[data-inscricao-pagina] [data-etapa='inscritos'] .num strong")?.textContent.trim() === esperado,
-        String(r7.paginas[0].inscritos),
-        { timeout: 5000 }
-      );
-      confere(true, `período de 7 dias recalcula (${r7.paginas[0].inscritos} inscritos)`);
+      const desde = new URL(BASE + chamada.url).searchParams.get("desde");
+      confere(Boolean(desde) && !mock.chamadas.some((c) => c.rota === "resumo"), `período de 7 dias só nesta aba (${chamada.url})`);
+      const g7 = await conferirAba(page, mock, GPS, { desde }, "GPS 7 dias");
+      confere(g7.inscritos < rGps.inscritos, `7 dias recorta (${g7.inscritos} de ${rGps.inscritos})`);
       confere((await page.textContent("[data-inscricoes-periodo]")).includes("Últimos 7 dias"), "rótulo do período");
-      confere((await page.getAttribute("[data-inscricoes-csv]", "href")).includes("desde="), "o CSV leva o mesmo período");
 
-      // Atualizar recarrega só esta aba.
+      // Atualizar recarrega só esta aba, desta página.
       mock.chamadas.length = 0;
       await page.click("[data-atualizar]");
-      await page.waitForFunction(() => !document.querySelector("[aria-busy='true']"));
-      confere(mock.chamadas.some((c) => c.rota === "inscricoes") && !mock.chamadas.some((c) => c.rota === "resumo"), "Atualizar recarrega só a aba aberta");
+      await esperarCalmo(page);
+      confere(mock.chamadas.length > 0 && mock.chamadas.every((c) => c.rota === "inscricoes" && c.url.includes(`pagina=${GPS.id}`)), "Atualizar recarrega só a aba aberta");
+
+      // Teclado: Home vai para a primeira aba, End para a última, seta à esquerda volta uma.
+      await page.focus(`#pagina-${idAba(GPS)}`);
+      await page.keyboard.press("Home");
+      await esperarCalmo(page);
+      confere((await page.evaluate(() => document.activeElement.id)) === "pagina-pesquisa-icp" && (await page.isVisible("[data-perfis]")), "Home abre a pesquisa");
+      await page.keyboard.press("End");
+      await page.waitForSelector(`${cartao(GPS)} [data-etapa]`);
+      confere((await page.evaluate(() => document.activeElement.id)) === `pagina-${idAba(GPS)}`, "End abre a última aba (GPS)");
+      mock.chamadas.length = 0;
+      await page.keyboard.press("ArrowLeft");
+      await page.waitForSelector(`${cartao(VDF)} [data-etapa]`);
+      await esperarCalmo(page);
+      confere((await page.evaluate(() => document.activeElement.id)) === `pagina-${idAba(VDF)}`, "seta à esquerda volta para a Viver de Furo");
+      const v7 = inscricoesResumo(DADOS, { desde, pagina: VDF.id }).paginas[0];
+      confere((await texto(page, `${cartao(VDF)} [data-etapa='inscritos'] .num strong`)) === fmt(v7.inscritos), `Viver de Furo com o mesmo período (${v7.inscritos})`);
+      confere(mock.chamadas.some((c) => c.rota === "inscricoes" && c.url.includes(`pagina=${VDF.id}`) && c.url.includes("desde=")), "o pedido leva página e período");
 
       // Erro e "Tentar de novo".
       await page.click("[data-paginas] [data-pagina='pesquisa-icp']");
       mock.forcar.inscricoes = 502;
-      await page.click("[data-paginas] [data-pagina='inscricoes']");
+      await page.click(`[data-paginas] [data-pagina='${idAba(GPS)}']`);
       await page.waitForSelector("[data-inscricoes] .erro [data-repetir='inscricoes']");
       confere((await page.textContent("[data-inscricoes-status]")).includes("Não foi possível carregar"), "502 avisa no status");
       confere((await page.$$("[data-inscricoes] .ins-cartao")).length === 0, "sem número velho na tela depois do erro");
       await tela(page, "inscricoes-erro-1280");
       delete mock.forcar.inscricoes;
       await page.click("[data-inscricoes] [data-repetir='inscricoes']");
-      await page.waitForSelector("[data-inscricoes] .ins-cartao [data-etapa]");
+      await page.waitForSelector(`${cartao(GPS)} [data-etapa]`);
       confere((await page.textContent("[data-inscricoes-status]")).trim() === "", "Tentar de novo recupera");
 
-      // Sessão expirada na aba nova volta ao login.
+      // Sessão expirada volta ao login.
       mock.logado = false;
       await page.click("[data-atualizar]");
       await page.waitForSelector("[data-login-view]:not([hidden])");
@@ -1187,11 +1365,55 @@ cenario("inscricoes", async () => {
     await page.context().close();
   }
 
+  // Link salvo de antes (?pagina=inscricoes): abre a primeira página de inscrição e a URL passa a
+  // dizer qual é.
+  const antigo = await novaPagina(browser, { url: "/painel?pagina=inscricoes&periodo=7" });
+  await antigo.page.waitForSelector(`${cartao(VDF)} [data-etapa]`);
+  await esperarCalmo(antigo.page);
+  const uAntigo = new URL(antigo.page.url()).searchParams;
+  confere(uAntigo.get("pagina") === idAba(VDF) && uAntigo.get("periodo") === "7", `link antigo abre a Viver de Furo (${antigo.page.url()})`);
+  confere((await antigo.page.getAttribute(`#pagina-${idAba(VDF)}`, "aria-selected")) === "true", "link antigo: aba selecionada");
+  confere(antigo.mock.chamadas.some((c) => c.rota === "inscricoes" && c.url.includes(`pagina=${VDF.id}`)) && !antigo.mock.chamadas.some((c) => c.rota === "resumo"), "link antigo: pede a Viver de Furo e não carrega a pesquisa");
+  confere(antigo.erros.length === 0, `link antigo sem erros (${antigo.erros.join(" | ")})`);
+  await antigo.page.context().close();
+
+  // Servidor novo com o SQL antigo (sem mídia, conteúdo e vendas): a aba não quebra.
+  const velho = await novaPagina(browser, { largura: 390, altura: 844 });
+  velho.mock.sqlAntigo = true;
+  await velho.page.waitForSelector("[data-panel-view]:not([hidden])");
+  await esperarCalmo(velho.page);
+  for (const pagina of [GPS, VDF]) {
+    await velho.page.click(`[data-paginas] [data-pagina='${idAba(pagina)}']`);
+    await velho.page.waitForSelector(`${cartao(pagina)} [data-etapa]`);
+    await esperarCalmo(velho.page);
+    const linha = inscricoesResumo(DADOS, { pagina: pagina.id }).paginas[0];
+    const chaves = await velho.page.$$eval("[data-inscricoes] .ins-placar li", (lis) => lis.map((li) => li.dataset.placarIns));
+    confere(chaves.join() === "inscritos,cliques,compras,receita", `SQL antigo ${pagina.id}: o quarto número volta a ser a receita (${chaves})`);
+    confere((await velho.page.$$("[data-ins-hotmart]")).length === 0, `SQL antigo ${pagina.id}: sem bloco da Hotmart`);
+    const divisoes = await velho.page.$$eval(`${cartao(pagina)} [data-divisao]`, (els) => els.map((e) => e.dataset.divisao));
+    confere(divisoes.join() === "origem,campanha,termo,dia", `SQL antigo ${pagina.id}: só as divisões que vieram (${divisoes})`);
+    confere((await velho.page.$$("[data-inscricoes] [data-sck-aviso]")).length === 0, `SQL antigo ${pagina.id}: aviso sem sck não inventa "sem sck"`);
+    // O aviso de órfãs continua com o número de lá: AVISOS aprovados sem inscrição (produto de fora e
+    // reembolsada inclusive), com a frase de compra aprovada.
+    const resumoAntigo = comoSqlAntigo(inscricoesResumo(DADOS, { pagina: pagina.id }), DADOS, { pagina: pagina.id });
+    const avisoVelho = await texto(velho.page, "[data-ins-aviso]");
+    confere(
+      resumoAntigo.compras_sem_inscricao > 0 && avisoVelho.includes(`${fmt(resumoAntigo.compras_sem_inscricao)} ${resumoAntigo.compras_sem_inscricao === 1 ? "compra aprovada não casou" : "compras aprovadas não casaram"}`),
+      `SQL antigo ${pagina.id}: aviso com o compras_sem_inscricao de lá (${avisoVelho.slice(0, 50)})`
+    );
+    confere((await tabela(velho.page, "[data-inscricoes] .ins-compras")).length === resumoAntigo.compras_recentes.length, `SQL antigo ${pagina.id}: ${resumoAntigo.compras_recentes.length} avisos recentes`);
+    confere((await texto(velho.page, `${cartao(pagina)} [data-etapa='compras'] .num strong`)) === fmt(linha.compras), `SQL antigo ${pagina.id}: funil continua certo`);
+    confere((await velho.page.evaluate(() => document.documentElement.scrollWidth)) <= 390, `SQL antigo ${pagina.id}: sem rolagem horizontal`);
+  }
+  await tela(velho.page, "inscricoes-sql-antigo-390", { full: true });
+  confere(velho.erros.length === 0, `SQL antigo sem erros de JavaScript (${velho.erros.join(" | ")})`);
+  await velho.page.context().close();
+
   // Aberta direto pela URL, sem ninguém inscrito ainda: estado vazio caprichado.
-  const v = await novaPagina(browser, { dados: VAZIO, url: "/painel?pagina=inscricoes", largura: 390, altura: 844 });
+  const v = await novaPagina(browser, { dados: VAZIO, url: `/painel?pagina=${idAba(GPS)}`, largura: 390, altura: 844 });
   await v.page.waitForSelector("[data-inscricoes-vazio]");
   confere((await v.page.textContent("[data-inscricoes-vazio]")).includes("Ninguém se inscreveu ainda"), "vazio geral");
-  confere((await v.page.$$eval("[data-inscricoes] .ins-cartao .vazio", (els) => els.length)) === CHK.LISTA.length, "cada cartão diz que ninguém se inscreveu nele");
+  confere((await v.page.$$eval(`${cartao(GPS)} .vazio`, (els) => els.length)) === 1, "o cartão diz que ninguém se inscreveu nele");
   confere((await v.page.textContent("[data-inscricoes] .ins-compras")).includes("Nenhum aviso de venda"), "compras recentes vazio explica de onde vêm os avisos");
   confere((await v.page.$$("[data-ins-aviso]")).length === 0, "sem compra órfã, sem aviso");
   confere(!v.mock.chamadas.some((c) => c.rota === "resumo"), "aberta direto na aba de inscrição, a pesquisa não carrega");
@@ -1199,6 +1421,60 @@ cenario("inscricoes", async () => {
   await tela(v.page, "inscricoes-vazio-390", { full: true });
   confere(v.erros.length === 0, `vazio sem erros (${v.erros.join(" | ")})`);
   await v.page.context().close();
+
+  // Só vendas, nenhum inscrito (a Hotmart vendeu antes de o formulário existir): o lado da Hotmart
+  // aparece mesmo assim, e o do formulário diz que não tem ninguém.
+  const soVendas = { ...VAZIO, compras: DADOS.compras.filter((c) => c.pagina === GPS.id && !c.inscricao_id) };
+  const sv = inscricoesResumo(soVendas, { pagina: GPS.id }).paginas[0];
+  confere(sv.vendas === 3 && sv.inscritos === 0, `fixture: 3 vendas sem inscrição, 0 inscritos (${sv.vendas})`);
+  const s = await novaPagina(browser, { dados: soVendas, url: `/painel?pagina=${idAba(GPS)}`, largura: 390, altura: 844 });
+  await s.page.waitForSelector(`${cartao(GPS)} [data-ins-hotmart]`);
+  await esperarCalmo(s.page);
+  confere((await s.page.$$("[data-inscricoes-vazio]")).length === 0, "só vendas: não diz que está tudo vazio");
+  const placarSv = await s.page.$$eval("[data-inscricoes] .ins-placar li .valor", (els) => els.map((e) => e.textContent.trim()));
+  confere(placarSv[0] === "0" && placarSv[3] === "3", `só vendas: 0 inscritos e 3 vendas (${placarSv})`);
+  confere((await tabela(s.page, `${cartao(GPS)} [data-ins-hotmart]`)).length === sv.vendas_por_sck.length, "só vendas: a tabela por sck aparece");
+  confere((await s.page.$$(`${cartao(GPS)} [data-divisao='origem'] .vazio`)).length === 1, "só vendas: divisões de inscritos vazias");
+  confere(s.erros.length === 0, `só vendas sem erros (${s.erros.join(" | ")})`);
+  await s.page.context().close();
+
+  // Mais de 50 sck com venda: a tabela por sck traz todos (o SQL corta só em 500, porque é por
+  // venda), e o "sem inscrição" é o do banco (compras_sem_inscricao conta todas).
+  const inscritas = DADOS.inscricoes.filter((i) => i.pagina === GPS.id && i.comprou_em).slice(0, 5);
+  const muitos = { ...VAZIO, inscricoes: inscritas, compras: [] };
+  for (let k = 0; k < 55; k++) {
+    const dona = k >= 50 ? inscritas[k - 50] : null;
+    const quando = dona ? dona.comprou_em : new Date(Date.now() - (k + 1) * 3600000).toISOString();
+    muitos.compras.push({
+      id: k + 1,
+      recebido_em: new Date(new Date(quando).getTime() + 2000).toISOString(),
+      evento_em: quando,
+      aprovado_em: quando,
+      evento: "PURCHASE_APPROVED",
+      status: "APPROVED",
+      transacao: dona ? dona.compra_transacao : `HPMUITOS${k}`,
+      valor: 5,
+      sck: `criativo-${String(k).padStart(2, "0")}`,
+      comprador_nome: dona ? dona.nome : `Compradora ${k}`,
+      comprador_email: dona ? dona.email : `compradora${k}@gmail.com`,
+      pagina: GPS.id,
+      pagina_por: "config",
+      inscricao_id: dona ? dona.id : null
+    });
+  }
+  const rm = inscricoesResumo(muitos, { pagina: GPS.id });
+  const lm = rm.paginas[0];
+  confere(lm.vendas === 55 && lm.vendas_por_sck.length === 55 && lm.vendas_por_sck.filter((x) => x.casadas).length === 5 && rm.compras_sem_inscricao === 50, `fixture: 55 vendas, 55 linhas por sck (5 casadas), 50 sem inscrição (${rm.compras_sem_inscricao})`);
+  const m = await novaPagina(browser, { dados: muitos, url: `/painel?pagina=${idAba(GPS)}`, largura: 390, altura: 844 });
+  await m.page.waitForSelector(`${cartao(GPS)} [data-ins-hotmart]`);
+  await esperarCalmo(m.page);
+  const placarM = await m.page.$$eval("[data-inscricoes] .ins-placar li .detalhe", (els) => els.map((e) => e.textContent.replace(/\s+/g, " ").trim()));
+  confere(placarM[3].includes("50 sem inscrição"), `mais de 50 sck: placar com as 50 sem inscrição do banco (${placarM[3]})`);
+  confere((await texto(m.page, `${cartao(GPS)} [data-vendas-casadas]`)) === "5 casadas com inscrição · 50 sem inscrição", "mais de 50 sck: casadas x sem inscrição pelo banco, não pela tabela cortada");
+  confere((await texto(m.page, "[data-ins-aviso]")).includes("50 vendas da Hotmart não casaram"), "mais de 50 sck: o aviso com o mesmo número");
+  confere((await tabela(m.page, `${cartao(GPS)} [data-ins-hotmart]`)).length === 55, "mais de 50 sck: a tabela mostra todos os 55 sck (soma bate com o total)");
+  confere(m.erros.length === 0, `mais de 50 sck sem erros (${m.erros.join(" | ")})`);
+  await m.page.context().close();
 });
 
 test("todas as checagens rodaram", () => {
@@ -1206,5 +1482,8 @@ test("todas as checagens rodaram", () => {
   assert.ok(checagens >= 240, `só ${checagens} checagens rodaram`);
   assert.ok(todasAsChamadas.length > 100);
   assert.deepEqual(todasAsChamadas.filter((url) => /_outro/.test(url)), [], "o painel nunca pede complemento de Outro");
+  // Toda ida à API de inscrições diz de qual página: nenhuma aba pede "todas as páginas".
+  const semPagina = todasAsChamadas.filter((url) => url.startsWith("/api/painel/inscricoes") && !new URLSearchParams(url.split("?")[1] || "").get("pagina"));
+  assert.deepEqual(semPagina, [], "a aba de inscrição sempre pede ?pagina=");
   console.log(`# painel: ${checagens} checagens`);
 });

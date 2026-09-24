@@ -1865,15 +1865,24 @@ function inscricao(sobrescrever = {}) {
   };
 }
 
-/** O `p` de hotmart_registrar_compra, como o servidor monta a partir do payload da Hotmart. */
+/**
+ * O `p` de hotmart_registrar_compra, como o servidor monta a partir do payload da Hotmart.
+ *
+ * `pagina` vem preenchida como na produção: a oferta 7j2nqptq está no js/checkout-config.js, então
+ * o servidor (EVCheckout.paginaDaVenda) SEMPRE manda p.pagina = "viver-de-furo" para esta venda. Os
+ * casos em que o servidor não conhece o produto (pagina null) têm testes próprios, mais abaixo.
+ * produto_id é o id NUMÉRICO que a Hotmart manda em data.product.id (visto nos avisos reais), e não
+ * o código do link (Y74893363S).
+ */
 function compra(sobrescrever = {}) {
   return {
     evento: "PURCHASE_APPROVED",
     hotmart_id: "aviso-1",
     transacao: "HP1234567890",
     status: "APPROVED",
-    produto_id: "Y74893363S",
-    produto_nome: "Viver de Furo de Orelha",
+    pagina: PAGINA,
+    produto_id: "2332962",
+    produto_nome: "Furo de orelha humanizado",
     oferta: "7j2nqptq",
     valor: 197,
     moeda: "BRL",
@@ -2190,17 +2199,19 @@ describe("hotmart_registrar_compra", () => {
     assert.equal(porEmail.inscricao_id, outra.id);
   });
 
-  test("compra que não casa com ninguém é gravada assim mesmo (casou = false)", async () => {
+  test("compra do produto da página que não casa com ninguém é gravada assim mesmo (casou = false, pagina = a do produto)", async () => {
     await limparInscricoes();
+    // Alguém se inscreveu, mas quem comprou é outra pessoa (comprou pelo link de outro lugar).
+    await rpcOk("inscricao_salvar", { p: inscricao() });
     const resultado = await rpcOk("hotmart_registrar_compra", {
       p: compra({ comprador_email: "ninguem@gmail.com", comprador_digits: "6299998888" })
     });
     assert.equal(resultado.ok, true);
     assert.equal(resultado.casou, false);
     assert.equal(resultado.inscricao_id, null);
-    assert.equal(resultado.pagina, null);
-    const [contagem] = await stack.sql("select count(*) as n from public.compras where inscricao_id is null");
-    assert.equal(contagem.n, "1");
+    assert.equal(resultado.pagina, PAGINA, "a venda é do produto da página, mesmo sem inscrição");
+    const gravadas = await stack.sql("select coalesce(pagina, '<null>') as pagina, coalesce(inscricao_id::text, '<null>') as inscricao from public.compras");
+    assert.deepEqual(gravadas, [{ pagina: PAGINA, inscricao: "<null>" }]);
   });
 
   test("o MESMO (transacao, evento) chegando duas vezes não duplica nem conta duas vezes", async () => {
@@ -2252,24 +2263,53 @@ describe("hotmart_registrar_compra", () => {
     }
   });
 
-  test("um aviso MAIS ANTIGO não sobrescreve o estado atual da inscrição", async () => {
+  // A régua mudou de propósito. Antes este teste esperava que a aprovação velha de OUTRA transação
+  // (HP-VELHA, 24/09) fosse ignorada por ser mais antiga do que o reembolso de HP-1 (26/09): o estado
+  // era um só para a inscrição inteira. Agora o estado segue a TRANSAÇÃO. Dentro da mesma transação
+  // vale o evento mais novo, e o APPROVED velho de HP-1 continua sem ressuscitar nada. Já HP-VELHA é
+  // outra compra, que nunca foi reembolsada, e a inscrição não está com compra valendo: ela marca.
+  // É também o que "vendas", do lado da Hotmart, conta (HP-VELHA é venda, HP-1 não). Ignorar HP-VELHA
+  // deixava a pessoa como "não comprou" com um ingresso pago e o painel discordando de si mesmo.
+  test("um aviso MAIS ANTIGO da mesma transação não sobrescreve o estado atual; a aprovação de OUTRA transação, nunca reembolsada, marca (como em vendas)", async () => {
     await limparInscricoes();
     const salva = await rpcOk("inscricao_salvar", { p: inscricao() });
 
-    // Aprovada (25/09) e depois reembolsada (26/09): o estado é "reembolsada".
-    await rpcOk("hotmart_registrar_compra", { p: compra({ evento_em: "2026-09-25T10:00:00-03:00", transacao: "HP-1" }) });
+    // HP-1: aprovada (25/09) e reembolsada (26/09), com o aviso do reembolso chegando ANTES.
     await rpcOk("hotmart_registrar_compra", {
       p: compra({ evento: "PURCHASE_REFUNDED", status: "REFUNDED", evento_em: "2026-09-26T10:00:00-03:00", transacao: "HP-1", aprovado_em: null })
     });
-    assert.equal((await linhaInscricao(salva.id)).comprou_em, null);
+    const atrasado = await rpcOk("hotmart_registrar_compra", {
+      p: compra({ evento_em: "2026-09-25T10:00:00-03:00", aprovado_em: "2026-09-25T10:00:00-03:00", transacao: "HP-1" })
+    });
+    assert.equal(atrasado.novo, true);
+    assert.deepEqual(
+      await estadoIso(salva.id),
+      { comprou_em: null, compra_status: "REFUNDED", compra_valor: null, compra_transacao: "HP-1", compra_evento_em: "2026-09-26T13:00:00.000Z" },
+      "o APPROVED mais antigo da MESMA transação não ressuscita a compra"
+    );
 
-    // A Hotmart reenvia uma aprovação velha (de outra transação, mas do mesmo comprador): ignorada.
-    await rpcOk("hotmart_registrar_compra", { p: compra({ evento_em: "2026-09-24T10:00:00-03:00", transacao: "HP-VELHA" }) });
-    const linha = await linhaInscricao(salva.id);
-    assert.equal(linha.comprou_em, null, "o evento antigo não ressuscita a compra");
-    assert.equal(linha.compra_status, "REFUNDED");
+    // HP-VELHA: outra transação do mesmo comprador, aprovada em 24/09 e nunca reembolsada.
+    await rpcOk("hotmart_registrar_compra", {
+      p: compra({ evento_em: "2026-09-24T10:00:00-03:00", aprovado_em: "2026-09-24T10:00:00-03:00", transacao: "HP-VELHA", sck: "criativo-09" })
+    });
+    assert.deepEqual(
+      await estadoIso(salva.id),
+      { comprou_em: "2026-09-24T13:00:00.000Z", compra_status: "APPROVED", compra_valor: 197, compra_transacao: "HP-VELHA", compra_evento_em: "2026-09-24T13:00:00.000Z" },
+      "a outra compra, que continua valendo, marca a inscrição"
+    );
+
+    // Os dois lados do painel dizem o mesmo: 1 compra de inscrito (R$ 197) e 1 venda (HP-VELHA).
+    const [pagina] = (await rpcOk("inscricoes_resumo", { p_pagina: PAGINA })).paginas;
+    assert.deepEqual([pagina.compras, Number(pagina.receita), pagina.vendas, Number(pagina.vendas_receita)], [1, 197, 1, 197]);
+    assert.deepEqual(pagina.vendas_por_sck, [{ sck: "criativo-09", vendas: 1, receita: 197, casadas: 1 }]);
+
+    // E um aviso novo de HP-1 (a transação que NÃO está marcada) não mexe em HP-VELHA.
+    await rpcOk("hotmart_registrar_compra", {
+      p: compra({ evento: "PURCHASE_CHARGEBACK", status: "CHARGEBACK", evento_em: "2026-09-27T10:00:00-03:00", transacao: "HP-1", aprovado_em: null })
+    });
+    assert.equal((await estadoIso(salva.id)).compra_transacao, "HP-VELHA");
     const [contagem] = await stack.sql("select count(*) as n from public.compras");
-    assert.equal(contagem.n, "3", "mas o aviso antigo fica guardado do mesmo jeito");
+    assert.equal(contagem.n, "4", "todo aviso fica guardado, inclusive o APPROVED atrasado de HP-1");
   });
 
   test("aviso sem transação é sempre gravado (não há chave para deduplicar)", async () => {
@@ -2286,18 +2326,354 @@ describe("hotmart_registrar_compra", () => {
   });
 });
 
+/*
+ * A página do PRODUTO. Duas páginas vendem produtos diferentes (a Viver de Furo e os ingressos da
+ * Imersão GPS), a mesma pessoa pode estar inscrita nas duas, e o webhook recebe também venda de
+ * produto que não é de página nenhuma (a Formação vendida no fim da imersão, order bump, os testes
+ * da Hotmart). Cada aviso é atribuído primeiro à página do produto e só casa com inscrição dela.
+ *
+ * Todas as vendas "de fora" abaixo têm evento MAIS NOVO do que o do ingresso: se elas casassem, a
+ * regra de "evento mais novo manda" deixaria o estado da inscrição com os dados delas — é isso que
+ * faria estes testes falharem na versão antiga, que casava com qualquer inscrição.
+ */
+const GPS = "imersao-gps";
+
+/** Inscrição feita na página de venda da Imersão GPS (lá o utm_content é o que vira sck). */
+function inscricaoGps(sobrescrever = {}) {
+  return inscricao({
+    pagina: GPS,
+    checkout_url: "https://pay.hotmart.com/R107667362D?off=l0r77by6&checkoutMode=10&utm_content=criativo-gps-07&sck=criativo-gps-07",
+    utm_source: "facebook",
+    utm_medium: "cpc",
+    utm_campaign: "igps-set",
+    utm_content: "criativo-gps-07",
+    utm_term: "publico-quente",
+    page_url: "https://io.escolaenfermagemdevalor.com.br/igps_set_lp_26-ingresso?utm_content=criativo-gps-07",
+    ...sobrescrever
+  });
+}
+
+/** Venda de ingresso da Imersão GPS: a oferta l0r77by6 está no config, então o servidor manda p.pagina. */
+function compraGps(sobrescrever = {}) {
+  return compra({
+    transacao: "HP-GPS-1",
+    pagina: GPS,
+    produto_id: "6123456",
+    produto_nome: "Imersão GPS do Plantão Sem Medo",
+    oferta: "l0r77by6",
+    valor: 5,
+    sck: "criativo-gps-07",
+    ...sobrescrever
+  });
+}
+
+/**
+ * A Formação vendida no fim da imersão, para quem comprou o ingresso: mesmo e-mail, mesmo telefone,
+ * mas produto e oferta que página nenhuma conhece — o servidor manda p.pagina = null.
+ */
+function compraFormacao(sobrescrever = {}) {
+  return compra({
+    transacao: "HP-FORMACAO-1",
+    pagina: null,
+    produto_id: "9999999",
+    produto_nome: "Formação Enfermagem de Valor",
+    oferta: "zzform01",
+    valor: 1997,
+    sck: "criativo-gps-07",
+    evento_em: "2026-09-21T16:00:00-03:00",
+    pedido_em: "2026-09-21T15:58:00-03:00",
+    aprovado_em: "2026-09-21T16:00:00-03:00",
+    ...sobrescrever
+  });
+}
+
+/** O estado da compra numa inscrição, para comparar antes e depois. */
+async function estadoDaCompra(id) {
+  const linha = await linhaInscricao(id);
+  return {
+    comprou_em: linha.comprou_em,
+    compra_status: linha.compra_status,
+    compra_valor: linha.compra_valor === null ? null : Number(linha.compra_valor),
+    compra_transacao: linha.compra_transacao,
+    compra_evento_em: linha.compra_evento_em
+  };
+}
+
+/** O mesmo estado, com as datas em ISO (UTC, com milissegundos) para comparar com um literal. */
+async function estadoIso(id) {
+  const e = await estadoDaCompra(id);
+  const iso = (valor) => (valor === null ? null : new Date(valor).toISOString());
+  return { ...e, comprou_em: iso(e.comprou_em), compra_evento_em: iso(e.compra_evento_em) };
+}
+
+const SEM_COMPRA = { comprou_em: null, compra_status: null, compra_valor: null, compra_transacao: null, compra_evento_em: null };
+
+async function comprasGravadas() {
+  return stack.sql(`
+    select transacao, evento, coalesce(pagina, '<null>') as pagina, coalesce(inscricao_id::text, '<null>') as inscricao
+    from public.compras order by id
+  `);
+}
+
+describe("hotmart_registrar_compra: cada venda na página do SEU produto", () => {
+  // Nos dois sentidos: a inscrição mais recente da pessoa é a "errada" para uma das duas vendas.
+  for (const antes of [GPS, PAGINA]) {
+    test(`a mesma pessoa inscrita nas duas páginas (${antes} primeiro): cada venda marca só a inscrição da página do produto`, async () => {
+      await limparInscricoes();
+      const gps = await rpcOk("inscricao_salvar", { p: inscricaoGps() });
+      const viver = await rpcOk("inscricao_salvar", { p: inscricao({ id: randomUUID() }) });
+      assert.notEqual(gps.id, viver.id);
+      const antiga = antes === GPS ? gps.id : viver.id;
+      await stack.sql(`update public.inscricoes set criado_em = now() - interval '10 days' where id = '${antiga}' returning 1 as ok`);
+
+      // 1. O ingresso do GPS: marca a do GPS; a da Viver continua sem compra.
+      const ingresso = await rpcOk("hotmart_registrar_compra", { p: compraGps() });
+      assert.deepEqual(
+        { casou: ingresso.casou, inscricao_id: ingresso.inscricao_id, pagina: ingresso.pagina },
+        { casou: true, inscricao_id: gps.id, pagina: GPS }
+      );
+      const gpsDepois = await estadoDaCompra(gps.id);
+      assert.equal(new Date(gpsDepois.comprou_em).toISOString(), "2026-09-21T17:00:00.000Z");
+      assert.equal(gpsDepois.compra_status, "APPROVED");
+      assert.equal(gpsDepois.compra_valor, 5);
+      assert.equal(gpsDepois.compra_transacao, "HP-GPS-1");
+      assert.deepEqual(await estadoDaCompra(viver.id), SEM_COMPRA, "a inscrição da Viver de Furo continua sem compra");
+
+      // 2. Depois ela compra a Viver de Furo: marca a da Viver e não mexe no ingresso.
+      const furo = await rpcOk("hotmart_registrar_compra", {
+        p: compra({ transacao: "HP-FURO-1", evento_em: "2026-09-22T10:00:00-03:00", aprovado_em: "2026-09-22T10:00:00-03:00" })
+      });
+      assert.deepEqual(
+        { casou: furo.casou, inscricao_id: furo.inscricao_id, pagina: furo.pagina },
+        { casou: true, inscricao_id: viver.id, pagina: PAGINA }
+      );
+      const viverDepois = await estadoDaCompra(viver.id);
+      assert.equal(viverDepois.compra_valor, 197);
+      assert.equal(viverDepois.compra_transacao, "HP-FURO-1");
+      assert.deepEqual(await estadoDaCompra(gps.id), gpsDepois, "o ingresso fica como estava");
+
+      assert.deepEqual(await comprasGravadas(), [
+        { transacao: "HP-GPS-1", evento: "PURCHASE_APPROVED", pagina: GPS, inscricao: gps.id },
+        { transacao: "HP-FURO-1", evento: "PURCHASE_APPROVED", pagina: PAGINA, inscricao: viver.id }
+      ]);
+    });
+  }
+
+  test("pelo telefone também: só entre as inscrições da página do produto", async () => {
+    await limparInscricoes();
+    const gps = await rpcOk("inscricao_salvar", { p: inscricaoGps({ email: "maria.gps@gmail.com" }) });
+    await stack.sql(`update public.inscricoes set criado_em = now() - interval '10 days' where id = '${gps.id}' returning 1 as ok`);
+    // Na Viver de Furo, mais recente, com outro e-mail e o MESMO telefone.
+    const viver = await rpcOk("inscricao_salvar", { p: inscricao({ id: randomUUID(), email: "maria.furo@gmail.com" }) });
+
+    // Na Hotmart ela usou um terceiro e-mail, e o número com DDI e sem o 9.
+    const r = await rpcOk("hotmart_registrar_compra", { p: compraGps({ comprador_email: "maria.hotmart@gmail.com", comprador_digits: "551112345678" }) });
+    assert.equal(r.inscricao_id, gps.id);
+    assert.deepEqual(await estadoDaCompra(viver.id), SEM_COMPRA);
+  });
+
+  test("produto que nenhuma página conhece (sem p.pagina, oferta que ninguém abriu, produto sem histórico): gravado com pagina null e não marca ninguém", async () => {
+    await limparInscricoes();
+    const gps = await rpcOk("inscricao_salvar", { p: inscricaoGps() });
+    const viver = await rpcOk("inscricao_salvar", { p: inscricao({ id: randomUUID() }) });
+    await rpcOk("hotmart_registrar_compra", { p: compraGps() });
+    const ingresso = await estadoDaCompra(gps.id);
+
+    // Quem comprou o ingresso compra a Formação no fim da imersão.
+    const formacao = await rpcOk("hotmart_registrar_compra", { p: compraFormacao() });
+    assert.deepEqual(formacao, { ok: true, novo: true, casou: false, inscricao_id: null, pagina: null });
+    assert.deepEqual(await estadoDaCompra(gps.id), ingresso, "o ingresso não vira 'comprou a Formação' (nem ganha o valor dela)");
+    assert.deepEqual(await estadoDaCompra(viver.id), SEM_COMPRA, "e a outra página também não é marcada");
+
+    // Sem a chave `pagina` no p (um chamador que não manda nada): o mesmo. E um SEGUNDO aviso do
+    // mesmo produto de fora continua de fora — aviso anterior com pagina null não ensina página.
+    const semChave = compraFormacao({ transacao: "HP-FORMACAO-2" });
+    delete semChave.pagina;
+    const segunda = await rpcOk("hotmart_registrar_compra", { p: semChave });
+    assert.equal(segunda.casou, false);
+    assert.equal(segunda.pagina, null);
+
+    // O teste da Hotmart ("produto 0", oferta de teste) também não mexe em ninguém.
+    const teste = await rpcOk("hotmart_registrar_compra", {
+      p: compraFormacao({ transacao: "HP-TESTE-0", produto_id: "0", oferta: "test", produto_nome: "Produto de teste" })
+    });
+    assert.equal(teste.casou, false);
+    assert.equal(teste.pagina, null);
+
+    const gravadas = await comprasGravadas();
+    assert.deepEqual(gravadas.map((c) => [c.transacao, c.pagina, c.inscricao]), [
+      ["HP-GPS-1", GPS, gps.id],
+      ["HP-FORMACAO-1", "<null>", "<null>"],
+      ["HP-FORMACAO-2", "<null>", "<null>"],
+      ["HP-TESTE-0", "<null>", "<null>"]
+    ]);
+    const [formacaoGravada] = await stack.sql("select produto_id, oferta, valor::text as valor, sck from public.compras where transacao = 'HP-FORMACAO-1'");
+    assert.deepEqual(formacaoGravada, { produto_id: "9999999", oferta: "zzform01", valor: "1997.00", sck: "criativo-gps-07" }, "o aviso fica gravado inteiro");
+  });
+
+  test("reembolso, cancelamento e chargeback da Formação não desmarcam o ingresso", async () => {
+    await limparInscricoes();
+    const gps = await rpcOk("inscricao_salvar", { p: inscricaoGps() });
+    await rpcOk("hotmart_registrar_compra", { p: compraGps() });
+    await rpcOk("hotmart_registrar_compra", { p: compraFormacao() });
+    const ingresso = await estadoDaCompra(gps.id);
+    assert.equal(ingresso.compra_status, "APPROVED");
+
+    for (const [evento, status, dia] of [
+      ["PURCHASE_REFUNDED", "REFUNDED", "25"],
+      ["PURCHASE_CANCELED", "CANCELED", "26"],
+      ["PURCHASE_CHARGEBACK", "CHARGEBACK", "27"]
+    ]) {
+      const r = await rpcOk("hotmart_registrar_compra", {
+        p: compraFormacao({ evento, status, evento_em: `2026-09-${dia}T10:00:00-03:00`, aprovado_em: null })
+      });
+      assert.equal(r.casou, false, evento);
+      assert.deepEqual(await estadoDaCompra(gps.id), ingresso, `${evento} da Formação não mexe no ingresso`);
+    }
+
+    // E o reembolso do PRÓPRIO ingresso continua desmarcando (a regra antiga vale dentro da página).
+    await rpcOk("hotmart_registrar_compra", {
+      p: compraGps({ evento: "PURCHASE_REFUNDED", status: "REFUNDED", evento_em: "2026-09-28T10:00:00-03:00", aprovado_em: null })
+    });
+    const reembolsado = await estadoDaCompra(gps.id);
+    assert.equal(reembolsado.comprou_em, null);
+    assert.equal(reembolsado.compra_status, "REFUNDED");
+    assert.equal(reembolsado.compra_transacao, "HP-GPS-1");
+  });
+
+  test("order bump (outro produto na mesma compra, outra transação) não sobrescreve valor nem transação do ingresso", async () => {
+    await limparInscricoes();
+    const gps = await rpcOk("inscricao_salvar", { p: inscricaoGps() });
+    await rpcOk("hotmart_registrar_compra", { p: compraGps() });
+    const ingresso = await estadoDaCompra(gps.id);
+
+    // A Hotmart manda um aviso por produto do pedido; o do bump chega segundos depois, com a
+    // transação dele e a do ingresso em order_bump.parent_purchase_transaction.
+    const bump = await rpcOk("hotmart_registrar_compra", {
+      p: compraFormacao({
+        transacao: "HP-BUMP-1",
+        produto_id: "7777777",
+        produto_nome: "Checklist do Plantão",
+        oferta: "bump0001",
+        valor: 47,
+        evento_em: "2026-09-21T14:00:05-03:00",
+        aprovado_em: "2026-09-21T14:00:05-03:00",
+        payload: {
+          event: "PURCHASE_APPROVED",
+          data: { purchase: { transaction: "HP-BUMP-1", order_bump: { is_order_bump: true, parent_purchase_transaction: "HP-GPS-1" } } }
+        }
+      })
+    });
+    assert.equal(bump.casou, false);
+    assert.equal(bump.pagina, null);
+    const depois = await estadoDaCompra(gps.id);
+    assert.deepEqual(depois, ingresso);
+    assert.equal(depois.compra_valor, 5, "o valor é o do ingresso, e não o do bump");
+    assert.equal(depois.compra_transacao, "HP-GPS-1");
+  });
+
+  test("lote novo: a oferta que o config não conhece é reconhecida pelo off= do link que a PRÓPRIA compradora abriu (o link de outra pessoa não vale)", async () => {
+    await limparInscricoes();
+    // O botão da página passou a abrir o lote 2 (lote2abc); o config ainda só conhece o l0r77by6.
+    await rpcOk("inscricao_salvar", {
+      p: inscricaoGps({ email: "outra@gmail.com", whatsapp_digits: "21998765432", whatsapp: "(21) 99876-5432", checkout_url: "https://pay.hotmart.com/R107667362D?checkoutMode=10&off=lote2abc&sck=x" })
+    });
+    const maria = await rpcOk("inscricao_salvar", { p: inscricaoGps({ id: randomUUID(), checkout_url: "https://pay.hotmart.com/R107667362D?off=lote2abc&checkoutMode=10" }) });
+    // A mesma Maria também está na Viver de Furo, e mais recente.
+    const viver = await rpcOk("inscricao_salvar", { p: inscricao({ id: randomUUID() }) });
+
+    // Produto sem histórico: só a oferta do link da Maria pode dizer de que página ele é.
+    const r = await rpcOk("hotmart_registrar_compra", { p: compraGps({ pagina: null, oferta: "lote2abc", produto_id: "6200001", valor: 10 }) });
+    assert.deepEqual({ casou: r.casou, inscricao_id: r.inscricao_id, pagina: r.pagina }, { casou: true, inscricao_id: maria.id, pagina: GPS });
+    assert.equal((await estadoDaCompra(maria.id)).compra_valor, 10);
+    assert.deepEqual(await estadoDaCompra(viver.id), SEM_COMPRA);
+
+    // Quem comprou o lote 2 sem passar pelo formulário. Antes, a venda ia para o GPS pelo link que
+    // OUTRA pessoa (outra@gmail.com) abriu. Isso mudou de propósito: o checkout_url gravado vem do
+    // /api/inscricao, que qualquer um chama. Uma inscrição inventada com o off= da Formação faria a
+    // Formação dos outros virar ingresso. Agora a oferta só vale no link da própria compradora. A
+    // venda de quem não se inscreveu é reconhecida quando o lote entra no config (o servidor manda
+    // p.pagina), ou pelo produto, se ele já veio num aviso que o config reconheceu.
+    const direto = await rpcOk("hotmart_registrar_compra", {
+      p: compraGps({ pagina: null, oferta: "lote2abc", produto_id: "6200002", transacao: "HP-GPS-DIRETO", comprador_email: "direto@gmail.com", comprador_digits: "31911112222" })
+    });
+    assert.deepEqual({ casou: direto.casou, pagina: direto.pagina }, { casou: false, pagina: null });
+    // Nem pelo produto: o 6200001 só veio pela oferta ('oferta'), e isso não ensina a página dele.
+    const diretoMesmoProduto = await rpcOk("hotmart_registrar_compra", {
+      p: compraGps({ pagina: null, oferta: "lote2abc", produto_id: "6200001", transacao: "HP-GPS-DIRETO-2", comprador_email: "direto@gmail.com", comprador_digits: "31911112222" })
+    });
+    assert.deepEqual({ casou: diretoMesmoProduto.casou, pagina: diretoMesmoProduto.pagina }, { casou: false, pagina: null });
+
+    // Só a oferta INTEIRA vale: "lote2" (um pedaço de lote2abc) não é reconhecida.
+    const pedaco = await rpcOk("hotmart_registrar_compra", { p: compraGps({ pagina: null, oferta: "lote2", produto_id: "6200003", transacao: "HP-PEDACO" }) });
+    assert.deepEqual({ casou: pedaco.casou, pagina: pedaco.pagina }, { casou: false, pagina: null });
+  });
+
+  test("oferta que nenhum link abriu, de um PRODUTO que já veio num aviso com página: vale a página dele", async () => {
+    await limparInscricoes();
+    const gps = await rpcOk("inscricao_salvar", { p: inscricaoGps() });
+    const viver = await rpcOk("inscricao_salvar", { p: inscricao({ id: randomUUID() }) });
+
+    // 1. Um ingresso vendido para outra pessoa, reconhecido pelo config: grava o produto 6123456 com a página.
+    const outra = await rpcOk("hotmart_registrar_compra", { p: compraGps({ transacao: "HP-GPS-OUTRA", comprador_email: "outra@gmail.com", comprador_digits: "21998765432" }) });
+    assert.deepEqual({ casou: outra.casou, pagina: outra.pagina }, { casou: false, pagina: GPS });
+
+    // 2. Uma oferta nova do MESMO produto (cupom, link direto) que formulário nenhum abriu.
+    const r = await rpcOk("hotmart_registrar_compra", { p: compraGps({ pagina: null, oferta: "cupom50", transacao: "HP-GPS-CUPOM", valor: 2.5 }) });
+    assert.deepEqual({ casou: r.casou, inscricao_id: r.inscricao_id, pagina: r.pagina }, { casou: true, inscricao_id: gps.id, pagina: GPS });
+    assert.equal((await estadoDaCompra(gps.id)).compra_valor, 2.5);
+    assert.deepEqual(await estadoDaCompra(viver.id), SEM_COMPRA);
+  });
+
+  test("o p.pagina do servidor manda: não é trocado pela oferta nem pelo histórico do produto", async () => {
+    await limparInscricoes();
+    const gps = await rpcOk("inscricao_salvar", { p: inscricaoGps() });
+    const viver = await rpcOk("inscricao_salvar", { p: inscricao({ id: randomUUID() }) });
+    // O produto 2332962 já tem história na Viver de Furo...
+    await rpcOk("hotmart_registrar_compra", { p: compra({ transacao: "HP-FURO-OUTRA", comprador_email: "outra@gmail.com", comprador_digits: "21998765432" }) });
+    // ...mas se o config disser que a venda é do GPS, é do GPS.
+    const r = await rpcOk("hotmart_registrar_compra", { p: compra({ transacao: "HP-X", pagina: GPS }) });
+    assert.equal(r.pagina, GPS);
+    assert.equal(r.inscricao_id, gps.id);
+    assert.deepEqual(await estadoDaCompra(viver.id), SEM_COMPRA);
+  });
+
+  test("idempotência continua: o mesmo aviso de novo não duplica, não remarca e responde a mesma página", async () => {
+    await limparInscricoes();
+    const gps = await rpcOk("inscricao_salvar", { p: inscricaoGps({ checkout_url: "https://pay.hotmart.com/R107667362D?off=lote2abc&checkoutMode=10" }) });
+
+    const casos = [
+      ["ingresso (p.pagina)", compraGps(), { casou: true, inscricao_id: gps.id, pagina: GPS }],
+      ["lote novo (aprendido)", compraGps({ pagina: null, oferta: "lote2abc", produto_id: "6200001", transacao: "HP-GPS-LOTE2" }), { casou: true, inscricao_id: gps.id, pagina: GPS }],
+      ["Formação (de fora)", compraFormacao(), { casou: false, inscricao_id: null, pagina: null }]
+    ];
+    for (const [nome, p, esperado] of casos) {
+      const primeira = await rpcOk("hotmart_registrar_compra", { p });
+      const estado = await estadoDaCompra(gps.id);
+      const repetida = await rpcOk("hotmart_registrar_compra", { p: { ...p, hotmart_id: "aviso-reenviado", valor: 999 } });
+      assert.equal(primeira.novo, true, nome);
+      assert.deepEqual(primeira, { ok: true, novo: true, ...esperado }, nome);
+      assert.deepEqual(repetida, { ok: true, novo: false, ...esperado }, `${nome}: repetido`);
+      assert.deepEqual(await estadoDaCompra(gps.id), estado, `${nome}: o repetido não mexe na inscrição`);
+    }
+    const [contagem] = await stack.sql("select count(*) as n from public.compras");
+    assert.equal(contagem.n, "3", "uma linha por (transacao, evento)");
+  });
+});
+
 describe("inscricoes_resumo", () => {
   /*
    * O conjunto abaixo é pequeno de propósito, para os números serem conferidos À MÃO. Tudo no fuso
    * de São Paulo:
    *
-   *   A  20/09 10:00  facebook  / set / criativo-07  3 cliques  comprou 20/09 11:00  R$ 197
-   *   B  20/09 12:00  facebook  / set / criativo-07  1 clique   —
-   *   C  20/09 15:00  instagram / bio / (sem termo)  2 cliques  comprou 21/09 09:00  R$ 297
-   *   D  21/09 08:00  facebook  / set / criativo-09  1 clique   —
-   *   E  21/09 09:30  (sem utm nenhuma)              1 clique   —
-   *   F  21/09 23:30  (sem utm nenhuma)              1 clique   comprou 21/09 23:45  R$ 97
-   *   G  (outra-pagina) 21/09 10:00                  1 clique   —
+   *      criado        origem    / mídia  / campanha / conteúdo / termo
+   *   A  20/09 10:00  facebook  / cpc    / set / video-01 / criativo-07  3 cliques  comprou 20/09 11:00  R$ 197
+   *   B  20/09 12:00  facebook  / cpc    / set / video-01 / criativo-07  1 clique   —
+   *   C  20/09 15:00  instagram / social / bio / —        / —            2 cliques  comprou 21/09 09:00  R$ 297
+   *   D  21/09 08:00  facebook  / cpc    / set / video-02 / criativo-09  1 clique   —
+   *   E  21/09 09:30  (sem utm nenhuma; conteúdo "   ", só espaços)     1 clique   —
+   *   F  21/09 23:30  (sem utm nenhuma)                                  1 clique   comprou 21/09 23:45  R$ 97
+   *   G  (outra-pagina) 21/09 10:00                                      1 clique   —
    *
    *   inscritos = 6 (A..F)   cliques = 3+1+2+1+1+1 = 9   compras = 3   receita = 591,00
    *   taxa_compra = 3/6 = 50,0 %
@@ -2307,11 +2683,11 @@ describe("inscricoes_resumo", () => {
   before(async () => {
     await limparInscricoes();
     await inserir("inscricoes", [
-      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-20T10:00:00"), nome: "A", whatsapp_digits: "11900000001", email: "a@gmail.com", cliques: 3, comprou_em: SP("2026-09-20T11:00:00"), compra_valor: 197, compra_status: "APPROVED", utm_source: "facebook", utm_campaign: "set", utm_term: "criativo-07" },
-      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-20T12:00:00"), nome: "B", whatsapp_digits: "11900000002", email: "b@gmail.com", cliques: 1, utm_source: "facebook", utm_campaign: "set", utm_term: "criativo-07" },
-      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-20T15:00:00"), nome: "C", whatsapp_digits: "11900000003", email: "c@gmail.com", cliques: 2, comprou_em: SP("2026-09-21T09:00:00"), compra_valor: 297, compra_status: "APPROVED", utm_source: "instagram", utm_campaign: "bio" },
-      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-21T08:00:00"), nome: "D", whatsapp_digits: "11900000004", email: "d@gmail.com", cliques: 1, utm_source: "facebook", utm_campaign: "set", utm_term: "criativo-09" },
-      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-21T09:30:00"), nome: "E", whatsapp_digits: "11900000005", email: "e@gmail.com", cliques: 1 },
+      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-20T10:00:00"), nome: "A", whatsapp_digits: "11900000001", email: "a@gmail.com", cliques: 3, comprou_em: SP("2026-09-20T11:00:00"), compra_valor: 197, compra_status: "APPROVED", utm_source: "facebook", utm_medium: "cpc", utm_campaign: "set", utm_content: "video-01", utm_term: "criativo-07" },
+      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-20T12:00:00"), nome: "B", whatsapp_digits: "11900000002", email: "b@gmail.com", cliques: 1, utm_source: "facebook", utm_medium: "cpc", utm_campaign: "set", utm_content: "video-01", utm_term: "criativo-07" },
+      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-20T15:00:00"), nome: "C", whatsapp_digits: "11900000003", email: "c@gmail.com", cliques: 2, comprou_em: SP("2026-09-21T09:00:00"), compra_valor: 297, compra_status: "APPROVED", utm_source: "instagram", utm_medium: "social", utm_campaign: "bio" },
+      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-21T08:00:00"), nome: "D", whatsapp_digits: "11900000004", email: "d@gmail.com", cliques: 1, utm_source: "facebook", utm_medium: "cpc", utm_campaign: "set", utm_content: "video-02", utm_term: "criativo-09" },
+      { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-21T09:30:00"), nome: "E", whatsapp_digits: "11900000005", email: "e@gmail.com", cliques: 1, utm_content: "   " },
       { id: randomUUID(), pagina: PAGINA, criado_em: SP("2026-09-21T23:30:00"), nome: "F", whatsapp_digits: "11900000006", email: "f@gmail.com", cliques: 1, comprou_em: SP("2026-09-21T23:45:00"), compra_valor: 97, compra_status: "APPROVED" },
       { id: randomUUID(), pagina: "outra-pagina", criado_em: SP("2026-09-21T10:00:00"), nome: "G", whatsapp_digits: "11900000007", email: "g@gmail.com", cliques: 1 }
     ]);
@@ -2340,7 +2716,7 @@ describe("inscricoes_resumo", () => {
     );
   });
 
-  test("por origem, campanha e termo — o termo é o sck que a Hotmart devolve", async () => {
+  test("por origem, mídia, campanha, conteúdo e termo — o termo é o sck desta página", async () => {
     const [pagina] = (await rpcOk("inscricoes_resumo", { p_pagina: PAGINA })).paginas;
 
     assert.deepEqual(pagina.por_origem, [
@@ -2348,16 +2724,32 @@ describe("inscricoes_resumo", () => {
       { utm_source: "(sem utm)", inscritos: 2, compras: 1 },
       { utm_source: "instagram", inscritos: 1, compras: 1 }
     ]);
+    // cpc = A, B, D (só A comprou); sem mídia = E, F (F comprou); social = C (comprou).
+    assert.deepEqual(pagina.por_midia, [
+      { utm_medium: "cpc", inscritos: 3, compras: 1 },
+      { utm_medium: "(sem utm)", inscritos: 2, compras: 1 },
+      { utm_medium: "social", inscritos: 1, compras: 1 }
+    ]);
     assert.deepEqual(pagina.por_campanha, [
       { utm_campaign: "set", inscritos: 3, compras: 1 },
       { utm_campaign: "(sem utm)", inscritos: 2, compras: 1 },
       { utm_campaign: "bio", inscritos: 1, compras: 1 }
+    ]);
+    // Sem conteúdo = C, E (só espaços conta como vazio) e F; C e F compraram. video-01 = A, B.
+    assert.deepEqual(pagina.por_conteudo, [
+      { utm_content: "(sem utm)", inscritos: 3, compras: 2 },
+      { utm_content: "video-01", inscritos: 2, compras: 1 },
+      { utm_content: "video-02", inscritos: 1, compras: 0 }
     ]);
     assert.deepEqual(pagina.por_termo, [
       { utm_term: "(sem utm)", inscritos: 3, compras: 2 },
       { utm_term: "criativo-07", inscritos: 2, compras: 1 },
       { utm_term: "criativo-09", inscritos: 1, compras: 0 }
     ]);
+    // Estes inscritos foram semeados direto na tabela, sem aviso da Hotmart: o lado da Hotmart é zero.
+    assert.equal(pagina.vendas, 0);
+    assert.equal(Number(pagina.vendas_receita), 0);
+    assert.deepEqual(pagina.vendas_por_sck, []);
   });
 
   test("por dia no fuso de São Paulo: inscritos pelo cadastro, compras pelo dia da compra", async () => {
@@ -2398,8 +2790,13 @@ describe("inscricoes_resumo", () => {
         receita: 0,
         taxa_compra: 0,
         por_origem: [],
+        por_midia: [],
         por_campanha: [],
+        por_conteudo: [],
         por_termo: [],
+        vendas: 0,
+        vendas_receita: 0,
+        vendas_por_sck: [],
         por_dia: []
       }
     ]);
@@ -2423,6 +2820,7 @@ describe("inscricoes_resumo", () => {
     assert.equal(casadas.length, 1);
     assert.equal(casadas[0].comprador_email, "maria@gmail.com");
     assert.equal(casadas[0].pagina, PAGINA);
+    assert.equal(casadas[0].sck, "criativo-07", "o sck que a Hotmart devolveu vem junto");
     assert.equal(Number(casadas[0].valor), 197);
     assert.equal(casadas[0].evento, "PURCHASE_APPROVED");
     assert.ok(resumo.compras_recentes.some((c) => c.comprador_nome === "Órfã Um" && c.casou === false));
@@ -2439,5 +2837,799 @@ describe("inscricoes_resumo", () => {
     const datas = resumo.compras_recentes.map((c) => c.recebido_em);
     assert.deepEqual(datas, [...datas].sort().reverse(), "da mais nova para a mais velha");
     assert.equal(resumo.compras_sem_inscricao, 25, "a contagem é de todas, não só das 20 mostradas");
+  });
+});
+
+describe("inscricoes_resumo: o lado da Hotmart (vendas por sck) e os avisos de cada página", () => {
+  /*
+   * Tudo pelas funções de verdade (inscricao_salvar + hotmart_registrar_compra), com os horários
+   * fixados depois para os números serem conferidos À MÃO. Fuso de São Paulo.
+   *
+   * Inscritos (todos em 01/10):
+   *   P1  imersao-gps   cpc / criativo-a     p1@gmail.com   (a MESMA pessoa de V1)
+   *   P2  imersao-gps   cpc / criativo-b     p2@gmail.com
+   *   P3  imersao-gps   (sem utm)            p3@gmail.com
+   *   V1  viver-de-furo facebook / criativo-07 (termo)   p1@gmail.com
+   *
+   * Avisos da Hotmart (transação, evento, página do produto, comprador, sck, valor, quando):
+   *   1  T1 APPROVED        gps     P1  criativo-a   5     01/10 12:00
+   *   2  T2 APPROVED        gps     P2  criativo-b   5     01/10 13:00
+   *   3  T3 APPROVED        gps     X   criativo-a   5     01/10 14:00   X não passou pelo formulário
+   *   4  T4 APPROVED        gps     P3  (sem sck)    5     01/10 15:00
+   *   5  T5 BILLET_PRINTED  gps     Y   criativo-c   5     01/10 16:00   boleto: não é venda
+   *   6  T6 APPROVED        viver   V1  criativo-07  197   01/10 17:00
+   *   7  T7 APPROVED        (null)  P1  criativo-a   1997  01/10 18:00   a Formação: produto de fora
+   *   8  T2 REFUNDED        gps     P2  criativo-b   5     03/10 09:00
+   *   9  T1 COMPLETE        gps     P1  criativo-a   5     08/10 12:00   fim da garantia
+   *  10  T3 COMPLETE        gps     X   criativo-a   5     08/10 13:00
+   *
+   * GPS, período inteiro: vendas = T1, T3, T4 (T2 foi reembolsada; T5 é boleto) = 3, R$ 15.
+   *   criativo-a = T1 + T3 = 2 vendas (aprovada + completa da mesma transação = UMA), 1 casada.
+   *   (sem sck) = T4 = 1 venda, casada.
+   */
+  const SP = (texto) => `${texto}-03:00`;
+  const PESSOAS = {
+    P1: { email: "p1@gmail.com", digits: "11900000011", whatsapp: "(11) 90000-0011" },
+    P2: { email: "p2@gmail.com", digits: "11900000012", whatsapp: "(11) 90000-0012" },
+    P3: { email: "p3@gmail.com", digits: "11900000013", whatsapp: "(11) 90000-0013" },
+    X: { email: "x@gmail.com", digits: "11900000099" },
+    Y: { email: "y@gmail.com", digits: "11900000098" }
+  };
+  const AVISOS = [
+    ["HP-T1", "PURCHASE_APPROVED", GPS, "P1", "criativo-a", 5, "2026-10-01T12:00:00"],
+    ["HP-T2", "PURCHASE_APPROVED", GPS, "P2", "criativo-b", 5, "2026-10-01T13:00:00"],
+    ["HP-T3", "PURCHASE_APPROVED", GPS, "X", "criativo-a", 5, "2026-10-01T14:00:00"],
+    ["HP-T4", "PURCHASE_APPROVED", GPS, "P3", null, 5, "2026-10-01T15:00:00"],
+    ["HP-T5", "PURCHASE_BILLET_PRINTED", GPS, "Y", "criativo-c", 5, "2026-10-01T16:00:00"],
+    ["HP-T6", "PURCHASE_APPROVED", PAGINA, "P1", "criativo-07", 197, "2026-10-01T17:00:00"],
+    ["HP-T7", "PURCHASE_APPROVED", null, "P1", "criativo-a", 1997, "2026-10-01T18:00:00"],
+    ["HP-T2", "PURCHASE_REFUNDED", GPS, "P2", "criativo-b", 5, "2026-10-03T09:00:00"],
+    ["HP-T1", "PURCHASE_COMPLETE", GPS, "P1", "criativo-a", 5, "2026-10-08T12:00:00"],
+    ["HP-T3", "PURCHASE_COMPLETE", GPS, "X", "criativo-a", 5, "2026-10-08T13:00:00"]
+  ];
+  const STATUS = {
+    PURCHASE_APPROVED: "APPROVED",
+    PURCHASE_COMPLETE: "COMPLETED",
+    PURCHASE_REFUNDED: "REFUNDED",
+    PURCHASE_BILLET_PRINTED: "PRINTED_BILLET"
+  };
+  const ids = {};
+
+  before(async () => {
+    await limparInscricoes();
+    const contato = (quem) => ({ email: PESSOAS[quem].email, whatsapp_digits: PESSOAS[quem].digits, whatsapp: PESSOAS[quem].whatsapp });
+    const semUtm = { utm_source: null, utm_medium: null, utm_campaign: null, utm_content: null, utm_term: null, checkout_url: "https://pay.hotmart.com/R107667362D?off=l0r77by6&checkoutMode=10" };
+    ids.P1 = (await rpcOk("inscricao_salvar", { p: inscricaoGps({ ...contato("P1"), utm_content: "criativo-a" }) })).id;
+    ids.P2 = (await rpcOk("inscricao_salvar", { p: inscricaoGps({ id: randomUUID(), ...contato("P2"), utm_content: "criativo-b" }) })).id;
+    ids.P3 = (await rpcOk("inscricao_salvar", { p: inscricaoGps({ id: randomUUID(), ...contato("P3"), ...semUtm }) })).id;
+    ids.V1 = (await rpcOk("inscricao_salvar", { p: inscricao({ id: randomUUID(), ...contato("P1") }) })).id;
+    const criados = [["P1", "10:00"], ["P2", "10:10"], ["P3", "10:20"], ["V1", "10:30"]];
+    for (const [quem, hora] of criados) {
+      await stack.sql(`update public.inscricoes set criado_em = '${SP(`2026-10-01T${hora}:00`)}' where id = '${ids[quem]}' returning 1 as ok`);
+    }
+
+    for (const [transacao, evento, pagina, quem, sck, valor, quando] of AVISOS) {
+      const aprovado = evento === "PURCHASE_APPROVED" || evento === "PURCHASE_COMPLETE";
+      const primeiraAprovacao = AVISOS.find((a) => a[0] === transacao && a[1] === "PURCHASE_APPROVED");
+      const base = pagina === null ? compraFormacao : pagina === GPS ? compraGps : compra;
+      await rpcOk("hotmart_registrar_compra", {
+        p: base({
+          transacao,
+          evento,
+          status: STATUS[evento],
+          pagina,
+          comprador_email: PESSOAS[quem].email,
+          comprador_digits: `55${PESSOAS[quem].digits}`,
+          comprador_nome: quem,
+          sck,
+          valor,
+          evento_em: SP(quando),
+          pedido_em: SP(primeiraAprovacao ? primeiraAprovacao[6] : quando),
+          aprovado_em: aprovado ? SP(primeiraAprovacao[6]) : null
+        })
+      });
+    }
+    // recebido_em é o now() de cada chamada: fixa no horário da tabela acima.
+    const valores = AVISOS.map(([transacao, evento, , , , , quando]) => `(${lit(transacao)}, ${lit(evento)}, ${lit(SP(quando))})`).join(", ");
+    await stack.sql(`
+      update public.compras as c set recebido_em = v.quando::timestamptz
+      from (values ${valores}) as v(transacao, evento, quando)
+      where c.transacao = v.transacao and c.evento = v.evento
+      returning 1 as ok
+    `);
+    const [contagem] = await stack.sql("select count(*) as n, count(*) filter (where recebido_em < '2026-10-01') as fora from public.compras");
+    assert.deepEqual(contagem, { n: "10", fora: "0" }, "os 10 avisos gravados, todos com o horário fixado");
+  });
+
+  const recentes = (resumo) => resumo.compras_recentes.map((c) => [c.evento, c.comprador_email, c.sck, c.casou, c.pagina]);
+
+  test("GPS, período inteiro: vendas e receita do lado da Hotmart, e vendas_por_sck com '(sem sck)'", async () => {
+    const resumo = await rpcOk("inscricoes_resumo", { p_pagina: GPS });
+    assert.equal(resumo.paginas.length, 1);
+    const [gps] = resumo.paginas;
+    assert.equal(gps.pagina, GPS);
+
+    // O lado do formulário: P1 e P3 compraram; a compra de P2 foi reembolsada.
+    assert.equal(gps.inscritos, 3);
+    assert.equal(gps.compras, 2);
+    assert.equal(Number(gps.receita), 10);
+    assert.equal(Number(gps.taxa_compra), 66.7);
+
+    // O lado da Hotmart: T1, T3 e T4. T2 saiu com o reembolso; o boleto (T5) não é venda.
+    assert.equal(gps.vendas, 3);
+    assert.equal(Number(gps.vendas_receita), 15);
+    assert.deepEqual(gps.vendas_por_sck, [
+      // T1 e T3 chegaram aprovadas E completas: continuam sendo 2 vendas, e não 4.
+      { sck: "criativo-a", vendas: 2, receita: 10, casadas: 1 },
+      { sck: "(sem sck)", vendas: 1, receita: 5, casadas: 1 }
+    ]);
+    assert.ok(!gps.vendas_por_sck.some((s) => s.sck === "criativo-b"), "reembolsada não aparece");
+    assert.ok(!gps.vendas_por_sck.some((s) => s.sck === "criativo-c"), "boleto não aparece");
+  });
+
+  test("GPS: por mídia e por conteúdo (o utm_content é o sck desta página)", async () => {
+    const [gps] = (await rpcOk("inscricoes_resumo", { p_pagina: GPS })).paginas;
+    assert.deepEqual(gps.por_midia, [
+      { utm_medium: "cpc", inscritos: 2, compras: 1 },
+      { utm_medium: "(sem utm)", inscritos: 1, compras: 1 }
+    ]);
+    // Empate em 1 inscrito e 1 compra: desempata pelo texto em "C" — "(" vem antes de "c".
+    assert.deepEqual(gps.por_conteudo, [
+      { utm_content: "(sem utm)", inscritos: 1, compras: 1 },
+      { utm_content: "criativo-a", inscritos: 1, compras: 1 },
+      { utm_content: "criativo-b", inscritos: 1, compras: 0 }
+    ]);
+  });
+
+  test("com p_pagina, os avisos são só os do produto da página: a Formação (pagina null) e a outra página não entram", async () => {
+    const gps = await rpcOk("inscricoes_resumo", { p_pagina: GPS });
+    // Só T3 (aprovada e completa: UMA transação) é compra do GPS sem inscrição. T7 é de fora.
+    assert.equal(gps.compras_sem_inscricao, 1);
+    assert.deepEqual(recentes(gps), [
+      ["PURCHASE_COMPLETE", "x@gmail.com", "criativo-a", false, GPS],
+      ["PURCHASE_COMPLETE", "p1@gmail.com", "criativo-a", true, GPS],
+      ["PURCHASE_REFUNDED", "p2@gmail.com", "criativo-b", true, GPS],
+      ["PURCHASE_BILLET_PRINTED", "y@gmail.com", "criativo-c", false, GPS],
+      ["PURCHASE_APPROVED", "p3@gmail.com", null, true, GPS],
+      ["PURCHASE_APPROVED", "x@gmail.com", "criativo-a", false, GPS],
+      ["PURCHASE_APPROVED", "p2@gmail.com", "criativo-b", true, GPS],
+      ["PURCHASE_APPROVED", "p1@gmail.com", "criativo-a", true, GPS]
+    ]);
+
+    const viver = await rpcOk("inscricoes_resumo", { p_pagina: PAGINA });
+    const [pagina] = viver.paginas;
+    assert.deepEqual([pagina.inscritos, pagina.compras, Number(pagina.receita)], [1, 1, 197], "V1, a mesma pessoa de P1, comprou só a Viver");
+    assert.equal(pagina.vendas, 1);
+    assert.equal(Number(pagina.vendas_receita), 197);
+    assert.deepEqual(pagina.vendas_por_sck, [{ sck: "criativo-07", vendas: 1, receita: 197, casadas: 1 }]);
+    assert.equal(viver.compras_sem_inscricao, 0, "nem a Formação nem o X do GPS contam aqui");
+    assert.deepEqual(recentes(viver), [["PURCHASE_APPROVED", "p1@gmail.com", "criativo-07", true, PAGINA]]);
+  });
+
+  test("sem p_pagina: cada página com as vendas dela; os avisos de fora aparecem na lista e na contagem sem inscrição", async () => {
+    const resumo = await rpcOk("inscricoes_resumo", {});
+    assert.deepEqual(
+      resumo.paginas.map((p) => [p.pagina, p.inscritos, p.vendas, Number(p.vendas_receita), p.vendas_por_sck.map((s) => [s.sck, s.vendas])]),
+      [
+        [GPS, 3, 3, 15, [["criativo-a", 2], ["(sem sck)", 1]]],
+        [PAGINA, 1, 1, 197, [["criativo-07", 1]]]
+      ]
+    );
+    // T3 (GPS, sem inscrição) + T7 (a Formação, que não casa com ninguém): 2 transações.
+    assert.equal(resumo.compras_sem_inscricao, 2);
+    assert.equal(resumo.compras_recentes.length, 10);
+    const formacao = resumo.compras_recentes.find((c) => Number(c.valor) === 1997);
+    assert.deepEqual(
+      { pagina: formacao.pagina, casou: formacao.casou, sck: formacao.sck, evento: formacao.evento },
+      { pagina: null, casou: false, sck: "criativo-a", evento: "PURCHASE_APPROVED" }
+    );
+  });
+
+  test("o período: o estado de cada venda sai do histórico ATÉ o fim do período (pela hora do evento), e ela conta no período da primeira aprovação", async () => {
+    // Só o dia 01/10: o reembolso de T2 (03/10) ainda não tinha acontecido até o fim do período, então
+    // T2 conta.
+    const dia1 = await rpcOk("inscricoes_resumo", { p_desde: SP("2026-10-01T00:00:00"), p_ate: SP("2026-10-02T00:00:00"), p_pagina: GPS });
+    const [gps1] = dia1.paginas;
+    assert.equal(gps1.vendas, 4);
+    assert.equal(Number(gps1.vendas_receita), 20);
+    assert.deepEqual(gps1.vendas_por_sck, [
+      { sck: "criativo-a", vendas: 2, receita: 10, casadas: 1 },
+      { sck: "(sem sck)", vendas: 1, receita: 5, casadas: 1 },
+      { sck: "criativo-b", vendas: 1, receita: 5, casadas: 1 }
+    ]);
+    assert.equal(dia1.compras_sem_inscricao, 1, "T3");
+    assert.equal(dia1.compras_recentes.length, 5, "T1, T2, T3, T4 aprovadas e o boleto T5");
+
+    // O fim do período é que decide o que já tinha acontecido: até 02/10 (inclusive) o reembolso de
+    // 03/10 09:00 ainda não existia; até 03/10 (inclusive), já.
+    const ate02 = await rpcOk("inscricoes_resumo", { p_desde: SP("2026-10-01T00:00:00"), p_ate: SP("2026-10-03T00:00:00"), p_pagina: GPS });
+    assert.deepEqual([ate02.paginas[0].vendas, Number(ate02.paginas[0].vendas_receita)], [4, 20], "01/10 a 02/10: T2 ainda conta");
+    const ate03 = await rpcOk("inscricoes_resumo", { p_desde: SP("2026-10-01T00:00:00"), p_ate: SP("2026-10-04T00:00:00"), p_pagina: GPS });
+    const [gps3] = ate03.paginas;
+    assert.deepEqual([gps3.vendas, Number(gps3.vendas_receita)], [3, 15], "01/10 a 03/10: T2 foi reembolsada");
+    assert.deepEqual(gps3.vendas_por_sck, [
+      { sck: "criativo-a", vendas: 2, receita: 10, casadas: 1 },
+      { sck: "(sem sck)", vendas: 1, receita: 5, casadas: 1 }
+    ]);
+    assert.equal(ate03.compras_sem_inscricao, 1, "T3");
+
+    // De 02/10 em diante: nenhuma venda NOVA. T1 e T3 só completaram (08/10) — são vendas de 01/10 —,
+    // e o reembolso de T2 tira uma venda de 01/10, e não uma deste período. A página pedida aparece
+    // mesmo zerada.
+    const depois = await rpcOk("inscricoes_resumo", { p_desde: SP("2026-10-02T00:00:00"), p_pagina: GPS });
+    const [gps2] = depois.paginas;
+    assert.equal(gps2.pagina, GPS);
+    assert.equal(gps2.inscritos, 0);
+    assert.equal(gps2.vendas, 0);
+    assert.equal(Number(gps2.vendas_receita), 0);
+    assert.deepEqual(gps2.vendas_por_sck, []);
+    assert.equal(depois.compras_sem_inscricao, 0, "T3 completou no período, mas é venda de 01/10");
+    // A LISTA de avisos continua sendo a do período, pela chegada.
+    assert.deepEqual(
+      depois.compras_recentes.map((c) => [c.evento, c.comprador_email]),
+      [
+        ["PURCHASE_COMPLETE", "x@gmail.com"],
+        ["PURCHASE_COMPLETE", "p1@gmail.com"],
+        ["PURCHASE_REFUNDED", "p2@gmail.com"]
+      ]
+    );
+
+    // Sem p_pagina, a mesma régua. 01/10: as duas páginas, e a Formação (T7) conta como sem inscrição.
+    const dia1Todas = await rpcOk("inscricoes_resumo", { p_desde: SP("2026-10-01T00:00:00"), p_ate: SP("2026-10-02T00:00:00") });
+    assert.deepEqual(
+      dia1Todas.paginas.map((p) => [p.pagina, p.inscritos, p.vendas, Number(p.vendas_receita)]),
+      [
+        [GPS, 3, 4, 20],
+        [PAGINA, 1, 1, 197]
+      ]
+    );
+    assert.equal(dia1Todas.compras_sem_inscricao, 2, "T3 e a Formação (T7)");
+    // De 02/10 em diante nenhuma página tem inscrição nem venda: a lista de páginas fica vazia.
+    const depoisTodas = await rpcOk("inscricoes_resumo", { p_desde: SP("2026-10-02T00:00:00") });
+    assert.deepEqual(depoisTodas.paginas, []);
+    assert.equal(depoisTodas.compras_sem_inscricao, 0);
+    assert.equal(depoisTodas.compras_recentes.length, 3);
+  });
+
+  test("as inscrições ficaram com o estado certo: a Formação não mexeu em P1, e o reembolso desmarcou P2", async () => {
+    const p1 = await linhaInscricao(ids.P1);
+    assert.ok(p1.comprou_em);
+    assert.equal(Number(p1.compra_valor), 5);
+    assert.equal(p1.compra_transacao, "HP-T1");
+    assert.equal(p1.compra_status, "COMPLETED");
+    const v1 = await linhaInscricao(ids.V1);
+    assert.equal(Number(v1.compra_valor), 197);
+    assert.equal(v1.compra_transacao, "HP-T6");
+    const p2 = await linhaInscricao(ids.P2);
+    assert.equal(p2.comprou_em, null);
+    assert.equal(p2.compra_status, "REFUNDED");
+  });
+});
+
+/*
+ * A régua das vendas do lado da Hotmart, caso a caso:
+ *   . o ESTADO de uma venda (transação) é o do último EVENTO dela (evento_em, a hora na Hotmart; a
+ *     chegada só desempata), no histórico INTEIRO até o fim do período — e não só nos avisos que
+ *     chegaram dentro dele;
+ *   . a venda conta no período da PRIMEIRA aprovação (aprovado_em dos APPROVED/COMPLETE).
+ * Cada teste semeia o seu cenário pelas funções de verdade e fixa a CHEGADA de cada aviso
+ * (recebido_em): é ela que diz o que já se sabia no fim do período. Fuso de São Paulo.
+ */
+
+/** Compradores que não passaram por formulário nenhum (os 8 dígitos finais não batem com ninguém). */
+const ORFA = {
+  X: { comprador_email: "x@gmail.com", comprador_digits: "5511900000099", comprador_nome: "X" },
+  Y: { comprador_email: "y@gmail.com", comprador_digits: "5511900000098", comprador_nome: "Y" },
+  Z: { comprador_email: "z@gmail.com", comprador_digits: "5511900000097", comprador_nome: "Z" },
+  W: { comprador_email: "w@gmail.com", comprador_digits: "5511900000096", comprador_nome: "W" }
+};
+
+describe("inscricoes_resumo: o estado de cada venda (hora do evento) e o período da aprovação", () => {
+  const SP = (texto) => `${texto}-03:00`;
+  /** O dia d de setembro de 2026 em São Paulo: [00:00 do dia, 00:00 do dia seguinte). */
+  const DIA = (d) => [SP(`2026-09-${String(d).padStart(2, "0")}T00:00:00`), SP(`2026-09-${String(d + 1).padStart(2, "0")}T00:00:00`)];
+  const NADA = { vendas: 0, receita: 0, por_sck: [], sem_inscricao: 0 };
+
+  /** Grava a inscrição e fixa o cadastro (fora de todos os recortes dos testes, por padrão). */
+  async function inscrever(p, criado = SP("2026-09-10T10:00:00")) {
+    const { id } = await rpcOk("inscricao_salvar", { p });
+    await stack.sql(`update public.inscricoes set criado_em = ${lit(criado)}::timestamptz where id = ${lit(id)} returning 1 as ok`);
+    return id;
+  }
+
+  /** Grava o aviso pela função e fixa a CHEGADA (por padrão, a própria hora do evento). */
+  async function avisar(p, recebido = p.evento_em) {
+    const r = await rpcOk("hotmart_registrar_compra", { p });
+    assert.equal(r.novo, true, `${p.transacao} ${p.evento} é um aviso novo`);
+    await stack.sql(`
+      update public.compras set recebido_em = ${lit(recebido)}::timestamptz
+      where transacao = ${lit(p.transacao)} and evento = ${lit(p.evento)} returning 1 as ok
+    `);
+    return r;
+  }
+
+  const aprovacao = (transacao, quando, extra = {}) =>
+    compraGps({ transacao, evento_em: SP(quando), pedido_em: SP(quando), aprovado_em: SP(quando), ...extra });
+  const reembolso = (transacao, quando, extra = {}) =>
+    compraGps({ transacao, evento: "PURCHASE_REFUNDED", status: "REFUNDED", evento_em: SP(quando), aprovado_em: null, ...extra });
+  const completa = (transacao, quando, aprovadoEm, extra = {}) =>
+    compraGps({ transacao, evento: "PURCHASE_COMPLETE", status: "COMPLETED", evento_em: SP(quando), pedido_em: aprovadoEm, aprovado_em: aprovadoEm, ...extra });
+
+  const resumo = (p_pagina, [p_desde, p_ate] = []) => rpcOk("inscricoes_resumo", { p_desde, p_ate, p_pagina });
+  /** Os números de venda da (única) página do resumo. */
+  function numeros(r) {
+    assert.equal(r.paginas.length, 1);
+    const [linha] = r.paginas;
+    return { vendas: linha.vendas, receita: Number(linha.vendas_receita), por_sck: linha.vendas_por_sck, sem_inscricao: r.compras_sem_inscricao };
+  }
+  const casadas = (n) => n.por_sck.reduce((soma, s) => soma + s.casadas, 0);
+
+  test("a Hotmart entrega o APPROVED velho DEPOIS do REFUNDED: vale a ordem dos eventos, e não a da chegada", async () => {
+    await limparInscricoes();
+    const p1 = await inscrever(inscricaoGps());
+
+    // Aprovada em 20/09 e reembolsada em 22/09. O aviso do reembolso chega na hora; o da aprovação
+    // tinha falhado e só é entregue em 23/09 — é o último a CHEGAR, mas não o último EVENTO.
+    await avisar(reembolso("HP-VOLTA", "2026-09-22T10:00:00"));
+    const atrasado = await avisar(aprovacao("HP-VOLTA", "2026-09-20T10:00:00"), SP("2026-09-23T10:00:00"));
+    assert.deepEqual({ casou: atrasado.casou, inscricao_id: atrasado.inscricao_id }, { casou: true, inscricao_id: p1 });
+
+    assert.deepEqual(numeros(await resumo(GPS)), NADA, "tudo: a venda foi reembolsada");
+    const dia23 = await resumo(GPS, DIA(23));
+    assert.deepEqual(numeros(dia23), NADA, "o dia em que a aprovação chegou não ganha venda");
+    assert.deepEqual(dia23.compras_recentes.map((c) => c.evento), ["PURCHASE_APPROVED"], "o aviso aparece na lista do dia");
+    assert.deepEqual(numeros(await resumo(GPS, [DIA(20)[0], DIA(23)[1]])), NADA, "20/09 a 23/09");
+
+    const todas = await rpcOk("inscricoes_resumo", {});
+    assert.deepEqual(todas.paginas.map((p) => [p.pagina, p.inscritos, p.vendas, p.vendas_por_sck]), [[GPS, 1, 0, []]]);
+    assert.equal(todas.compras_sem_inscricao, 0);
+
+    // A inscrição continua desmarcada: a aprovação é mais antiga do que o reembolso.
+    const estado = await estadoDaCompra(p1);
+    assert.equal(estado.comprou_em, null);
+    assert.equal(estado.compra_status, "REFUNDED");
+    assert.equal(estado.compra_transacao, "HP-VOLTA");
+    assert.equal(estado.compra_valor, null, "o valor da aprovação atrasada não entra");
+    assert.equal(new Date(estado.compra_evento_em).toISOString(), "2026-09-22T13:00:00.000Z");
+
+    // E o REENVIO do mesmo APPROVED (a Hotmart repete até receber 2xx) também não muda nada.
+    const repetido = await rpcOk("hotmart_registrar_compra", { p: { ...aprovacao("HP-VOLTA", "2026-09-20T10:00:00"), hotmart_id: "aviso-reenviado" } });
+    assert.equal(repetido.novo, false);
+    assert.deepEqual(numeros(await resumo(GPS)), NADA);
+    assert.deepEqual(await estadoDaCompra(p1), estado);
+  });
+
+  for (const [nome, aprovadoNoComplete] of [
+    ["o COMPLETE traz a data da aprovação original", SP("2026-09-20T10:00:00")],
+    ["o COMPLETE vem sem approved_date", null]
+  ]) {
+    test(`APPROVED em 20/09 e COMPLETE em 24/09 (${nome}): a venda é de 20/09 — aparece no recorte de 20/09, não no de 24/09, e conta 1 no total`, async () => {
+      await limparInscricoes();
+      const p1 = await inscrever(inscricaoGps());
+      await avisar(aprovacao("HP-GARANTIA", "2026-09-20T10:00:00"));
+      await avisar(completa("HP-GARANTIA", "2026-09-24T10:00:00", aprovadoNoComplete));
+
+      const UMA = { vendas: 1, receita: 5, por_sck: [{ sck: "criativo-gps-07", vendas: 1, receita: 5, casadas: 1 }], sem_inscricao: 0 };
+      assert.deepEqual(numeros(await resumo(GPS)), UMA, "tudo: uma venda, e não duas (APPROVED + COMPLETE da mesma transação)");
+      assert.deepEqual(numeros(await resumo(GPS, DIA(20))), UMA, "o dia da aprovação");
+      const dia24 = await resumo(GPS, DIA(24));
+      assert.deepEqual(numeros(dia24), NADA, "o fim da garantia não é venda nova");
+      assert.deepEqual(dia24.compras_recentes.map((c) => c.evento), ["PURCHASE_COMPLETE"], "mas o aviso aparece na lista do dia");
+      assert.deepEqual(numeros(await resumo(GPS, [DIA(20)[0], DIA(24)[1]])), UMA, "20/09 a 24/09");
+      assert.deepEqual(numeros(await resumo(GPS, [DIA(21)[0], DIA(24)[1]])), NADA, "21/09 a 24/09");
+
+      const estado = await estadoDaCompra(p1);
+      assert.equal(estado.compra_status, "COMPLETED");
+      assert.equal(estado.compra_transacao, "HP-GARANTIA");
+      if (aprovadoNoComplete) assert.equal(new Date(estado.comprou_em).toISOString(), "2026-09-20T13:00:00.000Z");
+    });
+  }
+
+  // P1 (inscrita) e X (sem inscrição) compram em 20/09 e são reembolsadas em 23/09.
+  async function semearReembolsoEm23() {
+    await limparInscricoes();
+    const p1 = await inscrever(inscricaoGps());
+    await avisar(aprovacao("HP-R1", "2026-09-20T10:00:00"));
+    await avisar(aprovacao("HP-R2", "2026-09-20T11:00:00", ORFA.X));
+    await avisar(reembolso("HP-R1", "2026-09-23T10:00:00"));
+    await avisar(reembolso("HP-R2", "2026-09-23T11:00:00", ORFA.X));
+    return p1;
+  }
+
+  test("aprovada no período e reembolsada DEPOIS do fim dele: conta no período (até p_ate o reembolso não tinha acontecido)", async () => {
+    await semearReembolsoEm23();
+    const DUAS = { vendas: 2, receita: 10, por_sck: [{ sck: "criativo-gps-07", vendas: 2, receita: 10, casadas: 1 }], sem_inscricao: 1 };
+    assert.deepEqual(numeros(await resumo(GPS, DIA(20))), DUAS, "o dia 20/09");
+    // Até 23/09 00:00 (exclusivo): os reembolsos, de 23/09 10:00 e 11:00, ainda não tinham acontecido.
+    assert.deepEqual(numeros(await resumo(GPS, [DIA(20)[0], DIA(23)[0]])), DUAS, "20/09 a 22/09");
+    // Um período que já inclui os reembolsos: as duas saem.
+    assert.deepEqual(numeros(await resumo(GPS, [DIA(20)[0], DIA(23)[1]])), NADA, "20/09 a 23/09");
+    assert.deepEqual(numeros(await resumo(GPS)), NADA, "tudo");
+
+    // Sem p_pagina, o mesmo; e a página entra só pelas vendas (a inscrição é de 10/09).
+    const todas = await rpcOk("inscricoes_resumo", { p_desde: DIA(20)[0], p_ate: DIA(20)[1] });
+    assert.deepEqual(todas.paginas.map((p) => [p.pagina, p.inscritos, p.vendas, Number(p.vendas_receita)]), [[GPS, 0, 2, 10]]);
+    assert.equal(todas.compras_sem_inscricao, 1);
+  });
+
+  test("aprovada ANTES do período e reembolsada DENTRO dele: não conta no período (nem como venda, nem como sem inscrição)", async () => {
+    await semearReembolsoEm23();
+    const dia23 = await resumo(GPS, DIA(23));
+    assert.deepEqual(numeros(dia23), NADA);
+    assert.deepEqual(
+      dia23.compras_recentes.map((c) => [c.evento, c.comprador_email]),
+      [
+        ["PURCHASE_REFUNDED", "x@gmail.com"],
+        ["PURCHASE_REFUNDED", "maria@gmail.com"]
+      ],
+      "os reembolsos aparecem na lista do dia"
+    );
+    // Entre a aprovação e o reembolso também não há venda NOVA: 21/09 e 22/09 ficam zerados.
+    assert.deepEqual(numeros(await resumo(GPS, [DIA(21)[0], DIA(22)[1]])), NADA, "21/09 a 22/09");
+    // E o reembolso não "desconta" do período dele: 23/09 a 24/09 é zero, e não −2.
+    assert.deepEqual(numeros(await resumo(GPS, [DIA(23)[0], DIA(24)[1]])), NADA, "23/09 a 24/09");
+    const todas = await rpcOk("inscricoes_resumo", { p_desde: DIA(23)[0], p_ate: DIA(23)[1] });
+    assert.deepEqual(todas.paginas, [], "sem p_pagina: nenhuma página teve inscrição nem venda em 23/09");
+    assert.equal(todas.compras_sem_inscricao, 0);
+  });
+
+  test("compras_sem_inscricao = vendas − casadas: a venda sem inscrição reembolsada não conta, a completa conta uma vez, o boleto não conta", async () => {
+    await limparInscricoes();
+    await inscrever(inscricaoGps());
+    const P2 = { comprador_email: "p2@gmail.com", comprador_digits: "5511900000012", comprador_nome: "P2" };
+    await inscrever(inscricaoGps({ id: randomUUID(), email: "p2@gmail.com", whatsapp_digits: "11900000012", whatsapp: "(11) 90000-0012" }));
+
+    //   A  P1 (casada)   criativo-a  aprovada 20/09
+    //   B  X  (órfã)     criativo-a  aprovada 20/09
+    //   C  Y  (órfã)     criativo-b  aprovada 20/09, reembolsada 21/09
+    //   D  Z  (órfã)     criativo-c  aprovada 20/09, completa 22/09
+    //   E  W  (órfã)     criativo-c  boleto impresso 20/09 — não é venda
+    //   F  P2 (casada)   criativo-b  aprovada 20/09, reembolsada 21/09
+    await avisar(aprovacao("HP-A", "2026-09-20T10:00:00", { sck: "criativo-a" }));
+    await avisar(aprovacao("HP-B", "2026-09-20T11:00:00", { sck: "criativo-a", ...ORFA.X }));
+    await avisar(aprovacao("HP-C", "2026-09-20T12:00:00", { sck: "criativo-b", ...ORFA.Y }));
+    await avisar(aprovacao("HP-D", "2026-09-20T13:00:00", { sck: "criativo-c", ...ORFA.Z }));
+    await avisar(compraGps({ transacao: "HP-E", evento: "PURCHASE_BILLET_PRINTED", status: "PRINTED_BILLET", evento_em: SP("2026-09-20T14:00:00"), aprovado_em: null, sck: "criativo-c", ...ORFA.W }));
+    await avisar(aprovacao("HP-F", "2026-09-20T15:00:00", { sck: "criativo-b", ...P2 }));
+    await avisar(reembolso("HP-C", "2026-09-21T12:00:00", { sck: "criativo-b", ...ORFA.Y }));
+    await avisar(reembolso("HP-F", "2026-09-21T15:00:00", { sck: "criativo-b", ...P2 }));
+    await avisar(completa("HP-D", "2026-09-22T13:00:00", SP("2026-09-20T13:00:00"), { sck: "criativo-c", ...ORFA.Z }));
+
+    // Tudo: A, B e D (C e F reembolsadas; E é boleto). Casada só A: sem inscrição = 3 − 1 = 2 (B e D).
+    const tudo = numeros(await resumo(GPS));
+    assert.deepEqual(tudo, {
+      vendas: 3,
+      receita: 15,
+      por_sck: [
+        { sck: "criativo-a", vendas: 2, receita: 10, casadas: 1 },
+        { sck: "criativo-c", vendas: 1, receita: 5, casadas: 0 }
+      ],
+      sem_inscricao: 2
+    });
+    assert.equal(tudo.sem_inscricao, tudo.vendas - casadas(tudo));
+
+    // Até o fim de 20/09 C e F ainda não tinham sido reembolsadas: A, B, C, D e F; casadas A e F;
+    // sem inscrição = 5 − 2 = 3 (B, C e D).
+    const dia20 = numeros(await resumo(GPS, DIA(20)));
+    assert.deepEqual(dia20, {
+      vendas: 5,
+      receita: 25,
+      por_sck: [
+        { sck: "criativo-a", vendas: 2, receita: 10, casadas: 1 },
+        { sck: "criativo-b", vendas: 2, receita: 10, casadas: 1 },
+        { sck: "criativo-c", vendas: 1, receita: 5, casadas: 0 }
+      ],
+      sem_inscricao: 3
+    });
+    assert.equal(dia20.sem_inscricao, dia20.vendas - casadas(dia20));
+
+    // Os dias seguintes não têm venda nova (reembolso e fim de garantia não são venda).
+    assert.deepEqual(numeros(await resumo(GPS, [DIA(21)[0], DIA(22)[1]])), NADA);
+
+    // Sem p_pagina, a mesma conta (só há a página do GPS).
+    const todas = await rpcOk("inscricoes_resumo", {});
+    assert.equal(todas.paginas.length, 1);
+    const [gps] = todas.paginas;
+    assert.equal(todas.compras_sem_inscricao, 2);
+    assert.equal(todas.compras_sem_inscricao, gps.vendas - gps.vendas_por_sck.reduce((soma, s) => soma + s.casadas, 0));
+  });
+
+  test("sem p_pagina: a página que só teve VENDA no período (nenhuma inscrição nele) aparece em paginas", async () => {
+    await limparInscricoes();
+    await inscrever(inscricao(), SP("2026-09-22T10:00:00")); // Viver de Furo: inscrição NO período
+    await inscrever(inscricaoGps({ id: randomUUID(), email: "gps@gmail.com", whatsapp_digits: "11900000021" }), SP("2026-09-18T10:00:00")); // GPS: fora dele
+
+    // GPS: uma venda no período, de quem não passou pelo formulário.
+    await avisar(aprovacao("HP-GPS-22", "2026-09-22T12:00:00", ORFA.X));
+    // A Formação (produto de fora, pagina null), no mesmo dia: não vira uma página "null".
+    await avisar(compraFormacao({ transacao: "HP-FORM-22", evento_em: SP("2026-09-22T13:00:00"), pedido_em: SP("2026-09-22T13:00:00"), aprovado_em: SP("2026-09-22T13:00:00"), ...ORFA.Y }));
+    // outra-pagina: aprovada em 20/09 e completa em 22/09 — a venda é de 20/09, e não de 22/09.
+    const outra = { pagina: "outra-pagina", produto_id: "5550001", oferta: "outra001", ...ORFA.Z };
+    await avisar(compra({ transacao: "HP-OUTRA", evento_em: SP("2026-09-20T09:00:00"), pedido_em: SP("2026-09-20T09:00:00"), aprovado_em: SP("2026-09-20T09:00:00"), ...outra }));
+    await avisar(compra({ transacao: "HP-OUTRA", evento: "PURCHASE_COMPLETE", status: "COMPLETED", evento_em: SP("2026-09-22T09:00:00"), pedido_em: SP("2026-09-20T09:00:00"), aprovado_em: SP("2026-09-20T09:00:00"), ...outra }));
+    // mais-uma-pagina: aprovada e reembolsada no próprio dia 22/09 — não é venda.
+    const maisUma = { pagina: "mais-uma-pagina", produto_id: "5550002", oferta: "mais0001", ...ORFA.W };
+    await avisar(compra({ transacao: "HP-REEMB", evento_em: SP("2026-09-22T08:00:00"), pedido_em: SP("2026-09-22T08:00:00"), aprovado_em: SP("2026-09-22T08:00:00"), ...maisUma }));
+    await avisar(compra({ transacao: "HP-REEMB", evento: "PURCHASE_REFUNDED", status: "REFUNDED", evento_em: SP("2026-09-22T18:00:00"), aprovado_em: null, ...maisUma }));
+
+    const dia22 = await rpcOk("inscricoes_resumo", { p_desde: DIA(22)[0], p_ate: DIA(22)[1] });
+    assert.deepEqual(
+      dia22.paginas.map((p) => [p.pagina, p.inscritos, p.vendas, Number(p.vendas_receita)]),
+      [
+        [GPS, 0, 1, 5],
+        [PAGINA, 1, 0, 0]
+      ]
+    );
+    const [gps] = dia22.paginas;
+    assert.deepEqual(
+      {
+        cliques: gps.cliques,
+        compras: gps.compras,
+        taxa_compra: Number(gps.taxa_compra),
+        por_origem: gps.por_origem,
+        por_dia: gps.por_dia,
+        vendas_por_sck: gps.vendas_por_sck
+      },
+      { cliques: 0, compras: 0, taxa_compra: 0, por_origem: [], por_dia: [], vendas_por_sck: [{ sck: "criativo-gps-07", vendas: 1, receita: 5, casadas: 0 }] },
+      "o lado do formulário zerado, o da Hotmart com a venda"
+    );
+    assert.equal(dia22.compras_sem_inscricao, 2, "a do GPS e a Formação");
+
+    // Tudo: outra-pagina entra (a venda de 20/09 continua valendo); mais-uma-pagina não (reembolsada).
+    const tudo = await rpcOk("inscricoes_resumo", {});
+    assert.deepEqual(
+      tudo.paginas.map((p) => [p.pagina, p.inscritos, p.vendas, Number(p.vendas_receita)]),
+      [
+        [GPS, 1, 1, 5],
+        ["outra-pagina", 0, 1, 197],
+        [PAGINA, 1, 0, 0]
+      ]
+    );
+    assert.equal(tudo.compras_sem_inscricao, 3, "GPS, Formação e outra-pagina");
+  });
+});
+
+describe("hotmart_registrar_compra: pagina_por (de onde veio a página) e evento_em", () => {
+  async function gravadas() {
+    const r = await chamar("GET", "compras?select=id,transacao,produto_id,pagina,pagina_por,inscricao_id,evento_em,recebido_em&order=id");
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    return r.json;
+  }
+
+  // A régua mudou de propósito. Antes, HP-PRODUTO aprendia a página do 6200001 com HP-OFERTA
+  // ('oferta'), e HP-PRODUTO-2 com HP-PRODUTO ('produto'). Agora o passo 3 só aprende de aviso que o
+  // CONFIG reconheceu (pagina_por 'config'). 'oferta' vem de um link gravado pelo /api/inscricao,
+  // que qualquer um chama, e 'produto' já é uma dedução: aprender com eles espalhava um erro, ou uma
+  // inscrição forjada, para toda venda seguinte do produto. Por isso 'produto' agora é o 6123456
+  // (o produto de HP-CONFIG) com ofertas que ninguém abriu, e o 6200001 fica de fora.
+  test("pagina_por: 'config' (p.pagina do servidor), 'oferta' (o off= do link da própria compradora), 'produto' (um aviso anterior que o config reconheceu); produto de fora fica null", async () => {
+    await limparInscricoes();
+    const gps = await rpcOk("inscricao_salvar", { p: inscricaoGps({ checkout_url: "https://pay.hotmart.com/R107667362D?off=lote2abc&checkoutMode=10" }) });
+    for (const p of [
+      compraGps({ transacao: "HP-CONFIG" }),
+      // Oferta que o config não conhece, mas que o link da inscrição da Maria abriu; produto sem histórico.
+      compraGps({ transacao: "HP-OFERTA", pagina: null, oferta: "lote2abc", produto_id: "6200001" }),
+      // Oferta que ninguém abriu, do produto que o config reconheceu em HP-CONFIG.
+      compraGps({ transacao: "HP-PRODUTO", pagina: null, oferta: "cupom50" }),
+      // De novo, agora com HP-PRODUTO ('produto') como o aviso MAIS RECENTE do produto: a página
+      // continua vindo de HP-CONFIG.
+      compraGps({ transacao: "HP-PRODUTO-2", pagina: null, oferta: "cupom60" }),
+      // O 6200001 só veio por 'oferta', e 'oferta' não ensina: fica de fora, mesmo sendo da Maria.
+      compraGps({ transacao: "HP-SO-OFERTA", pagina: null, oferta: "cupom70", produto_id: "6200001" }),
+      compraFormacao({ transacao: "HP-FORA" })
+    ]) {
+      await rpcOk("hotmart_registrar_compra", { p });
+    }
+    assert.deepEqual(
+      (await gravadas()).map((c) => [c.transacao, c.pagina, c.pagina_por, c.inscricao_id]),
+      [
+        ["HP-CONFIG", GPS, "config", gps.id],
+        ["HP-OFERTA", GPS, "oferta", gps.id],
+        ["HP-PRODUTO", GPS, "produto", gps.id],
+        ["HP-PRODUTO-2", GPS, "produto", gps.id],
+        ["HP-SO-OFERTA", null, null, null],
+        ["HP-FORA", null, null, null]
+      ]
+    );
+  });
+
+  test("aviso da versão ANTERIOR (pagina_por null) não ensina a página do produto: o 8519248 continua de fora", async () => {
+    await limparInscricoes();
+    const viver = await rpcOk("inscricao_salvar", { p: inscricao() });
+    // Gravado pela versão anterior: `pagina` era a da inscrição que casou (a Maria da Viver de Furo),
+    // qualquer que fosse o produto; pagina_por não existia.
+    await inserir("compras", [
+      {
+        evento: "PURCHASE_APPROVED",
+        transacao: "HP-ANTIGO",
+        status: "APPROVED",
+        produto_id: "8519248",
+        produto_nome: "Outro produto",
+        oferta: "antiga01",
+        valor: 497,
+        comprador_email: "maria@gmail.com",
+        comprador_digits: "5511912345678",
+        inscricao_id: viver.id,
+        pagina: PAGINA,
+        pagina_por: null,
+        recebido_em: "2026-09-10T10:00:00-03:00",
+        payload: { event: "PURCHASE_APPROVED", data: { product: { id: 8519248 } } }
+      }
+    ]);
+
+    // Um aviso novo do mesmo produto, sem p.pagina e com uma oferta que link nenhum abriu.
+    const novo = await rpcOk("hotmart_registrar_compra", {
+      p: compra({ transacao: "HP-NOVO-8519248", pagina: null, produto_id: "8519248", produto_nome: "Outro produto", oferta: "nova0001", valor: 497 })
+    });
+    assert.deepEqual(novo, { ok: true, novo: true, casou: false, inscricao_id: null, pagina: null });
+    assert.deepEqual(await estadoDaCompra(viver.id), SEM_COMPRA, "a inscrita da Viver de Furo não vira compradora de outro produto");
+    const [gravado] = (await gravadas()).filter((c) => c.transacao === "HP-NOVO-8519248");
+    assert.deepEqual([gravado.pagina, gravado.pagina_por, gravado.inscricao_id], [null, null, null]);
+
+    // Quando um aviso de verdade (com pagina_por) disser a página do produto, é ele que ensina — mesmo
+    // com o aviso antigo como o MAIS RECENTE do produto.
+    await rpcOk("hotmart_registrar_compra", { p: compra({ transacao: "HP-CONFIG-8519248", pagina: GPS, produto_id: "8519248", oferta: "nova0002", ...ORFA.X }) });
+    await stack.sql("update public.compras set recebido_em = now() + interval '1 day' where transacao = 'HP-ANTIGO' returning 1 as ok");
+    const aprendido = await rpcOk("hotmart_registrar_compra", { p: compra({ transacao: "HP-APRENDIDO-8519248", pagina: null, produto_id: "8519248", oferta: "nova0003", ...ORFA.Y }) });
+    assert.deepEqual({ pagina: aprendido.pagina, casou: aprendido.casou }, { pagina: GPS, casou: false });
+    const [depois] = (await gravadas()).filter((c) => c.transacao === "HP-APRENDIDO-8519248");
+    assert.equal(depois.pagina_por, "produto");
+    assert.deepEqual(await estadoDaCompra(viver.id), SEM_COMPRA);
+  });
+
+  test("o produto '0' (o \"Enviar teste\" da Hotmart) nunca é aprendido, mesmo com um aviso anterior com página", async () => {
+    await limparInscricoes();
+    const gps = await rpcOk("inscricao_salvar", { p: inscricaoGps() });
+    // Um teste que chegou COM página (o servidor mandou p.pagina), de outra pessoa.
+    const primeiro = await rpcOk("hotmart_registrar_compra", { p: compraGps({ transacao: "HP-TESTE-1", produto_id: "0", oferta: "test", ...ORFA.X }) });
+    assert.equal(primeiro.pagina, GPS);
+
+    // Os próximos testes, sem página e com ofertas que link nenhum abriu: não aprendem pelo '0'.
+    for (const [transacao, produto] of [["HP-TESTE-2", "0"], ["HP-TESTE-3", " 0 "]]) {
+      const r = await rpcOk("hotmart_registrar_compra", { p: compraGps({ transacao, pagina: null, produto_id: produto, oferta: `test-${transacao}` }) });
+      assert.deepEqual(r, { ok: true, novo: true, casou: false, inscricao_id: null, pagina: null }, transacao);
+    }
+    assert.deepEqual(await estadoDaCompra(gps.id), SEM_COMPRA, "a inscrita não vira compradora pelo teste da Hotmart");
+
+    // Com um produto de verdade, o mesmo caminho aprende: só o '0' fica de fora.
+    await rpcOk("hotmart_registrar_compra", { p: compraGps({ transacao: "HP-REAL-1", ...ORFA.X }) });
+    const real = await rpcOk("hotmart_registrar_compra", { p: compraGps({ transacao: "HP-REAL-2", pagina: null, oferta: "outra99" }) });
+    assert.deepEqual({ casou: real.casou, inscricao_id: real.inscricao_id, pagina: real.pagina }, { casou: true, inscricao_id: gps.id, pagina: GPS });
+    assert.deepEqual(
+      (await gravadas()).map((c) => [c.transacao, c.produto_id, c.pagina, c.pagina_por]),
+      [
+        ["HP-TESTE-1", "0", GPS, "config"],
+        ["HP-TESTE-2", "0", null, null],
+        ["HP-TESTE-3", "0", null, null],
+        ["HP-REAL-1", "6123456", GPS, "config"],
+        ["HP-REAL-2", "6123456", GPS, "produto"]
+      ]
+    );
+  });
+
+  test("evento_em gravado = o evento_em do p; senão aprovado_em; senão pedido_em; senão a hora da gravação", async () => {
+    await limparInscricoes();
+    const casos = [
+      ["HP-EV-1", { evento_em: "2026-09-21T10:00:00-03:00", aprovado_em: "2026-09-21T09:00:00-03:00", pedido_em: "2026-09-21T08:00:00-03:00" }, "2026-09-21T13:00:00.000Z"],
+      ["HP-EV-2", { evento_em: "  ", aprovado_em: "2026-09-21T09:00:00-03:00", pedido_em: "2026-09-21T08:00:00-03:00" }, "2026-09-21T12:00:00.000Z"],
+      ["HP-EV-3", { evento_em: null, aprovado_em: null, pedido_em: "2026-09-21T08:00:00-03:00" }, "2026-09-21T11:00:00.000Z"],
+      ["HP-EV-4", { evento_em: null, aprovado_em: "", pedido_em: null }, "agora"]
+    ];
+    for (const [transacao, datas] of casos) {
+      await rpcOk("hotmart_registrar_compra", { p: compraFormacao({ transacao, ...datas }) });
+    }
+    const linhas = await gravadas();
+    for (const [transacao, , esperado] of casos) {
+      const linha = linhas.find((c) => c.transacao === transacao);
+      assert.ok(linha.evento_em, `${transacao}: evento_em nunca fica null`);
+      if (esperado === "agora") {
+        assert.equal(linha.evento_em, linha.recebido_em, `${transacao}: o now() da gravação (o mesmo do recebido_em)`);
+      } else {
+        assert.equal(new Date(linha.evento_em).toISOString(), esperado, transacao);
+      }
+    }
+  });
+});
+
+describe("supabase.sql reaplicado: avisos da versão anterior completados pelo payload", () => {
+  const MS = Date.parse("2026-09-21T17:00:00Z"); // creation_date em milissegundos (o que a Hotmart manda)
+  const S = Date.parse("2026-09-22T17:00:00Z") / 1000; // e em segundos
+
+  /** Cada aviso como o banco o guarda, com null distinguível de texto vazio. */
+  async function avisos() {
+    return stack.sql(`
+      select transacao, evento,
+             coalesce(sck, '<null>') as sck, coalesce(src, '<null>') as src, coalesce(oferta, '<null>') as oferta,
+             coalesce(to_char(evento_em at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '<null>') as evento_em,
+             coalesce(pagina, '<null>') as pagina, coalesce(pagina_por, '<null>') as pagina_por
+      from public.compras order by id
+    `);
+  }
+  /** A linha inteira, para provar que rodar de novo não muda nada. */
+  async function fotografia() {
+    return stack.sql("select id, row_to_json(c)::text as linha from public.compras as c order by id");
+  }
+
+  test("banco antigo: as colunas entram; sck (purchase.origin), src, oferta (data.offer) e evento_em (creation_date em ms e em s) são completados sem sobrescrever o que já tinha valor; rodar 2x não muda nada", async () => {
+    await limparInscricoes();
+    try {
+      // 1. O banco da versão anterior: compras sem pagina_por e sem evento_em, sck não lido do origin.
+      await stack.sql("alter table public.compras drop column pagina_por, drop column evento_em");
+      await inserir("compras", [
+        {
+          evento: "PURCHASE_APPROVED",
+          transacao: "HP-OLD-1",
+          oferta: "7j2nqptq",
+          pagina: PAGINA,
+          payload: {
+            event: "PURCHASE_APPROVED",
+            creation_date: MS,
+            data: { purchase: { transaction: "HP-OLD-1", offer: { code: "7j2nqptq" }, origin: { sck: " criativo-07 ", src: "facebook" } } }
+          }
+        },
+        {
+          // Carrinho abandonado: sem transação, a oferta vem em data.offer.
+          evento: "PURCHASE_OUT_OF_SHOPPING_CART",
+          transacao: null,
+          payload: { event: "PURCHASE_OUT_OF_SHOPPING_CART", creation_date: S, data: { offer: { code: "l0r77by6" }, product: { id: 6123456 } } }
+        }
+      ]);
+      await stack.aplicarSql();
+
+      const colunas = await stack.sql(`
+        select column_name, data_type from information_schema.columns
+        where table_schema = 'public' and table_name = 'compras' and column_name in ('pagina_por', 'evento_em') order by column_name
+      `);
+      assert.deepEqual(colunas, [
+        { column_name: "evento_em", data_type: "timestamp with time zone" },
+        { column_name: "pagina_por", data_type: "text" }
+      ]);
+      assert.deepEqual(await avisos(), [
+        { transacao: "HP-OLD-1", evento: "PURCHASE_APPROVED", sck: "criativo-07", src: "facebook", oferta: "7j2nqptq", evento_em: "2026-09-21T17:00:00Z", pagina: PAGINA, pagina_por: "<null>" },
+        { transacao: null, evento: "PURCHASE_OUT_OF_SHOPPING_CART", sck: "<null>", src: "<null>", oferta: "l0r77by6", evento_em: "2026-09-22T17:00:00Z", pagina: "<null>", pagina_por: "<null>" }
+      ], "pagina_por NÃO é inventado para o aviso antigo: ele continua sem ensinar página");
+
+      // 2. Linhas que já tinham valor, ou cujo payload não tem de onde tirar, não mudam.
+      await inserir("compras", [
+        {
+          evento: "PURCHASE_APPROVED",
+          transacao: "HP-JA-TINHA",
+          sck: "ja-tinha",
+          src: "ja-src",
+          oferta: "ja-oferta",
+          evento_em: "2026-01-01T00:00:00Z",
+          pagina: GPS,
+          pagina_por: "config",
+          payload: { creation_date: MS, data: { purchase: { origin: { sck: "outro-sck", src: "outro-src" } }, offer: { code: "outra-oferta" } } }
+        },
+        {
+          evento: "PURCHASE_APPROVED",
+          transacao: "HP-VAZIO",
+          payload: { creation_date: "2026-09-21T17:00:00Z", data: { purchase: { origin: { sck: "   ", src: "" } }, offer: { code: " " } } }
+        },
+        { evento: "PURCHASE_APPROVED", transacao: "HP-MS-TEXTO", payload: { creation_date: String(MS) } },
+        { evento: "PURCHASE_APPROVED", transacao: "HP-SEM-DATA", payload: { event: "PURCHASE_APPROVED" } },
+        { evento: "PURCHASE_APPROVED", transacao: "HP-CURTO", payload: { creation_date: 123 } }
+      ]);
+      await stack.aplicarSql();
+      assert.deepEqual((await avisos()).slice(2), [
+        { transacao: "HP-JA-TINHA", evento: "PURCHASE_APPROVED", sck: "ja-tinha", src: "ja-src", oferta: "ja-oferta", evento_em: "2026-01-01T00:00:00Z", pagina: GPS, pagina_por: "config" },
+        { transacao: "HP-VAZIO", evento: "PURCHASE_APPROVED", sck: "<null>", src: "<null>", oferta: "<null>", evento_em: "<null>", pagina: "<null>", pagina_por: "<null>" },
+        { transacao: "HP-MS-TEXTO", evento: "PURCHASE_APPROVED", sck: "<null>", src: "<null>", oferta: "<null>", evento_em: "2026-09-21T17:00:00Z", pagina: "<null>", pagina_por: "<null>" },
+        { transacao: "HP-SEM-DATA", evento: "PURCHASE_APPROVED", sck: "<null>", src: "<null>", oferta: "<null>", evento_em: "<null>", pagina: "<null>", pagina_por: "<null>" },
+        { transacao: "HP-CURTO", evento: "PURCHASE_APPROVED", sck: "<null>", src: "<null>", oferta: "<null>", evento_em: "<null>", pagina: "<null>", pagina_por: "<null>" }
+      ]);
+
+      // 3. Rodar de novo (e de novo) não muda linha nenhuma.
+      const antes = await fotografia();
+      assert.equal(antes.length, 7);
+      await stack.aplicarSql();
+      assert.deepEqual(await fotografia(), antes, "segunda execução");
+      await stack.aplicarSql();
+      assert.deepEqual(await fotografia(), antes, "terceira execução");
+    } finally {
+      // Se algo falhou no meio, o banco volta ao formato certo para o que vier depois.
+      await stack.aplicarSql();
+    }
   });
 });

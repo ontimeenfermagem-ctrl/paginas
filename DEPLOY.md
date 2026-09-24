@@ -1,6 +1,8 @@
-# Deploy — Pesquisa de ICP + páginas de obrigado + inscrição/checkout + painel
+# Deploy — Pesquisa de ICP + páginas de obrigado + inscrição/checkout (Viver de Furo e Imersão GPS) + painel
 
 Um serviço só no Railway (este repositório, com o `Dockerfile` na raiz) e um projeto no Supabase. Não há build, `npm install` nem banco para administrar no Railway: o servidor não tem dependências e todos os dados ficam no Supabase.
+
+A página de venda da Imersão GPS é **outro** serviço (repositório `whatsapp-atendimento-centralizado`, em `https://io.escolaenfermagemdevalor.com.br`): ela só manda o formulário para o `/api/inscricao` daqui. A ordem de publicação dela está na seção 5.3.
 
 Ordem recomendada: **banco → senha do painel → Railway → domínio → checklist**.
 
@@ -43,9 +45,118 @@ select public.inscricoes_resumo(null, null, 'viver-de-furo');
 
 Tem que voltar `{"paginas" : [{"pagina" : "viver-de-furo", "inscritos" : 0, "cliques" : 0, "compras" : 0, ...}], "compras_sem_inscricao" : 0, "compras_recentes" : []}`.
 
+**Banco que já tem as inscrições rodando (atualização da Imersão GPS: venda casada pela página do produto, `sck` da Hotmart e vendas por `sck`):** rode de novo a seção **6** (ou o arquivo inteiro) **antes** de publicar o servidor novo. Ela troca `hotmart_registrar_compra` e `inscricoes_resumo` (mesma assinatura), acrescenta as colunas `pagina_por` e `evento_em` em `compras` e completa os avisos antigos a partir do payload (logo abaixo), sem apagar nada. Por que antes: o SQL novo funciona com o servidor antigo, mas o contrário não — com a função antiga, a venda de um ingresso do GPS casaria com uma inscrição da Viver de Furo que tivesse o mesmo e-mail, e o painel novo ficaria sem as divisões por mídia e conteúdo e sem o bloco "Vendas na Hotmart" (ele esconde o que o resumo não manda). Para conferir:
+
+```sql
+select public.inscricoes_resumo(null, null, 'imersao-gps');
+```
+
+Tem que voltar `{"paginas" : [{"pagina" : "imersao-gps", "inscritos" : 0, "cliques" : 0, "compras" : 0, "receita" : 0.00, "taxa_compra" : 0, "por_origem" : [], "por_midia" : [], "por_campanha" : [], "por_conteudo" : [], "por_termo" : [], "vendas" : 0, "vendas_receita" : 0.00, "vendas_por_sck" : [], "por_dia" : []}], "compras_sem_inscricao" : 0, "compras_recentes" : []}`. Sem `por_midia`, `por_conteudo` e `vendas_por_sck` na resposta, a função antiga ainda está lá.
+
+**Avisos da Hotmart gravados antes desta versão.** A versão anterior de `hotmart_registrar_compra` gravava em `compras.pagina` a página da **inscrição** que casou, qualquer que fosse o produto (e null quando não casava), e deixava o `sck` null. Rodar a seção 6 já resolve o principal sozinho, sem apagar nada e sem precisar de comando à mão (rodar de novo não muda nada: só preenche o que está vazio):
+
+- cria as colunas `pagina_por` e `evento_em` em `compras`;
+- completa os avisos antigos a partir do `payload` cru: o `sck` (`data.purchase.origin.sck`), o `src` (`origin.src`), a `oferta` do carrinho abandonado (`data.offer.code`) e o `evento_em` (o `creation_date`, em milissegundos ou em segundos);
+- os avisos antigos ficam com `pagina_por` null, e a função nova **nunca aprende com eles** de qual página é um produto (nem com o produto `0`, dos testes da Hotmart). O aviso antigo da Imersão Viver de Furo de Orelha (produto `8519248`) que casou com uma inscrita da Viver de Furo não ensina mais que "o `8519248` é da Viver de Furo": a próxima venda desse produto entra com `pagina` null e não marca ninguém.
+
+Confira:
+
+```sql
+select pagina, pagina_por, produto_id, produto_nome, oferta, count(*) as avisos,
+       count(inscricao_id) as casados, count(sck) as com_sck, count(evento_em) as com_evento_em
+from public.compras
+group by 1, 2, 3, 4, 5
+order by pagina_por nulls first, pagina nulls last, avisos desc;
+```
+
+As linhas com `pagina_por` vazio são os avisos antigos. `com_evento_em` tem que ser igual a `avisos` (todo aviso da Hotmart traz `creation_date`); `com_sck` só fica menor quando o aviso chegou sem `sck` (link sem UTM, carrinho abandonado). Na versão anterior só existia a Viver de Furo: entre os avisos antigos, toda linha com `pagina = 'viver-de-furo'` tem que ser do produto `2332962` ou da oferta `7j2nqptq`. Se for, acabou.
+
+**O que ainda é à mão (opcional, uma vez).** O arquivo não mexe na `pagina` nem no `inscricao_id` dos avisos antigos, nem nas inscrições. Se a conferência mostrar aviso antigo de **outro produto** com `pagina = 'viver-de-furo'` (a Imersão Viver de Furo de Orelha, um teste com produto `0`), ele não ensina mais nada, mas:
+
+- ainda aparece na aba da Viver de Furo: em "Compras recentes" e, se estiver aprovado, em "Vendas na Hotmart", como venda casada e com o valor do outro produto;
+- a inscrita com quem ele casou pode ter ficado marcada como compradora por causa do outro produto (ou desmarcada pelo reembolso dele), com o valor e a transação dele.
+
+De quebra, o aviso antigo do **próprio** produto da Viver de Furo que não casou com ninguém ficou com `pagina` null, fora da aba. Para deixar os avisos como a função nova teria gravado, rode (pode repetir: só pega o que ainda está no formato antigo, `pagina_por` null):
+
+```sql
+-- 1. Aviso antigo de outro produto, gravado com a página da inscrição que casou: vira produto de fora.
+update public.compras
+set pagina = null, inscricao_id = null
+where pagina_por is null and pagina = 'viver-de-furo'
+  and oferta is distinct from '7j2nqptq'
+  and produto_id is distinct from '2332962';
+
+-- 2. Aviso antigo do produto da Viver de Furo que não casou com ninguém: ganha a página.
+update public.compras
+set pagina = 'viver-de-furo'
+where pagina_por is null and pagina is null
+  and (oferta = '7j2nqptq' or produto_id = '2332962');
+```
+
+**Depois** do passo 1 (antes dele esta consulta não acha ninguém), veja quem ficou com o estado de compra de outro produto, isto é, a transação guardada na inscrição é de um aviso que não é da página dela:
+
+```sql
+select i.nome, i.email, i.comprou_em, i.compra_status, i.compra_valor, i.compra_transacao,
+       c.produto_id, c.produto_nome
+from public.inscricoes as i
+cross join lateral (
+  select c.produto_id, c.produto_nome from public.compras as c
+  where c.transacao = i.compra_transacao and c.pagina is distinct from i.pagina
+  limit 1
+) as c;
+```
+
+Vazio = nada a fazer. Senão, o comando abaixo refaz o estado de compra **só dessas** inscritas, a partir dos avisos do produto da página delas e com a régua da função (o último evento, pela hora do evento, decide; o valor é o da última aprovação). Quem só comprou o outro produto volta a "não comprou"; quem comprou os dois fica com a data, o valor e a transação do produto da página; quem foi desmarcada pelo reembolso do outro volta a ser compradora. Ninguém mais é tocado, e o comando devolve o antes e o depois de cada uma. Rodar de novo não muda nada.
+
+```sql
+-- 3. Refaz o estado de compra de quem ficou com o de outro produto.
+with alvo as (
+  select i.id, i.comprou_em as comprou_em_antes, i.compra_valor as valor_antes,
+         i.compra_transacao as transacao_antes,
+         u.evento, u.status, u.transacao, u.aprovado_em, u.momento, a.valor, a.moeda
+  from public.inscricoes as i
+  -- O último evento de compra do produto da página dela: é ele que decide.
+  left join lateral (
+    select c.evento, c.status, c.transacao, c.aprovado_em,
+           coalesce(c.evento_em, c.aprovado_em, c.pedido_em, c.recebido_em) as momento
+    from public.compras as c
+    where c.inscricao_id = i.id and c.pagina = i.pagina
+      and c.evento in ('PURCHASE_APPROVED', 'PURCHASE_COMPLETE', 'PURCHASE_CANCELED',
+                       'PURCHASE_REFUNDED', 'PURCHASE_CHARGEBACK', 'PURCHASE_PROTEST')
+    order by momento desc, c.recebido_em desc, c.id desc
+    limit 1
+  ) as u on true
+  -- O valor da última aprovação (o reembolso não apaga o valor, como na função).
+  left join lateral (
+    select c.valor, c.moeda
+    from public.compras as c
+    where c.inscricao_id = i.id and c.pagina = i.pagina and c.valor is not null
+      and c.evento in ('PURCHASE_APPROVED', 'PURCHASE_COMPLETE')
+    order by coalesce(c.evento_em, c.aprovado_em, c.pedido_em, c.recebido_em) desc,
+             c.recebido_em desc, c.id desc
+    limit 1
+  ) as a on true
+  where exists (select 1 from public.compras as c
+                where c.transacao = i.compra_transacao and c.pagina is distinct from i.pagina)
+)
+update public.inscricoes as i set
+  comprou_em = case when alvo.evento in ('PURCHASE_APPROVED', 'PURCHASE_COMPLETE')
+                    then coalesce(alvo.aprovado_em, alvo.momento) end,
+  compra_status = coalesce(alvo.status, alvo.evento),
+  compra_valor = alvo.valor,
+  compra_moeda = alvo.moeda,
+  compra_transacao = alvo.transacao,
+  compra_evento_em = alvo.momento,
+  atualizado_em = now()
+from alvo
+where i.id = alvo.id
+returning i.nome, i.email, alvo.comprou_em_antes, i.comprou_em, alvo.valor_antes, i.compra_valor,
+          alvo.transacao_antes, i.compra_transacao;
+```
+
 No Supabase, tudo o que nasce no schema `public` ganha acesso automático da chave pública (anon). O arquivo revoga esse acesso em cada tabela, view e função: a chave pública do projeto não lê, não grava e não executa nada da pesquisa. Isso é testado em `tests/e2e/sql.e2e.mjs` contra um Postgres com os mesmos grants padrão do Supabase.
 
-**Pode rodar de novo.** O arquivo é idempotente: não apaga resposta nenhuma, só recria views e funções. Sempre que o `supabase.sql` mudar no repositório, rode-o inteiro outra vez **antes** de publicar o servidor novo.
+**Pode rodar de novo.** O arquivo é idempotente: não apaga resposta nenhuma, só recria views e funções (e, nos avisos antigos da Hotmart, preenche o que está vazio). Sempre que o `supabase.sql` mudar no repositório, rode-o inteiro outra vez **antes** de publicar o servidor novo.
 
 ---
 
@@ -102,6 +213,7 @@ A senha em si não é guardada em lugar nenhum, só o hash. Guarde a senha num g
    | `HOTMART_HOTTOK` | o *Hottok* da Hotmart (Ferramentas > Webhook/Postback > aba **Autenticação**). Sem ele **e** sem `HOTMART_WEBHOOK_CHAVE`, `POST /api/hotmart/venda` responde 503 |
    | `HOTMART_WEBHOOK_CHAVE` | um segredo **nosso**, que vai na URL do webhook (`?chave=...`). Gere com `node -e "console.log(require('node:crypto').randomBytes(24).toString('base64url'))"` |
    | `META_PIXEL_ID` | opcional: vazio = `538380380948773` (pixel da Enfermagem de Valor); `off` desliga |
+   | `INSCRICAO_ORIGENS` | opcional: sites de **fora** que também podem mandar o formulário para o `POST /api/inscricao` (CORS), separados por vírgula, com `https://` e sem barra no fim — por exemplo o preview do Railway da página de venda ou `http://localhost:3001` para testar na sua máquina. A de produção (`https://io.escolaenfermagemdevalor.com.br`) **já vem** do `js/checkout-config.js` e não precisa estar aqui. Vazio = só as do config |
 
    `PORT` não precisa: o Railway define sozinho.
 4. **Deploy**. No log deve aparecer `Servidor iniciado na porta ...`. Cada linha começando com `Aviso:` é uma variável que ficou faltando (o log nunca mostra o valor de um segredo).
@@ -138,7 +250,7 @@ Os convites dos três grupos ficam em `js/obrigado-config.js`, no objeto `LINKS_
 
 ## 5.2 Webhook de venda da Hotmart
 
-A página `/viver-de-furo-inscricao` grava a inscrição e manda a pessoa para o checkout; quem diz que a venda aconteceu é a Hotmart, no webhook. **Nada disso passa pelo n8n.**
+A página `/viver-de-furo-inscricao` (e a página de venda da Imersão GPS, do outro site) grava a inscrição e manda a pessoa para o checkout; quem diz que a venda aconteceu é a Hotmart, no webhook. **Nada disso passa pelo n8n.** Um endereço só recebe os avisos de todas as páginas: cada aviso é atribuído à página do **produto** (oferta ou id do produto em `js/checkout-config.js`) e só casa com inscrição dessa página; venda de produto que não é de página nenhuma (a Formação vendida no fim da imersão, um order bump) é gravada e não marca ninguém (o porquê está em "De qual página é cada venda", no `README.md`).
 
 **O endereço para colar na Hotmart:**
 
@@ -149,27 +261,81 @@ https://SEU-DOMINIO/api/hotmart/venda?chave=O-VALOR-DE-HOTMART_WEBHOOK_CHAVE
 (em produção hoje: `https://lp.escolaenfermagemdevalor.com.br/api/hotmart/venda?chave=...`)
 
 1. Gere a chave e cadastre-a no Railway como `HOTMART_WEBHOOK_CHAVE` (veja o passo 4). Ela existe para o endereço funcionar **no minuto em que for colado**, antes de o hottok estar configurado.
-2. Hotmart > **Ferramentas > Webhook (Postback)** > **Cadastrar webhook**: cole o endereço acima, escolha a **versão 2.0** e marque os eventos de compra — no mínimo **Compra aprovada**, **Compra completa**, **Compra cancelada**, **Reembolso**, **Chargeback**. Boleto gerado e carrinho abandonado também podem ser marcados: eles são gravados, mas não marcam ninguém como comprador.
+2. Hotmart > **Ferramentas > Webhook (Postback)** > **Cadastrar webhook**: cole o endereço acima, escolha a **versão 2.0** e marque os eventos de compra — no mínimo **Compra aprovada**, **Compra completa**, **Compra cancelada**, **Reembolso**, **Chargeback** (e **Disputa**, que também desmarca). Boleto gerado e carrinho abandonado também podem ser marcados: eles são gravados, mas não marcam ninguém como comprador. Se o webhook foi cadastrado **por produto** (e não para todos), o produto de cada página precisa estar na lista: hoje o Furo de orelha humanizado (Viver de Furo) **e a Imersão GPS do Plantão Sem Medo** — sem ele, as vendas dos ingressos não chegam aqui.
 3. Na aba **Autenticação** da mesma tela, copie o **Hottok** e cadastre-o no Railway como `HOTMART_HOTTOK`. A partir daí, o aviso é aceito tanto pelo header `X-HOTMART-HOTTOK` quanto pela `?chave=` — basta **uma** das duas bater.
 
-**Como testar sem esperar uma venda de verdade** (troque o endereço e a chave):
+**Como testar sem esperar uma venda de verdade** (troque o endereço e a chave). O corpo segue o formato **real** dos avisos da Hotmart (Webhook 2.0.0, conferido nos avisos gravados em `compras.payload`): `data.product.id` é o id **numérico** do produto (`2332962`, e não o código `Y74893363S` do link), a oferta vem em `data.purchase.offer.code` e o `sck` em `data.purchase.origin.sck`:
 
 ```bash
 curl -i -X POST "https://SEU-DOMINIO/api/hotmart/venda?chave=SUA-CHAVE" \
   -H 'Content-Type: application/json' \
-  -d '{"id":"teste-1","event":"PURCHASE_APPROVED","creation_date":1758600000000,
-       "data":{"product":{"id":"Y74893363S","name":"Viver de Furo de Orelha"},
+  -d '{"id":"teste-1","event":"PURCHASE_APPROVED","version":"2.0.0","creation_date":1758600000000,
+       "data":{"product":{"id":2332962,"name":"Furo de orelha humanizado"},
                "buyer":{"name":"Maria da Silva","email":"maria@gmail.com","checkout_phone_code":"55","checkout_phone":"11912345678"},
                "purchase":{"transaction":"HP-TESTE-1","status":"APPROVED","order_date":1758600000000,"approved_date":1758600060000,
                            "price":{"value":197,"currency_value":"BRL"},"offer":{"code":"7j2nqptq"},
-                           "tracking":{"source":"facebook","source_sck":"criativo-07"}}}}'
+                           "origin":{"sck":"criativo-07"}}}}'
 ```
 
 - Resposta esperada: `200 {"ok":true}`.
 - Chave errada: `401`. Nenhuma das duas variáveis cadastradas: `503`. `GET` no endereço: `405`.
 - Mandar **o mesmo corpo de novo** não duplica nada (a chave é `transacao` + `evento`) — é o que faz o reenvio da Hotmart ser seguro.
-- Confira no painel, aba de inscrição: a compra aparece em "Compras recentes". Se o e-mail/telefone do teste não existir como inscrito, ela aparece marcada como **"sem inscrição"** — é exatamente o aviso que o cliente precisa ver.
-- Para apagar o teste do banco: `delete from public.compras where transacao = 'HP-TESTE-1';` (e, se ele tiver casado com alguém, `update public.inscricoes set comprou_em = null, compra_status = null, compra_valor = null, compra_transacao = null, compra_evento_em = null where compra_transacao = 'HP-TESTE-1';`).
+- No banco, o aviso entra com `pagina = 'viver-de-furo'` e `pagina_por = 'config'` (pela oferta `7j2nqptq`), `sck = 'criativo-07'` e `evento_em` = o `creation_date` (23/09/2025 01:00, horário de Brasília). Trocando a oferta e o produto por outros (`"offer":{"code":"outra"}`, `"id":9999999`), ele entra com `pagina` null e não casa com ninguém: é o "produto de fora".
+- Confira no painel, aba da Viver de Furo: a compra aparece em "Compras recentes". Se o e-mail/telefone do teste não existir como inscrito **dessa página**, ela aparece marcada como **"sem inscrição"** — é exatamente o aviso que o cliente precisa ver.
+- Para apagar o teste do banco: `delete from public.compras where transacao = 'HP-TESTE-1';` (e, se ele tiver casado com alguém, `update public.inscricoes set comprou_em = null, compra_status = null, compra_valor = null, compra_moeda = null, compra_transacao = null, compra_evento_em = null where compra_transacao = 'HP-TESTE-1';`). Apague sempre: um aviso com página ensina ao banco de qual página é aquele produto (passo 3 do casamento).
+
+---
+
+## 5.3 Imersão GPS (página de venda em outro site)
+
+A página de venda mora no repositório `whatsapp-atendimento-centralizado` (Express no Railway, `https://io.escolaenfermagemdevalor.com.br/igps_set_lp_26-ingresso`). O que fica **aqui** é a gravação do lead e das UTMs (`POST /api/inscricao`, com CORS para aquele site), o webhook das vendas e a aba do painel. Em `js/checkout-config.js` ela é a página `imersao-gps`: `sck` = `utm_content`, e-mail só `.com`/`.com.br`, checkout `https://pay.hotmart.com/R107667362D?off=l0r77by6&checkoutMode=10`.
+
+**Ordem de publicação** (cada passo funciona com o anterior já no ar, e não o contrário):
+
+1. **Banco:** rode de novo a seção 6 do `supabase.sql` no Supabase e confira com `select public.inscricoes_resumo(null, null, 'imersao-gps');` (o JSON esperado está na seção 1). Na primeira vez, rode também a conferência de "Avisos da Hotmart gravados antes desta versão", logo abaixo dele: o arquivo já completa os avisos antigos sozinho, e a correção à mão de lá só é preciso se a conferência mostrar aviso antigo de outro produto na Viver de Furo.
+2. **Este servidor (paginas):** publique. Confira o CORS de fora:
+
+   ```bash
+   curl -si -X OPTIONS https://lp.escolaenfermagemdevalor.com.br/api/inscricao \
+     -H 'Origin: https://io.escolaenfermagemdevalor.com.br' -H 'Access-Control-Request-Method: POST'
+   ```
+
+   Tem que voltar `204` com `access-control-allow-origin: https://io.escolaenfermagemdevalor.com.br`. Com outro `Origin`, `403`.
+3. **A página de venda (repositório `whatsapp-atendimento-centralizado`):** publique por último. Antes do passo 2, o `/api/inscricao` daqui ainda não aceita o formulário vindo de lá (o navegador bloqueia pelo CORS): a página ainda abre o checkout sozinha, com as UTMs e o `sck` (é o plano B dela quando a API falha ou demora mais de 3,5 s), mas o lead não é gravado.
+
+**Na Hotmart:**
+
+- O webhook `/api/hotmart/venda` (seção 5.2) precisa receber também o produto da Imersão GPS: se ele foi cadastrado por produto, inclua o da Imersão GPS do Plantão Sem Medo, com os mesmos eventos mínimos (aprovada, completa, cancelada, reembolso, chargeback).
+- Depois da **primeira venda**, pegue o id numérico do produto e cole em `hotmart.produtos` da `imersao-gps` no `js/checkout-config.js` (e na cópia da página de venda). É opcional — a oferta `l0r77by6` já basta —, mas com o id uma venda por outra oferta do mesmo produto (lote novo, link de afiliado) é reconhecida mesmo sem ninguém ter passado pelo formulário:
+
+  ```sql
+  select distinct produto_id, produto_nome from public.compras where oferta = 'l0r77by6';
+  ```
+
+- **Troca de lote:** troque o link (`off=` novo, mesmo `R107667362D`) nos botões da página de venda e publique **só ela**. O servidor aceita a oferta nova do botão (mesmo produto) e o aviso de venda com ela é reconhecido pelos links que as inscrições abriram. Para não depender disso, acrescente a oferta nova em `hotmart.ofertas` no `js/checkout-config.js` e publique aqui também.
+
+**Checklist do GPS** (pelo celular, como o da seção 6):
+
+- [ ] Abrir `https://io.escolaenfermagemdevalor.com.br/igps_set_lp_26-ingresso?utm_source=teste&utm_medium=cpc&utm_campaign=deploy&utm_term=publico&utm_content=criativo-07`, tocar num botão de compra: abre o pré-formulário "Falta pouco, preciosa!" (nome completo, WhatsApp com DDD com a máscara `(11) 91234-5678`, e-mail) no lugar do checkout.
+- [ ] E-mail `maria@hospital.org.br` é recusado com "Use um e-mail que termine em .com ou .com.br."; `maria@gmail.con` ganha a sugestão de correção; WhatsApp sem DDD e nome sem sobrenome são recusados.
+- [ ] Preencher com um contato seu e enviar: o checkout da Hotmart abre **com nome, e-mail e telefone preenchidos** e a URL dele tem `off=l0r77by6`, `checkoutMode=10`, as 5 UTMs (`utm_source=teste`, `utm_medium=cpc`, `utm_campaign=deploy`, `utm_term=publico`, `utm_content=criativo-07`) e **`sck=criativo-07`** (o `utm_content`, e não o `utm_term`).
+- [ ] No Supabase, `select pagina, email, utm_content, checkout_url from public.inscricoes where pagina = 'imersao-gps' order by criado_em desc limit 5;` mostra a inscrição com o `checkout_url` exato que abriu.
+- [ ] O webhook, no formato real, com a oferta do GPS (troque o endereço, a chave e o e-mail pelo que você usou no formulário):
+
+  ```bash
+  curl -i -X POST "https://lp.escolaenfermagemdevalor.com.br/api/hotmart/venda?chave=SUA-CHAVE" \
+    -H 'Content-Type: application/json' \
+    -d '{"id":"teste-gps-1","event":"PURCHASE_APPROVED","version":"2.0.0","creation_date":1790000000000,
+         "data":{"product":{"id":1,"name":"Imersão GPS do Plantão Sem Medo"},
+                 "buyer":{"name":"Maria da Silva","email":"SEU-EMAIL@gmail.com","checkout_phone_code":"55","checkout_phone":"11912345678"},
+                 "purchase":{"transaction":"HP-TESTE-GPS-1","status":"APPROVED","order_date":1790000000000,"approved_date":1790000060000,
+                             "price":{"value":5,"currency_value":"BRL"},"offer":{"code":"l0r77by6"},
+                             "origin":{"sck":"criativo-07"}}}}'
+  ```
+
+  Responde `200 {"ok":true}`; a compra é reconhecida pela oferta (o `"id":1` é de mentira — não use `0`, que é o produto dos testes da própria Hotmart) e casa com a sua inscrição do GPS pelo e-mail.
+- [ ] Painel > aba **Imersão GPS — ingressos** (rota `io.escolaenfermagemdevalor.com.br/igps_set_lp_26-ingresso`, "sck = utm_content"): 1 inscrito, 1 clique no checkout, 1 compra de inscrito; em "Inscritos por UTM e por dia", "Por conteúdo (sck)" com `criativo-07`; o bloco "Vendas na Hotmart" com 1 venda e, na tabela por `sck`, `criativo-07` = 1 venda, 1 com inscrição; "Compras recentes" com o aviso casado e "sck criativo-07". A aba da Viver de Furo não mostra essa compra.
+- [ ] Apague os testes: `delete from public.compras where transacao = 'HP-TESTE-GPS-1';`, `delete from public.inscricoes where pagina = 'imersao-gps' and email = 'SEU-EMAIL@gmail.com';`.
 
 ---
 
@@ -183,7 +349,8 @@ Faça pelo celular, de preferência abrindo o link de dentro do Instagram ou do 
 - [ ] Contato: WhatsApp sem DDD, e-mail `maria@gmial.com` e nome com número são recusados com mensagem clara; o e-mail com erro de digitação sugere a correção.
 - [ ] Abrir `https://SEU-DOMINIO/viver-de-furo-inscricao?utm_source=teste&utm_term=criativo-07`, preencher e enviar: o checkout da Hotmart abre **com nome, e-mail e telefone preenchidos** e a URL dele tem `off=7j2nqptq`, `checkoutMode=10`, `utm_source=teste`, `utm_term=criativo-07` e `sck=criativo-07`.
 - [ ] Enviar o formulário de novo com o mesmo contato: no painel, a pessoa continua **uma** inscrita e os "cliques no checkout" sobem para 2.
-- [ ] O `curl` de teste do webhook (seção 5.2) responde `200 {"ok":true}` e a compra aparece na aba de inscrição do painel.
+- [ ] O `curl` de teste do webhook (seção 5.2) responde `200 {"ok":true}` e a compra aparece na aba da Viver de Furo do painel.
+- [ ] Imersão GPS (página de venda no outro site): checklist próprio na seção 5.3.
 - [ ] Contato válido (use um número seu) → a pesquisa começa. Responda 3 ou 4 perguntas e **feche a página**.
 - [ ] No Supabase > Table Editor > `pesquisa_respostas`: a linha está lá, com nome, WhatsApp formatado `(xx) xxxxx-xxxx`, e-mail, as respostas dadas e `utm_source = teste`. Em `pesquisa_visitas`, o visitante com `comecou_em` preenchido.
 - [ ] Reabrir o link no mesmo celular: aparece "Que bom te ver de novo" e "Continuar de onde parei" volta para a pergunta certa.
@@ -270,5 +437,9 @@ Datas ficam gravadas em UTC. Para ver no horário de Brasília: `criado_em at ti
 - **Derrubar todas as sessões abertas** (perdeu um celular logado, por exemplo): troque `PAINEL_SESSAO_SEGREDO`.
 - **Mudar uma pergunta:** veja "Mudar uma pergunta" no `README.md` (é só `js/pesquisa-config.js` + subir a `VERSAO`).
 - **Trocar link de grupo, texto ou rota de uma página de obrigado:** só `js/obrigado-config.js` (seção 5.1).
+- **Trocar o lote da Imersão GPS:** o link novo vai nos botões da página de venda (outro repositório); aqui, opcionalmente, a oferta nova em `hotmart.ofertas` (seção 5.3).
+- **Mudou `js/checkout-config.js` ou `js/lead-rules.js`:** a página de venda da Imersão GPS leva uma cópia dos dois — copie para lá e publique as duas.
+- **Testar a página de venda num preview ou na sua máquina:** cadastre o endereço dela em `INSCRICAO_ORIGENS` do servidor que vai receber o formulário (passo 4); sem isso o navegador bloqueia o envio pelo CORS. O endereço da API fica no `data-api` do formulário da página (`#pf-form`, hoje `https://lp.escolaenfermagemdevalor.com.br/api/inscricao`): para testar contra um servidor daqui na sua máquina, troque-o só na cópia local. Preview apontando para o servidor de produção grava no banco de verdade: apague os testes depois.
+- **Formulário da Imersão GPS com erro de CORS no console do navegador:** confira se a página está sendo aberta pelo endereço oficial (`https://io.escolaenfermagemdevalor.com.br`, sem `www`) ou por um endereço cadastrado em `INSCRICAO_ORIGENS`, e se o servidor daqui já é a versão com o CORS (o `curl -X OPTIONS` da seção 5.3 responde `204`).
 - **A pesquisa responde erro ao gravar / painel com erro 502:** confira se o `supabase.sql` foi rodado no projeto certo e se a chave é a service_role. Se o log do Railway falar em função não encontrada logo depois de rodar o SQL, rode no SQL Editor `notify pgrst, 'reload schema';`.
 - **Painel responde 503:** falta alguma das variáveis `SUPABASE_*` ou `PAINEL_*` (o log do deploy lista qual, com `Aviso:`).

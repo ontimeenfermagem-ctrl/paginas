@@ -68,7 +68,8 @@ const RESUMO = {
   trafego: []
 };
 
-// O que inscricoes_resumo devolve, no formato do contrato.
+// O que inscricoes_resumo devolve, no formato do contrato (supabase.sql, seção 6): por página, o
+// lado dos inscritos (UTMs de quem preencheu o formulário) e o lado da Hotmart (vendas, pelo sck).
 const RESUMO_INSCRICOES = {
   paginas: [
     {
@@ -79,8 +80,16 @@ const RESUMO_INSCRICOES = {
       receita: 985.0,
       taxa_compra: 12.5,
       por_origem: [{ utm_source: "facebook", inscritos: 30, compras: 4 }],
+      por_midia: [{ utm_medium: "cpc", inscritos: 30, compras: 4 }],
       por_campanha: [{ utm_campaign: "viver-de-furo-set", inscritos: 30, compras: 4 }],
+      por_conteudo: [{ utm_content: "anuncio-b", inscritos: 18, compras: 3 }],
       por_termo: [{ utm_term: "criativo-07", inscritos: 18, compras: 3 }],
+      vendas: 6,
+      vendas_receita: 1182.0,
+      vendas_por_sck: [
+        { sck: "criativo-07", vendas: 3, receita: 591.0, casadas: 3 },
+        { sck: "(sem sck)", vendas: 3, receita: 591.0, casadas: 2 }
+      ],
       por_dia: [{ dia: "2026-09-21", inscritos: 40, compras: 5 }]
     }
   ],
@@ -88,12 +97,56 @@ const RESUMO_INSCRICOES = {
   compras_recentes: [
     {
       recebido_em: "2026-09-21T14:00:00Z",
+      // creation_date do aviso: a hora do evento, que decide a ordem quando os avisos chegam fora dela.
+      evento_em: "2026-09-21T13:59:58Z",
       evento: "PURCHASE_APPROVED",
       status: "APPROVED",
       comprador_nome: "Maria da Silva",
       comprador_email: "maria@gmail.com",
       valor: 197,
       pagina: "viver-de-furo",
+      sck: "criativo-07",
+      casou: true
+    }
+  ]
+};
+
+// O mesmo contrato, só da Imersão GPS (p_pagina = 'imersao-gps'): o sck dela é o utm_content.
+const RESUMO_GPS = {
+  paginas: [
+    {
+      pagina: "imersao-gps",
+      inscritos: 120,
+      cliques: 150,
+      compras: 30,
+      receita: 150.0,
+      taxa_compra: 25.0,
+      por_origem: [{ utm_source: "facebook", inscritos: 100, compras: 25 }],
+      por_midia: [{ utm_medium: "cpc", inscritos: 90, compras: 22 }, { utm_medium: "(sem utm)", inscritos: 30, compras: 8 }],
+      por_campanha: [{ utm_campaign: "gps-set", inscritos: 100, compras: 25 }],
+      por_conteudo: [{ utm_content: "criativo-gps-03", inscritos: 70, compras: 20 }],
+      por_termo: [{ utm_term: "publico-quente", inscritos: 60, compras: 15 }],
+      vendas: 34,
+      vendas_receita: 170.0,
+      vendas_por_sck: [
+        { sck: "criativo-gps-03", vendas: 20, receita: 100.0, casadas: 20 },
+        { sck: "(sem sck)", vendas: 14, receita: 70.0, casadas: 10 }
+      ],
+      por_dia: [{ dia: "2026-09-21", inscritos: 120, compras: 30 }]
+    }
+  ],
+  compras_sem_inscricao: 4,
+  compras_recentes: [
+    {
+      recebido_em: "2026-09-21T15:00:00Z",
+      evento_em: "2026-09-21T14:59:57Z",
+      evento: "PURCHASE_APPROVED",
+      status: "APPROVED",
+      comprador_nome: "Ana Souza",
+      comprador_email: "ana@gmail.com",
+      valor: 5,
+      pagina: "imersao-gps",
+      sck: "criativo-gps-03",
       casou: true
     }
   ]
@@ -512,10 +565,15 @@ test("filtros inválidos → 422 invalid_filters, sem ir ao banco", async () => 
     "/api/painel/paginas?ate=2026-13-45",
     "/api/painel/inscricoes?desde=ontem",
     "/api/painel/inscricoes?pagina=nao-existe",
+    // O id é exato: nem maiúsculas, nem a rota, nem uma chave herdada do Object.
+    "/api/painel/inscricoes?pagina=IMERSAO-GPS",
+    "/api/painel/inscricoes?pagina=igps_set_lp_26-ingresso",
+    "/api/painel/inscricoes?pagina=toString",
     "/api/painel/inscricoes?limite=0",
     "/api/painel/inscricoes?offset=-2",
     "/api/painel/exportar-inscricoes.csv?desde=x",
-    "/api/painel/exportar-inscricoes.csv?pagina=outra"
+    "/api/painel/exportar-inscricoes.csv?pagina=outra",
+    "/api/painel/exportar-inscricoes.csv?pagina=__proto__"
   ]) {
     const response = await get(rota);
     assert.equal(response.status, 422, rota);
@@ -1138,7 +1196,80 @@ test("inscrições: o total vem do Content-Range (e não do que coube na página
   assert.equal(corpo.itens.length, 2);
 });
 
-test("CSV de inscrições: cabeçalhos HTTP, BOM, colunas na ordem do contrato e sck = utm_term", async () => {
+test("inscrições: a aba da Imersão GPS (?pagina=imersao-gps) filtra o SQL e a lista, e o resumo chega inteiro", async () => {
+  const gps = linhaInscricao(1, {
+    pagina: "imersao-gps",
+    checkout_url: "https://pay.hotmart.com/R107667362D?off=l0r77by6&checkoutMode=10&utm_content=criativo-gps-03&sck=criativo-gps-03",
+    utm_campaign: "gps-set",
+    utm_term: "publico-quente",
+    utm_content: "criativo-gps-03",
+    page_url: "https://io.escolaenfermagemdevalor.com.br/igps_set_lp_26-ingresso"
+  });
+  const backend = backendInscricoes([gps], { rpc: { inscricoes_resumo: RESUMO_GPS } });
+  const { get } = await logado({ backend });
+
+  const response = await get("/api/painel/inscricoes?pagina=imersao-gps&desde=2026-09-01T03:00:00Z");
+  assert.equal(response.status, 200);
+  const corpo = await response.json();
+
+  const rpc = backend.chamadas.find((chamada) => chamada.caminho === "/rest/v1/rpc/inscricoes_resumo");
+  assert.deepEqual(rpc.body, { p_desde: "2026-09-01T03:00:00.000Z", p_ate: null, p_pagina: "imersao-gps" });
+  const lista = backend.chamadas.find((chamada) => chamada.caminho === "/rest/v1/inscricoes");
+  assert.equal(lista.params.get("pagina"), "eq.imersao-gps");
+  assert.deepEqual(lista.params.getAll("criado_em"), ["gte.2026-09-01T03:00:00.000Z"]);
+
+  // O servidor repassa o resumo do SQL sem tirar nada: é ele que desenha a aba.
+  assert.deepEqual(corpo.resumo, RESUMO_GPS);
+  const [pagina] = corpo.resumo.paginas;
+  assert.equal(pagina.pagina, "imersao-gps");
+  assert.equal(pagina.vendas, 34);
+  assert.equal(pagina.vendas_receita, 170);
+  assert.deepEqual(pagina.vendas_por_sck[0], { sck: "criativo-gps-03", vendas: 20, receita: 100, casadas: 20 });
+  assert.deepEqual(pagina.por_conteudo[0], { utm_content: "criativo-gps-03", inscritos: 70, compras: 20 });
+  assert.equal(pagina.por_midia.length, 2);
+  assert.equal(corpo.resumo.compras_recentes[0].sck, "criativo-gps-03");
+  assert.equal(corpo.itens[0].pagina, "imersao-gps");
+  assert.equal(corpo.itens[0].utm_content, "criativo-gps-03");
+});
+
+test("inscrições: o resumo do SQL chega inteiro — vendas_por_sck até 500 linhas e compras_recentes com evento_em", async () => {
+  const [base] = RESUMO_GPS.paginas;
+  const vendasPorSck = Array.from({ length: 500 }, (_, i) => ({ sck: `criativo-${String(i + 1).padStart(3, "0")}`, vendas: 500 - i, receita: (500 - i) * 5, casadas: i % 2 }));
+  const recentes = [
+    { ...RESUMO_GPS.compras_recentes[0], evento_em: "2026-09-21T14:59:57Z" },
+    // Aviso da versão anterior: sem creation_date gravado, evento_em vem null.
+    { ...RESUMO_GPS.compras_recentes[0], recebido_em: "2026-09-12T10:00:00Z", evento_em: null, sck: null }
+  ];
+  const resumo = { ...RESUMO_GPS, paginas: [{ ...base, vendas_por_sck: vendasPorSck }], compras_recentes: recentes };
+  const backend = backendInscricoes([], { rpc: { inscricoes_resumo: resumo } });
+  const { get } = await logado({ backend });
+
+  const corpo = await (await get("/api/painel/inscricoes?pagina=imersao-gps")).json();
+  assert.equal(corpo.ok, true);
+  assert.deepEqual(corpo.resumo, resumo, "o servidor não corta nem reordena nada do resumo");
+  assert.equal(corpo.resumo.paginas[0].vendas_por_sck.length, 500);
+  assert.equal(corpo.resumo.paginas[0].vendas_por_sck.at(-1).sck, "criativo-500");
+  assert.deepEqual(
+    corpo.resumo.compras_recentes.map((compra) => compra.evento_em),
+    ["2026-09-21T14:59:57Z", null]
+  );
+});
+
+test("inscrições: as duas páginas do config são filtros válidos (a aba de cada uma)", async () => {
+  for (const pagina of ["viver-de-furo", "imersao-gps"]) {
+    const backend = backendInscricoes([]);
+    const { get } = await logado({ backend });
+    assert.equal((await get(`/api/painel/inscricoes?pagina=${pagina}`)).status, 200, pagina);
+    assert.equal((await get(`/api/painel/exportar-inscricoes.csv?pagina=${pagina}`)).status, 200, pagina);
+    const rpc = backend.chamadas.find((chamada) => chamada.caminho === "/rest/v1/rpc/inscricoes_resumo");
+    assert.equal(rpc.body.p_pagina, pagina);
+    const consultas = backend.chamadas.filter((chamada) => chamada.caminho === "/rest/v1/inscricoes");
+    assert.equal(consultas.length, 2, pagina);
+    for (const consulta of consultas) assert.equal(consulta.params.get("pagina"), `eq.${pagina}`, pagina);
+  }
+});
+
+test("CSV de inscrições: cabeçalhos HTTP, BOM, colunas na ordem do contrato e o sck do link gravado", async () => {
   const agora = Date.parse("2026-09-22T01:30:00Z"); // 21/09 ainda, no horário de Brasília
   const comprou = linhaInscricao(1, {
     comprou_em: "2026-09-21T15:00:00Z",
@@ -1200,9 +1331,132 @@ test("CSV de inscrições: cabeçalhos HTTP, BOM, colunas na ordem do contrato e
   assert.equal(coluna("compra_status"), "APPROVED");
   assert.equal(coluna("compra_valor"), "197,00", "vírgula decimal, para o Excel em pt-BR");
   assert.equal(coluna("compra_transacao"), "HP1234567890");
+  // O link gravado (linhaInscricao) leva sck=criativo-07, que na Viver de Furo é o próprio utm_term.
   assert.equal(coluna("sck"), "criativo-07");
-  assert.equal(coluna("sck"), coluna("utm_term"), "o sck é o utm_term");
+  assert.equal(coluna("sck"), coluna("utm_term"), "na Viver de Furo o sck é o utm_term");
   assert.equal(coluna("fbclid"), "");
+});
+
+test("CSV de inscrições: sem link gravado, a coluna sck é a UTM que cada página manda para a Hotmart (GPS = utm_content)", async () => {
+  const semLink = (n, extra) => linhaInscricao(n, { checkout_url: null, ...extra });
+  const linhas = [
+    semLink(1, { pagina: "viver-de-furo", utm_term: "termo-viver", utm_content: "conteudo-viver" }),
+    semLink(2, { pagina: "imersao-gps", utm_term: "termo-gps", utm_content: "criativo-gps-03" }),
+    semLink(3, { pagina: "imersao-gps", utm_term: "termo-gps", utm_content: null }),
+    // Página que saiu do config (ou linha sem página): cai no padrão, o utm_term.
+    semLink(4, { pagina: "pagina-antiga", utm_term: "termo-antigo", utm_content: "conteudo-antigo" }),
+    semLink(5, { pagina: null, utm_term: "termo-nulo", utm_content: "conteudo-nulo" }),
+    // Link vazio ou sem a coluna (linha de antes do checkout_url) é o mesmo que sem link.
+    semLink(6, { pagina: "imersao-gps", utm_content: "conteudo-link-vazio", checkout_url: "" }),
+    (({ checkout_url, ...resto }) => resto)(linhaInscricao(7, { pagina: "imersao-gps", utm_content: "conteudo-sem-coluna" }))
+  ];
+  assert.equal(Object.hasOwn(linhas[6], "checkout_url"), false);
+  const { get } = await logado({ backend: backendInscricoes(linhas) });
+  const [cabecalho, ...corpo] = lerCsv(await (await get("/api/painel/exportar-inscricoes.csv")).text());
+  const sck = corpo.map((linha) => linha[cabecalho.indexOf("sck")]);
+  assert.deepEqual(sck, ["termo-viver", "criativo-gps-03", "", "termo-antigo", "termo-nulo", "conteudo-link-vazio", "conteudo-sem-coluna"]);
+  assert.deepEqual(
+    corpo.map((linha) => linha[cabecalho.indexOf("pagina")]),
+    ["viver-de-furo", "imersao-gps", "imersao-gps", "pagina-antiga", "", "imersao-gps", "imersao-gps"]
+  );
+
+  // Filtrado pela aba do GPS: a consulta leva o filtro.
+  const backend = backendInscricoes([linhas[1]]);
+  const segundo = await logado({ backend });
+  const soGps = lerCsv(await (await segundo.get("/api/painel/exportar-inscricoes.csv?pagina=imersao-gps")).text());
+  assert.equal(soGps.length, 2);
+  assert.equal(soGps[1][soGps[0].indexOf("sck")], "criativo-gps-03");
+  assert.equal(backend.chamadas.find((chamada) => chamada.caminho === "/rest/v1/inscricoes").params.get("pagina"), "eq.imersao-gps");
+});
+
+test("CSV de inscrições: com link gravado, a coluna sck é o sck que foi de fato no link (e não a UTM do 1º toque)", async () => {
+  const GPS = "https://pay.hotmart.com/R107667362D?off=l0r77by6&checkoutMode=10";
+  const VIVER = "https://pay.hotmart.com/Y74893363S?off=7j2nqptq&checkoutMode=10";
+  const linhas = [
+    // Voltou pelo lembrete do WhatsApp: a inscrição guarda a UTM do 1º toque, o link é o do 2º envio.
+    linhaInscricao(1, { pagina: "imersao-gps", utm_content: "criativo-07", checkout_url: `${GPS}&utm_content=lembrete-wpp&sck=lembrete-wpp` }),
+    linhaInscricao(2, { pagina: "viver-de-furo", utm_term: "termo-viver", checkout_url: `${VIVER}&utm_term=outro-termo&sck=outro-termo` }),
+    // Página que saiu do config: o link ainda diz o que foi.
+    linhaInscricao(3, { pagina: "pagina-antiga", utm_term: "termo-antigo", checkout_url: `${VIVER}&sck=do-link-antigo` }),
+    // Codificado no link (é assim que montarUrlCheckout grava): sai decodificado.
+    linhaInscricao(4, { pagina: "imersao-gps", utm_content: "x", checkout_url: `${GPS}&sck=criativo%20gps%2B%C3%A1&name=Ana` }),
+    // O link sem sck (ou com sck=) não apaga a UTM da página: vale a UTM, como sem link.
+    linhaInscricao(5, { pagina: "imersao-gps", utm_content: "conteudo-sem-sck", checkout_url: GPS }),
+    linhaInscricao(6, { pagina: "viver-de-furo", utm_term: "termo-sck-vazio", checkout_url: `${VIVER}&sck=` }),
+    // Sem sck no link e sem UTM: vazio, não "null".
+    linhaInscricao(7, { pagina: "imersao-gps", utm_content: null, checkout_url: GPS }),
+    // Um sck de link que parece fórmula é neutralizado como qualquer outra célula.
+    linhaInscricao(8, { pagina: "imersao-gps", utm_content: "x", checkout_url: `${GPS}&sck=%3DHYPERLINK(%22http%3A%2F%2Fmal.com%22)` })
+  ];
+  const { get } = await logado({ backend: backendInscricoes(linhas) });
+  const [cabecalho, ...corpo] = lerCsv(await (await get("/api/painel/exportar-inscricoes.csv")).text());
+  const coluna = (nome) => corpo.map((linha) => linha[cabecalho.indexOf(nome)]);
+  assert.deepEqual(coluna("sck"), [
+    "lembrete-wpp",
+    "outro-termo",
+    "do-link-antigo",
+    "criativo gps+á",
+    "conteudo-sem-sck",
+    "termo-sck-vazio",
+    "",
+    `'=HYPERLINK("http://mal.com")`
+  ]);
+  // As colunas de UTM continuam dizendo o 1º toque: só a sck muda de régua.
+  assert.equal(coluna("utm_content")[0], "criativo-07");
+  assert.equal(coluna("utm_term")[1], "termo-viver");
+});
+
+test("CSV de inscrições: link gravado torto não quebra a exportação e cai na UTM da página", async () => {
+  const tortos = [
+    "não é url",
+    "pay.hotmart.com/R107667362D?sck=sem-esquema",
+    "/R107667362D?off=l0r77by6&sck=relativo",
+    "https://[::1?sck=host-torto",
+    "http://",
+    "   ",
+    // A coluna é text: tipo estranho só chega por dublê, mas também não pode derrubar nada.
+    42,
+    true,
+    { sck: "objeto" }
+  ];
+  const linhas = tortos.map((checkout_url, i) =>
+    linhaInscricao(i + 1, { pagina: "imersao-gps", utm_term: "termo", utm_content: `conteudo-${i + 1}`, checkout_url })
+  );
+  const { get } = await logado({ backend: backendInscricoes(linhas) });
+  const response = await get("/api/painel/exportar-inscricoes.csv");
+  assert.equal(response.status, 200);
+  const [cabecalho, ...corpo] = lerCsv(await response.text());
+  assert.equal(corpo.length, tortos.length, "nenhuma linha some por causa do link");
+  const sck = corpo.map((linha) => linha[cabecalho.indexOf("sck")]);
+  assert.deepEqual(
+    sck,
+    tortos.map((_, i) => `conteudo-${i + 1}`),
+    "link que não é URL absoluta não conta: vale o utm_content do GPS"
+  );
+});
+
+test("COLUNAS_CSV_INSCRICOES: o valor da coluna sck — o do link gravado, senão a UTM da página, sem cair em chave herdada", () => {
+  const sck = COLUNAS_CSV_INSCRICOES.find((coluna) => coluna.cabecalho === "sck").valor;
+  const utms = { utm_term: "t", utm_content: "c" };
+  const link = "https://pay.hotmart.com/R107667362D?off=l0r77by6&sck=do-link";
+
+  // Com link gravado com sck: vale o link, em qualquer página (inclusive a que saiu do config).
+  for (const pagina of ["viver-de-furo", "imersao-gps", null, "outra", "__proto__"]) {
+    assert.equal(sck({ pagina, ...utms, checkout_url: link }), "do-link", String(pagina));
+  }
+  // O primeiro sck do link, se vierem dois (montarUrlCheckout nunca grava dois).
+  assert.equal(sck({ pagina: "imersao-gps", ...utms, checkout_url: `${link}&sck=segundo` }), "do-link");
+
+  // Sem link, link sem sck, com sck= ou torto: a UTM da página.
+  for (const checkout_url of [undefined, null, "", "https://pay.hotmart.com/R107667362D?off=l0r77by6", `${link.replace("do-link", "")}`, "torto?sck=x", 42, {}]) {
+    assert.equal(sck({ pagina: "viver-de-furo", ...utms, checkout_url }), "t", String(checkout_url));
+    assert.equal(sck({ pagina: "imersao-gps", ...utms, checkout_url }), "c", String(checkout_url));
+  }
+  assert.equal(sck({ pagina: "imersao-gps", utm_term: "t", utm_content: null }), null);
+  for (const pagina of [null, undefined, "", "outra", "toString", "__proto__", "IMERSAO-GPS"]) {
+    assert.equal(sck({ pagina, ...utms }), "t", String(pagina));
+  }
+  assert.ok(Object.isFrozen(COLUNAS_CSV_INSCRICOES));
 });
 
 test("CSV de inscrições: fórmula neutralizada, filtros na consulta e uma página a mais quando enche", async () => {

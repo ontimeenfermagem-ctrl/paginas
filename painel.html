@@ -11,14 +11,14 @@
     <link rel="icon" href="/img/favicon-32.png" sizes="32x32" type="image/png">
     <link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
     <link rel="preload" href="/fonts/parkinsans-latin.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="/css/painel.css?v=3">
+    <link rel="stylesheet" href="/css/painel.css?v=4">
     <!-- A ordem importa: o painel lê perguntas, alternativas e perfis de EVPesquisa, e as páginas
          de obrigado de EVObrigado (que depende de EVPesquisa). Nenhuma lista de perguntas nem de
          páginas mora no painel — mudou no config, mudou aqui. -->
     <script src="/js/pesquisa-config.js?v=3" defer></script>
     <script src="/js/obrigado-config.js?v=1" defer></script>
-    <script src="/js/checkout-config.js?v=1" defer></script>
-    <script src="/js/painel.js?v=4" defer></script>
+    <script src="/js/checkout-config.js?v=2" defer></script>
+    <script src="/js/painel.js?v=5" defer></script>
   </head>
   <body>
     <noscript>
@@ -321,16 +321,17 @@
         </div>
 
         <!-- ============================================================ Inscrições com checkout -->
-        <!-- Rotas de js/checkout-config.js (hoje /viver-de-furo-inscricao). Só o período da barra
-             vale aqui; o filtro de página fica dentro da aba, quando houver mais de uma. -->
-        <div class="pagina-conteudo" id="pagina-inscricoes-painel" role="tabpanel" aria-labelledby="pagina-inscricoes" data-pagina-conteudo="inscricoes" hidden>
+        <!-- As páginas de js/checkout-config.js (Viver de Furo, Imersão GPS...). Cada uma tem a SUA
+             aba na faixa, e todas desenham neste mesmo bloco: o JS pede ?pagina=<id> da aba aberta
+             e troca o aria-labelledby para ela. Só o período da barra vale aqui. -->
+        <div class="pagina-conteudo" id="pagina-inscricoes-painel" role="tabpanel" data-pagina-conteudo="inscricoes" hidden>
           <p class="status" data-inscricoes-status role="status" aria-live="polite"></p>
           <section class="secao secao-inscricoes" id="sec-inscricoes" aria-labelledby="inscricoes-titulo" data-inscricoes-secao>
             <div class="secao-cabeca secao-cabeca-acao">
               <div>
                 <p class="eyebrow" data-inscricoes-periodo>Desde o começo</p>
                 <h2 id="inscricoes-titulo">Inscrições e vendas</h2>
-                <p class="secao-sub">Quem deixou o contato na página de inscrição, quantas vezes o checkout foi aberto e quem comprou. A venda chega pelo aviso da Hotmart e casa com a inscrição pelo e-mail ou pelos últimos dígitos do telefone.</p>
+                <p class="secao-sub">Do lado do formulário: quem deixou o contato, quantas vezes abriu o checkout e quem comprou, com as UTMs de cada um. Do lado da Hotmart: todas as vendas do produto desta página e de onde veio cada uma (o sck), inclusive de quem comprou sem passar pelo formulário. A venda casa com a inscrição pelo e-mail ou pelos últimos 8 dígitos do telefone.</p>
               </div>
               <a class="botao botao-leve" data-inscricoes-csv href="/api/painel/exportar-inscricoes.csv" download>
                 <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>

@@ -66,20 +66,59 @@
    * As funções da pesquisa são ligadas mais abaixo, quando existem.
    */
   // `filtrar` = o período da barra mudou (vale para todas as páginas).
-  // O nome e a rota da aba de inscrições vêm do config, nunca escritos à mão: com uma página só,
-  // a aba tem o nome dela ("Viver de Furo — inscrição"); com mais de uma, vira "Inscrições".
+  //
+  // Páginas de inscrição (js/checkout-config.js): UMA ABA POR PÁGINA, com o nome e a rota de lá,
+  // nunca escritos à mão. Todas usam o MESMO bloco do painel.html (`conteudo: "inscricoes"`) e o
+  // mesmo estado `ins`, que é limpo e recarregado quando se passa de uma página para outra. O id da
+  // aba é "inscricoes-<id da página>"; o antigo ?pagina=inscricoes (de quando havia uma aba só) abre
+  // a primeira, para link salvo não cair na pesquisa.
   const PAGINAS_CHECKOUT = CHK ? Array.from(CHK.LISTA) : [];
-  const ABA_INSCRICOES =
-    PAGINAS_CHECKOUT.length === 1
-      ? { nome: PAGINAS_CHECKOUT[0].nome, rota: PAGINAS_CHECKOUT[0].rota }
-      : { nome: "Inscrições", rota: PAGINAS_CHECKOUT.length ? `${PAGINAS_CHECKOUT.length} páginas` : "—" };
+  const ABA_INSCRICOES_ANTIGA = "inscricoes";
+
+  /** O host de uma página que mora em outro site ("io.escola..."); "" para as deste servidor. */
+  function hostDaInscricao(pagina) {
+    return pagina && pagina.origem ? String(pagina.origem).replace(/^https?:\/\//i, "").replace(/\/+$/, "") : "";
+  }
+
+  /** A rota como a equipe digita: página de outro site leva o host junto (io.escola.../rota). */
+  function rotaDaInscricao(pagina) {
+    if (!pagina) return "—";
+    return `${hostDaInscricao(pagina)}${pagina.rota}`;
+  }
+
+  /** A mesma rota em HTML, com um ponto de quebra entre o host e o caminho (celular). */
+  function rotaHtml(host, rota) {
+    return host ? `${escapeHtml(host)}<wbr>${escapeHtml(rota)}` : escapeHtml(rota);
+  }
 
   const PAGINAS = [
-    { id: "pesquisa-icp", nome: "Pesquisa ICP", rota: "/pesquisa-icp", entrar: null, atualizar: null, sair: null, filtrar: null },
-    { id: "obrigado", nome: "Páginas de obrigado", rota: "/obrigado-*", entrar: null, atualizar: null, sair: null, filtrar: null },
-    { id: "inscricoes", nome: ABA_INSCRICOES.nome, rota: ABA_INSCRICOES.rota, entrar: null, atualizar: null, sair: null, filtrar: null }
+    { id: "pesquisa-icp", conteudo: "pesquisa-icp", nome: "Pesquisa ICP", rota: "/pesquisa-icp", entrar: null, atualizar: null, sair: null, filtrar: null },
+    { id: "obrigado", conteudo: "obrigado", nome: "Páginas de obrigado", rota: "/obrigado-*", entrar: null, atualizar: null, sair: null, filtrar: null },
+    ...(PAGINAS_CHECKOUT.length
+      ? PAGINAS_CHECKOUT.map((pagina) => ({
+          id: `inscricoes-${pagina.id}`,
+          conteudo: "inscricoes",
+          nome: pagina.nome,
+          rota: pagina.rota,
+          host: hostDaInscricao(pagina),
+          inscricao: pagina,
+          entrar: null,
+          atualizar: null,
+          sair: null,
+          filtrar: null
+        }))
+      : // Sem o config, a aba continua lá para dizer o que falta (ver carregarInscricoes).
+        [{ id: ABA_INSCRICOES_ANTIGA, conteudo: "inscricoes", nome: "Inscrições", rota: "—", inscricao: null, entrar: null, atualizar: null, sair: null, filtrar: null }])
   ];
+  const ABAS_INSCRICAO = PAGINAS.filter((pagina) => pagina.conteudo === "inscricoes");
   let paginaAtual = PAGINAS[0];
+
+  /** A aba de um id da URL: o id exato, ou o apelido antigo da aba única de inscrições. */
+  function paginaDoId(id) {
+    const exata = PAGINAS.find((item) => item.id === id);
+    if (exata) return exata;
+    return id === ABA_INSCRICOES_ANTIGA ? ABAS_INSCRICAO[0] || null : null;
+  }
 
   function pintarPaginas() {
     // Perfil, busca e situação só existem na pesquisa: nas outras abas a barra fica só com o período.
@@ -87,16 +126,19 @@
     if (filtros) filtros.dataset.paginaAtiva = paginaAtual.id;
     const faixa = $("[data-paginas]");
     if (!faixa) return;
+    // aria-controls aponta para o bloco de conteúdo (as abas de inscrição dividem um só), e o bloco
+    // visível passa a ser rotulado pela aba aberta.
     faixa.innerHTML = PAGINAS.map((pagina) => {
       const ativa = pagina === paginaAtual;
       return `<button type="button" class="pagina" role="tab" id="pagina-${escapeHtml(pagina.id)}" aria-controls="pagina-${escapeHtml(
-        pagina.id
+        pagina.conteudo
       )}-painel" aria-selected="${ativa}" tabindex="${ativa ? 0 : -1}" data-pagina="${escapeHtml(pagina.id)}"><span class="pagina-nome">${escapeHtml(
         pagina.nome
-      )}</span><span class="pagina-rota">rota ${escapeHtml(pagina.rota)}</span></button>`;
+      )}</span><span class="pagina-rota">rota ${rotaHtml(pagina.host, pagina.rota)}</span></button>`;
     }).join("");
     $$("[data-pagina-conteudo]").forEach((bloco) => {
-      bloco.hidden = bloco.dataset.paginaConteudo !== paginaAtual.id;
+      bloco.hidden = bloco.dataset.paginaConteudo !== paginaAtual.conteudo;
+      if (!bloco.hidden) bloco.setAttribute("aria-labelledby", `pagina-${paginaAtual.id}`);
     });
     // No celular a faixa rola de lado: a aba aberta precisa estar visível nela.
     mostrarAbaAtiva(faixa);
@@ -580,7 +622,7 @@
 
   function lerUrl() {
     const params = new URLSearchParams(window.location.search);
-    const pagina = PAGINAS.find((item) => item.id === params.get("pagina"));
+    const pagina = paginaDoId(params.get("pagina"));
     if (pagina) paginaAtual = pagina;
     const periodo = params.get("periodo");
     if (periodo && Object.prototype.hasOwnProperty.call(PERIODOS, periodo)) state.periodo = periodo;
@@ -774,10 +816,18 @@
     pintarTrafego();
   }
 
-  // A barra é de todas as páginas: mostra a hora dos números da página aberta.
+  // A barra é de todas as páginas: mostra a hora dos números da página aberta. As abas de inscrição
+  // dividem o estado `ins`: a hora só vale se os números na memória forem da aba aberta.
   function pintarAtualizado() {
     const alvo = $("[data-atualizado]");
-    const gerado = paginaAtual.id === "obrigado" ? obr.geradoEm : paginaAtual.id === "inscricoes" ? ins.geradoEm : state.geradoEm;
+    const gerado =
+      paginaAtual.conteudo === "obrigado"
+        ? obr.geradoEm
+        : paginaAtual.conteudo === "inscricoes"
+          ? ins.pagina === paginaAtual.inscricao
+            ? ins.geradoEm
+            : ""
+          : state.geradoEm;
     alvo.textContent = gerado ? `Atualizado às ${hora(gerado)}` : "—";
   }
 
@@ -2914,12 +2964,27 @@
   /* ================================================================== */
 
   /*
-   * A aba das páginas de inscrição (js/checkout-config.js). Números de /api/painel/inscricoes
-   * (SQL inscricoes_resumo, no período da barra): inscritos → cliques no checkout → compras, com
-   * receita, origem, campanha, termo (o `sck`, que diz qual criativo vendeu), dia, as compras
-   * recentes vindas do webhook da Hotmart e a lista de inscritos com WhatsApp.
+   * Uma aba por página de inscrição (js/checkout-config.js), todas no mesmo bloco do HTML e no
+   * mesmo estado `ins`. `ins.pagina` diz de QUAL página são os números na memória, e trocar de
+   * página limpa tudo antes de pedir a outra: o número de uma nunca aparece na aba da outra, nem
+   * por um instante, nem por resposta atrasada (seq.inscricoes).
+   *
+   * Números de /api/painel/inscricoes?pagina=<id> (SQL inscricoes_resumo, no período da barra), em
+   * dois lados que a tela mantém separados, porque respondem perguntas diferentes:
+   *
+   *   . o do FORMULÁRIO: inscritos → cliques no checkout → compras de inscritos (inscrição que um
+   *     aviso da Hotmart casou pelo e-mail ou pelo telefone), com a receita delas, as divisões por
+   *     UTM (origem, mídia, campanha, conteúdo, termo) e por dia. Uma dessas UTMs é o `sck` da
+   *     página (CHK.sckDaPagina: utm_term na Viver de Furo, utm_content na Imersão GPS) e vem
+   *     marcada, porque é o valor que volta no relatório de vendas da Hotmart.
+   *   . o da HOTMART: as vendas que ela avisou para o produto da página (vendas, vendas_receita,
+   *     vendas_por_sck), inclusive de quem comprou sem passar pelo formulário. É o "de onde veio
+   *     cada venda": pelo sck que a Hotmart devolveu, com quantas casaram com uma inscrição.
+   *
+   * Servidor com o SQL antigo (sem por_midia, por_conteudo, vendas...): o que falta some da tela e
+   * o resto funciona igual.
    */
-  const ins = { resumo: null, itens: [], total: 0, erro: 0, pronto: false, carregando: false, geradoEm: "", diasTodos: new Set() };
+  const ins = { pagina: null, resumo: null, itens: [], total: 0, erro: 0, pronto: false, carregando: false, geradoEm: "", diasTodos: new Set() };
   const LIMITE_INSCRITOS = 50;
 
   const MOEDA = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
@@ -2928,7 +2993,13 @@
     return MOEDA.format(num(valor));
   }
 
+  /** A UTM que vira `sck` na página. Config antigo, sem sckDaPagina: utm_term, como era. */
+  function sckDe(pagina) {
+    return CHK && typeof CHK.sckDaPagina === "function" ? CHK.sckDaPagina(pagina) : "utm_term";
+  }
+
   function limparInscricoes() {
+    ins.pagina = null;
     ins.resumo = null;
     ins.itens = [];
     ins.total = 0;
@@ -2940,15 +3011,28 @@
     seq.inscricoes++;
   }
 
+  /**
+   * Entrar, atualizar ou mudar o período numa aba de inscrição. Se a memória é de OUTRA página,
+   * ela é limpa primeiro (esqueleto em vez do número da outra) e o que estava em voo é descartado.
+   */
+  function abrirInscricao(pagina) {
+    if (ins.pagina !== pagina) {
+      limparInscricoes();
+      ins.pagina = pagina;
+    }
+    carregarInscricoes();
+  }
+
   function parametrosInscricoes() {
     const params = new URLSearchParams();
+    if (ins.pagina) params.set("pagina", ins.pagina.id);
     const { desde, ate } = intervalo();
     if (desde) params.set("desde", desde);
     if (ate) params.set("ate", ate);
     return params;
   }
 
-  /** O CSV de inscrições sai com o MESMO período da tela. */
+  /** O CSV de inscrições sai com a MESMA página e o MESMO período da tela. */
   function atualizarCsvInscricoes() {
     const alvo = $("[data-inscricoes-csv]");
     if (!alvo) return;
@@ -2960,13 +3044,14 @@
     const alvo = $("[data-inscricoes]");
     const secao = $("[data-inscricoes-secao]");
     const status = $("[data-inscricoes-status]");
-    if (!CHK) {
+    if (!CHK || !PAGINAS_CHECKOUT.length) {
       redesenhar(
         alvo,
         `<div class="erro" role="alert"><strong>Não foi possível carregar a configuração das páginas de inscrição.</strong><span>Recarregue a página. Se continuar, confira se o arquivo js/checkout-config.js foi publicado.</span></div>`
       );
       return;
     }
+    if (!ins.pagina) return;
 
     const minha = ++seq.inscricoes;
     const params = parametrosInscricoes();
@@ -2976,8 +3061,11 @@
 
     secao.setAttribute("aria-busy", "true");
     ins.carregando = true;
-    // Esqueleto só na primeira vez; nas recargas o desenho anterior fica esmaecido.
-    if (!ins.pronto) redesenhar(alvo, `<div class="ins-lista">${PAGINAS_CHECKOUT.map(() => `<div class="cartao">${esqueleto(7)}</div>`).join("")}</div>`);
+    // Esqueleto só na primeira vez (de cada página); nas recargas o desenho anterior fica esmaecido.
+    if (!ins.pronto) {
+      $("[data-inscricoes-periodo]").textContent = rotuloPeriodo();
+      redesenhar(alvo, `<div class="ins-lista"><div class="cartao">${esqueleto(7)}</div></div>`);
+    }
     status.textContent = "Carregando...";
     delete status.dataset.estado;
     ocupado(1);
@@ -3015,38 +3103,101 @@
     pintarInscricoes();
   }
 
-  /** Uma linha do resumo por página do config (página sem nenhuma inscrição vira zeros). */
-  function linhasDasPaginas() {
-    const porId = new Map(
-      (ins.resumo && Array.isArray(ins.resumo.paginas) ? ins.resumo.paginas : [])
-        .filter((linha) => linha && typeof linha === "object")
-        .map((linha) => [String(linha.pagina), linha])
-    );
-    return PAGINAS_CHECKOUT.map((pagina) => ({ pagina, linha: porId.get(pagina.id) || {} }));
+  /** A linha do resumo da página aberta (página sem nenhum número vira zeros). */
+  function linhaDaPagina() {
+    const linhas = ins.resumo && Array.isArray(ins.resumo.paginas) ? ins.resumo.paginas : [];
+    return linhas.find((linha) => linha && typeof linha === "object" && String(linha.pagina) === ins.pagina.id) || {};
   }
 
-  function funilInscricaoHtml(linha) {
-    const inscritos = num(linha.inscritos);
-    const cliques = num(linha.cliques);
-    const compras = num(linha.compras);
+  /**
+   * Os números da página, já com os buracos do SQL antigo tapados. `temHotmart` = o banco já conta
+   * as vendas do lado da Hotmart (vendas / vendas_por_sck); sem isso, o bloco delas não aparece.
+   *
+   * "Sem inscrição": com o lado da Hotmart, o compras_sem_inscricao do resumo (pedido com ?pagina=)
+   * usa a MESMA régua das vendas (= vendas − casadas) e conta TODAS, e não só as do top 50 da tabela
+   * por sck. Número que não cabe nas vendas (resposta fora do contrato) cai na soma da tabela.
+   */
+  function numerosDaPagina(linha, resumo) {
+    const temHotmart = Object.prototype.hasOwnProperty.call(linha, "vendas") || Array.isArray(linha.vendas_por_sck);
+    const porSck = (Array.isArray(linha.vendas_por_sck) ? linha.vendas_por_sck : [])
+      .filter((item) => item && typeof item === "object")
+      .map((item) => ({
+        sck: item.sck == null || String(item.sck).trim() === "" ? "(sem sck)" : String(item.sck),
+        vendas: num(item.vendas),
+        receita: num(item.receita),
+        casadas: num(item.casadas)
+      }));
+    const vendas = num(linha.vendas);
+    const doBanco = resumo && typeof resumo === "object" ? Number(resumo.compras_sem_inscricao) : NaN;
+    const casadas =
+      Number.isInteger(doBanco) && doBanco >= 0 && doBanco <= vendas
+        ? vendas - doBanco
+        : Math.min(vendas, porSck.reduce((soma, item) => soma + item.casadas, 0));
+    return {
+      inscritos: num(linha.inscritos),
+      cliques: num(linha.cliques),
+      compras: num(linha.compras),
+      receita: num(linha.receita),
+      temHotmart,
+      vendas,
+      vendasReceita: num(linha.vendas_receita),
+      porSck,
+      vendasCasadas: casadas,
+      vendasSemInscricao: vendas - casadas
+    };
+  }
+
+  function porInscrito(parte, inscritos) {
+    return (parte / inscritos).toFixed(1).replace(".", ",");
+  }
+
+  function placarInscricaoHtml(t) {
+    const itens = [
+      `<li data-placar-ins="inscritos"><span class="rotulo">Inscritos</span><span class="valor">${n(t.inscritos)}</span><span class="detalhe">deixaram o contato no formulário</span></li>`,
+      `<li data-placar-ins="cliques"><span class="rotulo">Cliques no checkout</span><span class="valor">${n(t.cliques)}</span><span class="detalhe">${escapeHtml(
+        t.inscritos ? `${porInscrito(t.cliques, t.inscritos)} por inscrito` : "sem inscrito no período"
+      )}</span></li>`,
+      `<li class="destaque" data-placar-ins="compras"><span class="rotulo">Compras de inscritos</span><span class="valor">${n(t.compras)}</span><span class="detalhe">${
+        t.inscritos ? `<strong>${pct(t.compras, t.inscritos)}</strong> dos ${n(t.inscritos)} inscritos` : "sem inscrito no período"
+      } · ${escapeHtml(dinheiro(t.receita))}</span></li>`
+    ];
+    if (t.temHotmart) {
+      const detalhe = !t.vendas
+        ? "nenhuma venda avisada no período"
+        : `${dinheiro(t.vendasReceita)} · ${t.vendasSemInscricao ? `${n(t.vendasSemInscricao)} sem inscrição` : "todas com inscrição"}`;
+      itens.push(
+        `<li data-placar-ins="vendas"><span class="rotulo">Vendas na Hotmart</span><span class="valor">${n(t.vendas)}</span><span class="detalhe">${escapeHtml(detalhe)}</span></li>`
+      );
+    } else {
+      // SQL antigo: sem o lado da Hotmart, o quarto número volta a ser a receita das compras.
+      itens.push(
+        `<li data-placar-ins="receita"><span class="rotulo">Receita</span><span class="valor">${escapeHtml(dinheiro(t.receita))}</span><span class="detalhe">${escapeHtml(
+          t.compras ? `${dinheiro(t.receita / t.compras)} por compra` : "nenhuma compra ainda"
+        )}</span></li>`
+      );
+    }
+    return `<ul class="placar ins-placar" aria-label="Números da página no período">${itens.join("")}</ul>`;
+  }
+
+  function funilInscricaoHtml(t) {
     const etapas = [
       {
         chave: "inscritos",
         rotulo: "Inscritos",
         sub: "base: quem deixou nome, WhatsApp e e-mail no formulário",
-        valor: inscritos
+        valor: t.inscritos
       },
       {
         chave: "cliques",
         rotulo: "Cliques no checkout",
-        sub: `${escapeHtml(plural(cliques, "abertura", "aberturas"))} da página de pagamento · quem envia o formulário de novo soma aqui, sem virar inscrito novo`,
-        valor: cliques
+        sub: `${escapeHtml(plural(t.cliques, "abertura", "aberturas"))} da página de pagamento · quem envia o formulário de novo soma aqui, sem virar inscrito novo`,
+        valor: t.cliques
       },
       {
         chave: "compras",
-        rotulo: "Compras",
-        sub: `${taxaComBase(compras, inscritos, "dos {n} inscritos", "sem inscrito no período")} · pelo aviso da Hotmart`,
-        valor: compras,
+        rotulo: "Compras de inscritos",
+        sub: `${taxaComBase(t.compras, t.inscritos, "dos {n} inscritos", "sem inscrito no período")} · casadas com o aviso da Hotmart`,
+        valor: t.compras,
         fim: true
       }
     ];
@@ -3060,16 +3211,68 @@
         </li>`
       )
       .join("");
-    return `<ol class="funil ins-funil">${itens}</ol><p class="nota">Um inscrito é uma pessoa por página (WhatsApp e e-mail): voltar e enviar de novo soma clique, não inscrito. A compra é casada pelo e-mail ou pelos últimos 8 dígitos do telefone que a pessoa digitou na Hotmart.</p>`;
+    return `<ol class="funil ins-funil">${itens}</ol><p class="nota">Um inscrito é uma pessoa por página (WhatsApp e e-mail): voltar e enviar de novo soma clique, não inscrito. A compra é casada pelo e-mail ou pelos últimos 8 dígitos do telefone que a pessoa digitou na Hotmart, e conta quem se inscreveu no período, tenha comprado quando for.</p>`;
   }
 
+  /**
+   * O lado da Hotmart: "de onde veio cada venda", pelo sck que ela devolveu. Conta também quem
+   * comprou sem passar pelo formulário, por isso é MAIOR ou igual às compras de inscritos.
+   */
+  function hotmartHtml(pagina, t) {
+    const id = escapeHtml(pagina.id);
+    const sck = sckDe(pagina);
+    const tabela = t.porSck.length
+      ? `<div class="tabela-rolagem"><table>
+          <caption>O sck é o ${escapeHtml(sck)} que a página mandou para o checkout; “(sem sck)” = venda que chegou sem ele (link direto da Hotmart, por exemplo). “Com inscrição” = casadas com alguém do formulário.</caption>
+          <thead><tr><th scope="col">sck</th><th scope="col" class="n">Vendas</th><th scope="col" class="n">Receita</th><th scope="col" class="n">Com inscrição</th></tr></thead>
+          <tbody>${t.porSck
+            .map(
+              (item) => `<tr${item.sck === "(sem sck)" ? ' class="ins-sem-sck"' : ""}><th scope="row">${escapeHtml(item.sck)}</th><td class="n">${n(item.vendas)}</td><td class="n">${escapeHtml(
+                dinheiro(item.receita)
+              )}</td><td class="n">${n(item.casadas)}</td></tr>`
+            )
+            .join("")}</tbody>
+        </table></div>`
+      : vazioHtml(
+          state.periodo === "tudo" ? "Nenhuma venda avisada pela Hotmart ainda." : "Nenhuma venda avisada pela Hotmart neste período.",
+          "As vendas chegam pelo aviso da Hotmart no endereço /api/hotmart/venda assim que alguém paga."
+        );
+    const casadas = t.vendas
+      ? `<p class="ins-hotmart-casadas" data-vendas-casadas><strong>${n(t.vendasCasadas)}</strong> ${
+          t.vendasCasadas === 1 ? "casada" : "casadas"
+        } com inscrição · <strong>${n(t.vendasSemInscricao)}</strong> sem inscrição</p>`
+      : "";
+    return `<section class="ins-hotmart" data-ins-hotmart aria-labelledby="ins-hotmart-${id}">
+      <div class="ins-hotmart-cabeca">
+        <h4 id="ins-hotmart-${id}">Vendas na Hotmart<span>de onde veio cada venda</span></h4>
+        <p class="ins-hotmart-total"><strong data-vendas>${n(t.vendas)}</strong> ${t.vendas === 1 ? "venda" : "vendas"} · <strong data-vendas-receita>${escapeHtml(
+          dinheiro(t.vendasReceita)
+        )}</strong></p>
+      </div>
+      <p class="ins-hotmart-texto">Toda venda que a Hotmart avisou para o produto desta página, contada no dia em que foi aprovada, inclusive de quem comprou sem passar pelo formulário (link direto, outro e-mail e outro telefone). Reembolso, cancelamento e chargeback até o fim do período saem da conta. As “compras de inscritos” do funil são só as que casaram com alguém do formulário.</p>
+      ${casadas}${tabela}
+    </section>`;
+  }
+
+  // As divisões por UTM dos inscritos. `lista` é o campo do resumo; a que é o sck da página ganha
+  // "(sck)" no título e a legenda do relatório da Hotmart.
+  const DIVISOES_INSCRICAO = [
+    { chave: "origem", campo: "utm_source", lista: "por_origem", titulo: "Origem", legenda: "utm_source do anúncio. “(sem utm)” = chegou sem parâmetro de campanha." },
+    { chave: "midia", campo: "utm_medium", lista: "por_midia", titulo: "Mídia", legenda: "utm_medium: o tipo de tráfego (pago, stories, bio, lista)." },
+    { chave: "campanha", campo: "utm_campaign", lista: "por_campanha", titulo: "Campanha", legenda: "utm_campaign do anúncio." },
+    { chave: "conteudo", campo: "utm_content", lista: "por_conteudo", titulo: "Conteúdo", legenda: "utm_content: o criativo do anúncio." },
+    { chave: "termo", campo: "utm_term", lista: "por_termo", titulo: "Termo", legenda: "utm_term: o público ou a palavra-chave." }
+  ];
+
   function tabelaDivisaoHtml(titulo, chave, itens, legenda) {
-    const linhas = (Array.isArray(itens) ? itens : []).map((item) => ({
-      rotulo: String(item[chave] == null || item[chave] === "" ? "(sem utm)" : item[chave]),
-      inscritos: num(item.inscritos),
-      compras: num(item.compras)
-    }));
-    const corpo = linhas.length
+    const linhas = (Array.isArray(itens) ? itens : [])
+      .filter((item) => item && typeof item === "object")
+      .map((item) => ({
+        rotulo: String(item[chave] == null || item[chave] === "" ? "(sem utm)" : item[chave]),
+        inscritos: num(item.inscritos),
+        compras: num(item.compras)
+      }));
+    return linhas.length
       ? `<div class="tabela-rolagem"><table>
           <caption>${escapeHtml(legenda)}</caption>
           <thead><tr><th scope="col">${escapeHtml(titulo)}</th><th scope="col" class="n">Inscritos</th><th scope="col" class="n">Compras</th></tr></thead>
@@ -3082,12 +3285,12 @@
             .join("")}</tbody>
         </table></div>`
       : vazioHtml("Sem inscrição neste período.", "");
-    return corpo;
   }
 
   function tabelaDiasHtml(pagina, linha) {
     // Mais recente primeiro: quem abre o painel quer ver hoje e ontem sem rolar.
     const dias = (Array.isArray(linha.por_dia) ? linha.por_dia : [])
+      .filter((item) => item && typeof item === "object")
       .map((item) => ({ dia: String(item.dia).slice(0, 10), inscritos: num(item.inscritos), compras: num(item.compras) }))
       .filter((item) => ymdValido(item.dia))
       .sort((a, b) => b.dia.localeCompare(a.dia));
@@ -3113,31 +3316,48 @@
     </table></div>${botao}`;
   }
 
-  function cartaoInscricaoHtml(pagina, linha) {
-    const vazia = !num(linha.inscritos) && !num(linha.cliques);
+  function divisoesInscricaoHtml(pagina, linha) {
+    const sck = sckDe(pagina);
+    // SQL antigo não manda por_midia nem por_conteudo: a divisão que não veio simplesmente não aparece.
+    const divisoes = DIVISOES_INSCRICAO.filter((divisao) => Array.isArray(linha[divisao.lista]))
+      .map((divisao) => {
+        const ehSck = divisao.campo === sck;
+        const legenda = ehSck ? `O ${divisao.campo} vai para a Hotmart como sck: é o criativo que aparece no relatório de vendas de lá.` : divisao.legenda;
+        return `<div class="ins-divisao${ehSck ? " ins-divisao-sck" : ""}" data-divisao="${divisao.chave}"${ehSck ? " data-sck" : ""}><h5>Por ${escapeHtml(
+          divisao.titulo.toLowerCase()
+        )}${ehSck ? ' <span class="marca-sck">(sck)</span>' : ""}</h5>${tabelaDivisaoHtml(divisao.titulo, divisao.campo, linha[divisao.lista], legenda)}</div>`;
+      })
+      .join("");
+    return `<section class="ins-bloco" aria-labelledby="ins-divisoes-${escapeHtml(pagina.id)}">
+      <div class="ins-bloco-cabeca">
+        <h4 id="ins-divisoes-${escapeHtml(pagina.id)}">Inscritos por UTM e por dia</h4>
+        <p>De onde vieram as pessoas do formulário e quantas delas compraram. Só quem se inscreveu tem UTM completa; a venda sem inscrição aparece acima, pelo sck.</p>
+      </div>
+      <div class="ins-divisoes">
+        ${divisoes}
+        <div class="ins-divisao" data-divisao="dia"><h5>Por dia</h5>${tabelaDiasHtml(pagina, linha)}</div>
+      </div>
+    </section>`;
+  }
+
+  function cartaoInscricaoHtml(pagina, linha, t) {
+    const id = escapeHtml(pagina.id);
+    const sck = sckDe(pagina);
+    const vazia = !t.inscritos && !t.cliques && !(t.temHotmart && t.vendas);
     const corpo = vazia
       ? vazioHtml(
           state.periodo === "tudo" ? "Ninguém se inscreveu nesta página ainda." : "Ninguém se inscreveu nesta página neste período.",
           "Assim que a primeira pessoa enviar o formulário, os números aparecem aqui."
         )
-      : `${funilInscricaoHtml(linha)}<div class="ins-divisoes">
-          <div class="ins-divisao" data-divisao="origem"><h4>Por origem</h4>${tabelaDivisaoHtml("Origem", "utm_source", linha.por_origem, "utm_source do anúncio. “(sem utm)” = chegou sem parâmetro de campanha.")}</div>
-          <div class="ins-divisao" data-divisao="campanha"><h4>Por campanha</h4>${tabelaDivisaoHtml("Campanha", "utm_campaign", linha.por_campanha, "utm_campaign do anúncio.")}</div>
-          <div class="ins-divisao" data-divisao="termo"><h4>Por termo (sck)</h4>${tabelaDivisaoHtml(
-            "Termo",
-            "utm_term",
-            linha.por_termo,
-            "O utm_term vai para a Hotmart como sck: é este valor que aparece no relatório de vendas de lá."
-          )}</div>
-          <div class="ins-divisao" data-divisao="dia"><h4>Por dia</h4>${tabelaDiasHtml(pagina, linha)}</div>
-        </div>`;
-    return `<article class="cartao ins-cartao" data-inscricao-pagina="${escapeHtml(pagina.id)}" aria-labelledby="ins-${escapeHtml(pagina.id)}">
+      : `${funilInscricaoHtml(t)}${t.temHotmart ? hotmartHtml(pagina, t) : ""}${divisoesInscricaoHtml(pagina, linha)}`;
+    return `<article class="cartao ins-cartao" data-inscricao-pagina="${id}" aria-labelledby="ins-${id}">
       <header class="ins-cabeca">
         <div class="ins-titulo">
-          <h3 id="ins-${escapeHtml(pagina.id)}">${escapeHtml(pagina.nome)}</h3>
-          <p class="ins-meta"><span class="ins-rota">${escapeHtml(pagina.rota)}</span><span class="ins-produto">${escapeHtml(pagina.produto || "")}</span></p>
+          <h3 id="ins-${id}">${escapeHtml(pagina.nome)}</h3>
+          <p class="ins-meta"><span class="ins-rota" title="${escapeHtml(rotaDaInscricao(pagina))}">${rotaHtml(hostDaInscricao(pagina), pagina.rota)}</span><span class="ins-produto">${escapeHtml(
+            pagina.produto || ""
+          )}</span><span class="ins-sck-da-pagina" data-sck-da-pagina="${escapeHtml(sck)}">sck = ${escapeHtml(sck)}</span></p>
         </div>
-        <p class="ins-receita"><span>Receita</span><strong data-receita>${escapeHtml(dinheiro(linha.receita))}</strong></p>
       </header>
       ${corpo}
     </article>`;
@@ -3161,12 +3381,17 @@
     return Object.prototype.hasOwnProperty.call(EVENTOS_COMPRA, chave) ? EVENTOS_COMPRA[chave] : chave || "—";
   }
 
-  function comprasRecentesHtml() {
-    const compras = Array.isArray(ins.resumo?.compras_recentes) ? ins.resumo.compras_recentes : [];
-    const semInscricao = num(ins.resumo?.compras_sem_inscricao);
+  function comprasRecentesHtml(t) {
+    const compras = (Array.isArray(ins.resumo?.compras_recentes) ? ins.resumo.compras_recentes : []).filter((compra) => compra && typeof compra === "object");
+    // Com o lado da Hotmart, o aviso usa o MESMO número do placar (vendas que valem e não casaram:
+    // a que virou reembolso ou chargeback já saiu). SQL antigo: a contagem de compras aprovadas.
+    const semInscricao = t.temHotmart ? t.vendasSemInscricao : num(ins.resumo?.compras_sem_inscricao);
+    const frase = t.temHotmart
+      ? plural(semInscricao, "venda da Hotmart não casou", "vendas da Hotmart não casaram")
+      : plural(semInscricao, "compra aprovada não casou", "compras aprovadas não casaram");
     const aviso = semInscricao
       ? `<p class="ins-aviso" data-ins-aviso><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24"><path d="M12 8v5m0 3.5v.5M10.3 3.9 2.6 17.4A2 2 0 0 0 4.3 20.4h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span><strong>${escapeHtml(
-          plural(semInscricao, "compra aprovada não casou", "compras aprovadas não casaram")
+          frase
         )} com nenhuma inscrição.</strong> Ou a pessoa comprou por outro link, ou digitou na Hotmart um e-mail e um telefone diferentes dos do formulário. O aviso inteiro está guardado no banco.</span></p>`
       : "";
     const corpo = compras.length
@@ -3176,16 +3401,23 @@
           <tbody>${compras
             .map((compra) => {
               const casou = compra.casou === true;
-              // O evento vai embaixo da data: numa tela de 390px cinco colunas não cabem, e a
-              // informação importante (quando, quem, quanto, casou) continua inteira.
+              // O evento vai embaixo da data e o sck embaixo do nome: numa tela de 390px seis
+              // colunas não cabem, e o que importa (quando, quem, quanto, casou) continua inteiro.
+              // SQL antigo não manda o sck: aí a linha fica sem ele.
+              const temSck = Object.prototype.hasOwnProperty.call(compra, "sck");
+              const sck = temSck
+                ? `<small class="ins-sck" data-sck-aviso>${compra.sck == null || String(compra.sck).trim() === "" ? "sem sck" : `sck ${escapeHtml(compra.sck)}`}</small>`
+                : "";
               return `<tr${casou ? "" : ' class="ins-orfa"'}>
                 <th scope="row">${escapeHtml(dataHora(compra.recebido_em))}<small>${escapeHtml(rotuloEvento(compra.evento))}</small></th>
-                <td>${escapeHtml(compra.comprador_nome || compra.comprador_email || "—")}</td>
+                <td>${escapeHtml(compra.comprador_nome || compra.comprador_email || "—")}${sck}</td>
                 <td class="n">${compra.valor == null ? "—" : escapeHtml(dinheiro(compra.valor))}</td>
                 <td>${
+                  // No celular o selo encurta para sim/não (a coluna já se chama "Casou"): com um
+                  // "Reembolsada" na primeira coluna, "com inscrição" não cabia em 390px.
                   casou
-                    ? '<span class="selo ok">com inscrição</span>'
-                    : '<span class="selo meio" title="Nenhuma inscrição com este e-mail nem com estes últimos 8 dígitos de telefone">sem inscrição</span>'
+                    ? '<span class="selo ok"><span class="so-largo">com inscrição</span><span class="so-estreito">sim</span></span>'
+                    : '<span class="selo meio" title="Nenhuma inscrição com este e-mail nem com estes últimos 8 dígitos de telefone"><span class="so-largo">sem inscrição</span><span class="so-estreito">não</span></span>'
                 }</td>
               </tr>`;
             })
@@ -3198,13 +3430,13 @@
     return `<article class="cartao ins-compras" aria-labelledby="ins-compras-titulo">
       <div class="cartao-cabeca">
         <h3 id="ins-compras-titulo">Compras recentes</h3>
-        <p class="cartao-sub">Cada aviso da Hotmart (aprovada, boleto, reembolso). Só compra aprovada marca o inscrito como comprador.</p>
+        <p class="cartao-sub">Cada aviso da Hotmart para o produto desta página (aprovada, boleto, reembolso, abandono), com o sck que ela devolveu. Só compra aprovada marca o inscrito como comprador.</p>
       </div>
       ${aviso}${corpo}
     </article>`;
   }
 
-  function inscritoHtml(item) {
+  function inscritoHtml(item, sck) {
     const link = whatsappLink(item.whatsapp_digits);
     const telefone = item.whatsapp
       ? link
@@ -3222,6 +3454,8 @@
           item.compra_status ? ` · ${escapeHtml(String(item.compra_status).toLowerCase())}` : ""
         }</span>`;
     const cliques = num(item.cliques);
+    // O valor que foi para a Hotmart como sck (a UTM da página): é o que o relatório de lá mostra.
+    const valorSck = typeof item[sck] === "string" && item[sck].trim() ? item[sck].trim() : "";
     return `<article class="pessoa ins-pessoa" data-inscrito="${escapeHtml(item.id)}">
       <div class="pessoa-cabeca">
         <div class="pessoa-quem">
@@ -3231,15 +3465,16 @@
         <div class="pessoa-contato">${telefone}<span>${escapeHtml(item.email || "sem e-mail")}</span></div>
         <div class="pessoa-selos">${selo}</div>
         <div class="pessoa-acoes">
-          <span class="pessoa-origem">${escapeHtml(origemTexto(item))}${item.utm_term ? ` · ${escapeHtml(item.utm_term)}` : ""}</span>
+          <span class="pessoa-origem">${escapeHtml(origemTexto(item))}${valorSck ? ` · <span class="ins-sck-valor" title="${escapeHtml(`${sck}, que foi para a Hotmart como sck`)}">sck ${escapeHtml(valorSck)}</span>` : ""}</span>
         </div>
       </div>
     </article>`;
   }
 
-  function listaInscritosHtml() {
+  function listaInscritosHtml(pagina) {
+    const sck = sckDe(pagina);
     const corpo = ins.itens.length
-      ? `${ins.itens.map(inscritoHtml).join("")}${
+      ? `${ins.itens.map((item) => inscritoHtml(item, sck)).join("")}${
           ins.itens.length < ins.total
             ? `<button type="button" class="botao botao-leve ins-mais" data-ins-mais data-foco="ins-mais"${ins.carregando ? " disabled" : ""}>${
                 ins.carregando ? "Carregando..." : `Carregar mais ${n(Math.min(LIMITE_INSCRITOS, ins.total - ins.itens.length))}`
@@ -3266,36 +3501,17 @@
     $("[data-inscricoes-periodo]").textContent =
       ins.geradoEm && ins.resumo ? `${rotuloPeriodo()} · atualizado às ${hora(ins.geradoEm)}` : rotuloPeriodo();
     pintarAtualizado();
-    if (!ins.resumo) {
+    if (!ins.resumo || !ins.pagina) {
       redesenhar(alvo, erroHtml(ins.erro, "inscricoes", "repetir-inscricoes"));
       return;
     }
 
-    const linhas = linhasDasPaginas();
-    const total = linhas.reduce(
-      (soma, item) => ({
-        inscritos: soma.inscritos + num(item.linha.inscritos),
-        cliques: soma.cliques + num(item.linha.cliques),
-        compras: soma.compras + num(item.linha.compras),
-        receita: soma.receita + num(item.linha.receita)
-      }),
-      { inscritos: 0, cliques: 0, compras: 0, receita: 0 }
-    );
-    const topo = total.inscritos
-      ? `<ul class="placar ins-placar" aria-label="Todas as páginas de inscrição somadas">
-          <li><span class="rotulo">Inscritos</span><span class="valor">${n(total.inscritos)}</span><span class="detalhe">deixaram o contato</span></li>
-          <li><span class="rotulo">Cliques no checkout</span><span class="valor">${n(total.cliques)}</span><span class="detalhe">${escapeHtml(
-            `${(total.cliques / total.inscritos).toFixed(1).replace(".", ",")} por inscrito`
-          )}</span></li>
-          <li class="destaque"><span class="rotulo">Compras</span><span class="valor">${n(total.compras)}</span><span class="detalhe"><strong>${pct(
-            total.compras,
-            total.inscritos
-          )}</strong> dos ${n(total.inscritos)} inscritos</span></li>
-          <li><span class="rotulo">Receita</span><span class="valor">${escapeHtml(dinheiro(total.receita))}</span><span class="detalhe">${escapeHtml(
-            total.compras ? `${dinheiro(total.receita / total.compras)} por compra` : "nenhuma compra ainda"
-          )}</span></li>
-        </ul>`
-      : `<div class="vazio-geral ins-vazio" data-inscricoes-vazio>
+    const pagina = ins.pagina;
+    const linha = linhaDaPagina();
+    const t = numerosDaPagina(linha, ins.resumo);
+    const semNada = !t.inscritos && !t.cliques && !(t.temHotmart && t.vendas);
+    const topo = semNada
+      ? `<div class="vazio-geral ins-vazio" data-inscricoes-vazio>
           <img src="/img/ev-icone-color.png" alt="" width="64" height="64">
           <h3>${state.periodo === "tudo" ? "Ninguém se inscreveu ainda" : "Ninguém se inscreveu neste período"}</h3>
           <p>${
@@ -3303,12 +3519,10 @@
               ? "Quem enviar o formulário da página de inscrição aparece aqui, com o clique no checkout e a compra."
               : "Tente um período maior, ou “Tudo”."
           }</p>
-        </div>`;
+        </div>`
+      : placarInscricaoHtml(t);
 
-    redesenhar(
-      alvo,
-      `${topo}<div class="ins-lista">${linhas.map((item) => cartaoInscricaoHtml(item.pagina, item.linha)).join("")}</div>${comprasRecentesHtml()}${listaInscritosHtml()}`
-    );
+    redesenhar(alvo, `${topo}<div class="ins-lista">${cartaoInscricaoHtml(pagina, linha, t)}</div>${comprasRecentesHtml(t)}${listaInscritosHtml(pagina)}`);
   }
 
   $("[data-inscricoes]").addEventListener("click", (evento) => {
@@ -3347,22 +3561,31 @@
     filtrar: () => carregarObrigado()
   });
 
-  Object.assign(PAGINAS[2], {
-    entrar: () => carregarInscricoes(),
-    atualizar: () => carregarInscricoes(),
-    sair: () => limparInscricoes(),
-    filtrar: () => carregarInscricoes()
-  });
+  // Uma aba por página de inscrição, todas com as mesmas funções: o que muda é a página que elas
+  // entregam a abrirInscricao (null quando o config não carregou; aí a aba só avisa).
+  for (const aba of ABAS_INSCRICAO) {
+    Object.assign(aba, {
+      entrar: () => abrirInscricao(aba.inscricao),
+      atualizar: () => abrirInscricao(aba.inscricao),
+      sair: () => limparInscricoes(),
+      filtrar: () => abrirInscricao(aba.inscricao)
+    });
+  }
 
   $("[data-paginas]").addEventListener("click", (evento) => {
     const aba = evento.target instanceof Element ? evento.target.closest("[data-pagina]") : null;
     if (aba) trocarPagina(aba.dataset.pagina);
   });
+  // Teclado como no padrão de abas: setas andam (dando a volta), Home e End vão às pontas.
   $("[data-paginas]").addEventListener("keydown", (evento) => {
-    const passo = evento.key === "ArrowRight" ? 1 : evento.key === "ArrowLeft" ? -1 : 0;
-    if (!passo) return;
     const indice = PAGINAS.indexOf(paginaAtual);
-    const proxima = PAGINAS[(indice + passo + PAGINAS.length) % PAGINAS.length];
+    let destino = -1;
+    if (evento.key === "ArrowRight") destino = (indice + 1) % PAGINAS.length;
+    else if (evento.key === "ArrowLeft") destino = (indice - 1 + PAGINAS.length) % PAGINAS.length;
+    else if (evento.key === "Home") destino = 0;
+    else if (evento.key === "End") destino = PAGINAS.length - 1;
+    if (destino < 0) return;
+    const proxima = PAGINAS[destino];
     evento.preventDefault();
     trocarPagina(proxima.id);
     const botao = document.getElementById(`pagina-${proxima.id}`);
@@ -3374,6 +3597,9 @@
   /* ================================================================== */
 
   lerUrl();
+  // Link antigo (?pagina=inscricoes, de quando havia uma aba de inscrição só): abre a primeira e
+  // a URL passa a dizer qual é, para o link copiado daqui em diante já sair com o id novo.
+  if (new URLSearchParams(window.location.search).get("pagina") === ABA_INSCRICOES_ANTIGA && paginaAtual.id !== ABA_INSCRICOES_ANTIGA) escreverUrl();
   pintarPaginas();
   montarSelects();
   pintarFiltros();

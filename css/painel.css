@@ -2841,7 +2841,7 @@ tr.fora-da-pagina td {
 }
 
 /* ============================================================================================ */
-/* Aba de inscrições com checkout na Hotmart (/viver-de-furo-inscricao)                          */
+/* Abas de inscrição com checkout na Hotmart (uma por página de js/checkout-config.js)          */
 /* ============================================================================================ */
 
 .secao-inscricoes {
@@ -2910,35 +2910,92 @@ tr.fora-da-pagina td {
   gap: 0.3rem 0.6rem;
 }
 
+/* Rota de página de outro site leva o host (io.escola.../rota): no celular quebra entre o host e
+   o caminho (o <wbr> do painel.js), em vez de vazar do cartão. */
 .ins-rota {
+  max-width: 100%;
   padding: 0.05rem 0.55rem;
-  border-radius: 999px;
+  border-radius: 12px;
   background: var(--parchment-deep);
   color: var(--ink);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.8rem;
 }
 
-/* A receita fica à direita do título: é o número que o cliente procura primeiro. */
-.ins-receita {
-  display: grid;
-  margin: 0;
-  justify-items: flex-end;
-  text-align: right;
-}
-
-.ins-receita span {
-  color: var(--ink-soft);
+/* Qual UTM desta página vira o sck na Hotmart: é a chave para ler o relatório de lá. */
+.ins-sck-da-pagina {
+  padding: 0.05rem 0.55rem;
+  border: 1px solid var(--lilac);
+  border-radius: 999px;
+  color: var(--ember-deep);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
 
-.ins-receita strong {
-  font-size: 1.35rem;
+/* Os dois lados, em blocos com título próprio: o da Hotmart (todas as vendas) e o do formulário
+   (os inscritos por UTM). Um fio separa um do outro dentro do cartão. */
+.ins-hotmart,
+.ins-bloco {
+  display: grid;
+  min-width: 0;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  gap: 0.6rem;
+}
+
+.ins-hotmart-cabeca {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+}
+
+.ins-hotmart h4,
+.ins-bloco-cabeca h4 {
+  font-size: 1rem;
   letter-spacing: -0.01em;
-  line-height: 1.2;
+}
+
+.ins-hotmart h4 span {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.ins-hotmart-total {
+  font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.ins-hotmart-total strong {
+  font-size: 1.25rem;
+}
+
+.ins-hotmart-texto,
+.ins-bloco-cabeca p {
+  max-width: 72ch;
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+}
+
+.ins-bloco-cabeca p {
+  margin-top: 0.2rem;
+}
+
+.ins-hotmart-casadas {
+  font-size: 0.88rem;
+}
+
+.ins-hotmart .vazio {
+  padding: 1rem;
+}
+
+tr.ins-sem-sck th {
+  color: var(--ink-soft);
+  font-style: italic;
 }
 
 .ins-divisoes {
@@ -2951,13 +3008,24 @@ tr.fora-da-pagina td {
   min-width: 0;
 }
 
-.ins-divisao h4 {
-  margin-bottom: 0.45rem;
+.ins-divisao h5 {
+  margin: 0 0 0.45rem;
   color: var(--ink-soft);
   font-size: 0.78rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+/* A divisão que é o sck da página: a mesma tabela, com a marca e um fio da cor da seleção. */
+.ins-divisao-sck .tabela-rolagem {
+  border-color: color-mix(in srgb, var(--ember) 45%, var(--border));
+}
+
+.marca-sck {
+  color: var(--ember);
+  letter-spacing: 0.04em;
+  text-transform: none;
 }
 
 .ins-divisao .vazio {
@@ -2969,12 +3037,23 @@ tr.fora-da-pagina td {
 }
 
 .ins-divisao th,
-.ins-divisao td {
+.ins-divisao td,
+.ins-hotmart th,
+.ins-hotmart td {
   padding: 0.5rem 0.5rem;
 }
 
-.ins-divisao thead th {
+.ins-divisao thead th,
+.ins-hotmart thead th {
   white-space: normal;
+}
+
+/* UTM e sck são texto livre de anúncio: valor comprido quebra dentro da célula, não empurra a
+   tabela para fora da tela. Só neles: no selo "com inscrição" a palavra não pode partir ao meio. */
+.ins-divisao tbody th,
+.ins-hotmart tbody th,
+.ins-compras .ins-sck {
+  overflow-wrap: anywhere;
 }
 
 .ins-divisao td.n .taxa-inline {
@@ -3007,8 +3086,9 @@ tr.fora-da-pagina td {
   display: block;
 }
 
-/* O evento fica embaixo da data: cinco colunas não cabem numa tela de 390px. */
-.ins-compras tbody th small {
+/* O evento fica embaixo da data e o sck embaixo do nome: seis colunas não cabem em 390px. */
+.ins-compras tbody th small,
+.ins-compras .ins-sck {
   display: block;
   color: var(--ink-soft);
   font-size: 0.78rem;
@@ -3033,8 +3113,19 @@ tr.ins-orfa td {
   margin: 0;
 }
 
+.ins-sck-valor {
+  color: var(--ember-deep);
+  font-weight: 600;
+}
+
 .ins-mais {
   justify-self: center;
+}
+
+@media (min-width: 720px) {
+  .ins-divisoes {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (min-width: 900px) {
@@ -3045,11 +3136,21 @@ tr.ins-orfa td {
 
 @media (min-width: 1080px) {
   .ins-divisoes {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 719px) {
+  /* A aba de uma página de outro site tem host + rota: no celular ela quebra em duas linhas (entre
+     o host e o caminho) em vez de ficar mais larga que a tela e esconder o próprio nome. */
+  .paginas .pagina {
+    max-width: min(20rem, calc(100vw - 4rem));
+  }
+
+  .pagina-rota {
+    overflow-wrap: anywhere;
+  }
+
   .ins-placar li {
     padding: 0.65rem 0.6rem;
   }
@@ -3058,19 +3159,17 @@ tr.ins-orfa td {
     font-size: 1.45rem;
   }
 
-  .ins-receita {
-    justify-items: flex-start;
-    text-align: left;
-  }
-
-  /* Origem + dois números numa tela de 390px sem rolagem lateral. */
+  /* Rótulo + dois ou três números numa tela de 390px sem rolagem lateral. */
   .ins-divisao table,
+  .ins-hotmart table,
   .ins-compras table {
     font-size: 0.8rem;
   }
 
   .ins-divisao th,
   .ins-divisao td,
+  .ins-hotmart th,
+  .ins-hotmart td,
   .ins-compras th,
   .ins-compras td {
     padding: 0.45rem 0.3rem;
@@ -3078,12 +3177,15 @@ tr.ins-orfa td {
 
   .ins-divisao th:first-child,
   .ins-divisao td:first-child,
+  .ins-hotmart th:first-child,
+  .ins-hotmart td:first-child,
   .ins-compras th:first-child,
   .ins-compras td:first-child {
     padding-left: 0.55rem;
   }
 
   .ins-divisao thead th,
+  .ins-hotmart thead th,
   .ins-compras thead th {
     font-size: 0.72rem;
   }

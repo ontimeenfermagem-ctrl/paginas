@@ -1,11 +1,15 @@
 // Apoio da suíte tests/e2e/painel.e2e.mjs.
 //
-// Gera um conjunto realista e determinístico (semente fixa) de visitantes, pessoas e eventos das
-// páginas de obrigado e reproduz, em JS, o que as funções SQL devolvem (pesquisa_painel,
-// pesquisa_cruzamento, pesquisa_abertas, paginas_resumo) e a view pesquisa_pessoas para
-// /respostas. Usa o EVPesquisa e o EVObrigado de verdade (via vm, no mesmo contexto, como no
-// navegador). As funções SQL em si são provadas contra o Postgres em sql.e2e.mjs; aqui o assunto é
-// a TELA do painel.
+// Gera um conjunto realista e determinístico (semente fixa) de visitantes, pessoas, eventos das
+// páginas de obrigado, inscrições das DUAS páginas com checkout (Viver de Furo e Imersão GPS) e
+// avisos da Hotmart no formato da tabela `compras`, e reproduz, em JS, o que as funções SQL
+// devolvem (pesquisa_painel, pesquisa_cruzamento, pesquisa_abertas, paginas_resumo,
+// inscricoes_resumo) e a view pesquisa_pessoas para /respostas. Usa o EVPesquisa, o EVObrigado e o
+// EVCheckout de verdade (via vm, no mesmo contexto, como no navegador). As funções SQL em si são
+// provadas contra o Postgres em sql.e2e.mjs; aqui o assunto é a TELA do painel. O espelho de
+// inscricoes_resumo segue a seção 6 do supabase.sql (inclusive as ordens e a régua das vendas: o
+// estado de cada transação pela hora do EVENTO no histórico até o fim do período, contada no
+// período da primeira aprovação): mudou lá, muda aqui.
 //
 // Só os 4 perfis e alternativas concretas: nenhuma pergunta tem "Outro", e "Estudante" saiu
 // (decisões do cliente).
@@ -278,13 +282,69 @@ export function gerar({ seed = 7, pessoas: totalPessoas = 800, agora = new Date(
     evento({ ...comum, evento: "visita", criado_em: criado });
     if (i % 2 === 0) evento({ ...comum, evento: "clique_grupo", criado_em: criado });
   }
-  // Página de inscrição com checkout (js/checkout-config.js): semente própria, de novo para não
-  // mexer na sequência de cima. 120 inscritos, ~18% comprando, com origem, campanha e termo (o
-  // `sck`) variados, e 3 compras que NÃO casam com ninguém (comprou por outro link).
-  const r3 = rng(seed + 202);
+  // Páginas de inscrição com checkout (js/checkout-config.js), cada uma com semente própria, de
+  // novo para não mexer na sequência de cima. Os avisos da Hotmart vêm no formato da tabela
+  // `compras`: id sequencial (o de gravação), transação, evento, a hora em que o evento aconteceu na
+  // Hotmart (evento_em, o creation_date) e a da chegada (recebido_em, alguns segundos depois), a
+  // data de aprovação da compra (aprovado_em, que a Hotmart repete em todo evento da mesma compra),
+  // o sck que ela devolveu, a página do PRODUTO (null = produto de fora) com o jeito como ela foi
+  // achada (pagina_por; null = aviso da versão anterior da tabela) e se casou com uma inscrição.
   const inscricoes = [];
   const compras = [];
-  const PAGINA_INSCRICAO = CHK.LISTA[0];
+  let idCompra = 0;
+  const depois = (iso, ms) => new Date(Math.min(new Date(iso).getTime() + ms, agoraMs - 500)).toISOString();
+  // O link do checkout que a pessoa abriu por último (inscricoes.checkout_url), montado pela régua da
+  // página (CHK.urlDoCheckout). A inscrição guarda as UTMs do PRIMEIRO toque, e o link, as do envio
+  // mais recente: quem voltou pelo lembrete do WhatsApp e mandou o formulário de novo foi para a
+  // Hotmart com sck=lembrete-wpp, embora a UTM gravada seja a do anúncio. Algumas inscrições antigas
+  // não têm o link (gravadas antes da coluna). Sem sorteio: não mexe na sequência das sementes.
+  const REENVIO = { utm_source: "whatsapp", utm_medium: "lembrete", utm_campaign: "lembrete-vip", utm_term: "lembrete-wpp", utm_content: "lembrete-wpp" };
+  const linkDoCheckout = (pagina, inscricao, i) => {
+    if (i % 29 === 11) return null;
+    const utm = i % 20 === 3 ? REENVIO : inscricao;
+    inscricao._reenviou = i % 20 === 3;
+    const campos = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"];
+    return CHK.urlDoCheckout(pagina, {
+      utm: Object.fromEntries(campos.filter((k) => utm[k]).map((k) => [k, utm[k]])),
+      contato: { nome: inscricao.nome, email: inscricao.email, whatsapp: inscricao.whatsapp_digits }
+    });
+  };
+  /** O sck que a Hotmart devolve na venda: o do link aberto por último (a UTM da página, sem ele). */
+  const sckQueFoi = (inscricao, campo) => (inscricao._reenviou ? REENVIO[campo] : inscricao[campo]);
+  /** Grava um aviso. Sem recebido_em, ele chega de 1,5 a 20 s depois do evento. */
+  const aviso = (dados) => {
+    const id = ++idCompra;
+    const linha = {
+      id,
+      transacao: null,
+      status: null,
+      valor: null,
+      sck: null,
+      comprador_nome: null,
+      comprador_email: null,
+      aprovado_em: null,
+      inscricao_id: null,
+      pagina_por: dados.pagina ? "config" : null,
+      casou: false,
+      ...dados
+    };
+    if (!linha.recebido_em) linha.recebido_em = depois(linha.evento_em, 1500 + (id % 9) * 2300);
+    compras.push(linha);
+    return linha;
+  };
+  // Reembolso/chargeback: a Hotmart repete a data de aprovação da compra; o estado do inscrito
+  // passa a ser o do evento mais novo (como faz hotmart_registrar_compra).
+  const marcarDesfeita = (inscricao, evento, status, quando) => {
+    aviso({ evento_em: quando, aprovado_em: inscricao.comprou_em, evento, status, transacao: inscricao.compra_transacao, comprador_nome: inscricao.nome, comprador_email: inscricao.email, valor: inscricao.compra_valor, sck: inscricao._sck, pagina: inscricao.pagina, inscricao_id: inscricao.id, casou: true });
+    inscricao.comprou_em = null;
+    inscricao.compra_status = status;
+    inscricao.compra_evento_em = quando;
+  };
+
+  // --- Viver de Furo: 120 inscritos, ~18% comprando, o utm_term é o sck. Mais 2 vendas do mesmo
+  //     produto que NÃO casam (outro link, outro e-mail), 1 reembolso e 1 venda de produto de fora.
+  const r3 = rng(seed + 202);
+  const VDF = CHK.PAGINAS["viver-de-furo"];
   const ORIGENS = [
     { utm_source: "facebook", utm_medium: "paid", utm_campaign: "viver-de-furo-set", utm_term: "criativo-07" },
     { utm_source: "facebook", utm_medium: "paid", utm_campaign: "viver-de-furo-set", utm_term: "criativo-09" },
@@ -299,9 +359,9 @@ export function gerar({ seed = 7, pessoas: totalPessoas = 800, agora = new Date(
     const digits = `${DDD[Math.floor(r3() * DDD.length)]}9${String(10000000 + Math.floor(r3() * 89999999))}`.slice(0, 11);
     const valor = [97, 197, 297][Math.floor(r3() * 3)];
     const compradoEm = comprou ? new Date(Math.min(new Date(criado).getTime() + 600000, agoraMs - 1000)).toISOString() : null;
-    inscricoes.push({
+    const inscricao = {
       id: `20000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
-      pagina: PAGINA_INSCRICAO.id,
+      pagina: VDF.id,
       criado_em: criado,
       atualizado_em: criado,
       nome,
@@ -315,38 +375,158 @@ export function gerar({ seed = 7, pessoas: totalPessoas = 800, agora = new Date(
       compra_status: comprou ? "APPROVED" : null,
       compra_valor: comprou ? valor : null,
       compra_transacao: comprou ? `HP${100000 + i}` : null,
+      compra_evento_em: compradoEm,
       ...origem,
       utm_content: null,
       fbclid: null,
       gclid: null,
-      page_url: `https://lp.exemplo${PAGINA_INSCRICAO.rota}`,
+      page_url: `https://lp.exemplo${VDF.rota}`,
       referrer: null,
       dispositivo: "mobile"
-    });
+    };
+    inscricao.checkout_url = linkDoCheckout(VDF, inscricao, i);
+    inscricoes.push(inscricao);
     if (comprou) {
-      compras.push({
-        recebido_em: compradoEm,
-        evento: "PURCHASE_APPROVED",
-        status: "APPROVED",
-        comprador_nome: nome,
-        comprador_email: inscricoes[inscricoes.length - 1].email,
-        valor,
-        pagina: PAGINA_INSCRICAO.id,
-        casou: true
-      });
+      // Venda de mais de 8 dias: gravada pela versão ANTERIOR da tabela (pagina_por null; o evento_em
+      // veio do creation_date do payload, no backfill do supabase.sql).
+      const antiga = new Date(compradoEm).getTime() < agoraMs - 8 * DIA;
+      aviso({ evento_em: compradoEm, aprovado_em: compradoEm, evento: "PURCHASE_APPROVED", status: "APPROVED", transacao: inscricao.compra_transacao, comprador_nome: nome, comprador_email: inscricao.email, valor, sck: sckQueFoi(inscricao, "utm_term"), pagina: VDF.id, pagina_por: antiga ? null : "config", inscricao_id: inscricao.id, casou: true });
     }
   }
-  for (let i = 0; i < 3; i++) {
-    compras.push({
-      recebido_em: carimbo(i),
-      evento: "PURCHASE_APPROVED",
-      status: "APPROVED",
-      comprador_nome: `Comprou Por Fora ${i + 1}`,
-      comprador_email: `porfora${i}@gmail.com`,
-      valor: 197,
-      pagina: null,
-      casou: false
-    });
+  // Comprou por outro link: a Hotmart devolve o sck dela (visto nos avisos reais) ou nenhum.
+  for (let i = 0; i < 2; i++) {
+    const quando = carimbo(i);
+    aviso({ evento_em: quando, aprovado_em: quando, evento: "PURCHASE_APPROVED", status: "APPROVED", transacao: `HPVF-FORA-${i + 1}`, comprador_nome: `Comprou Por Fora ${i + 1}`, comprador_email: `porfora${i}@gmail.com`, valor: 197, sck: i === 0 ? "HOTMART_SALES_AGENT" : null, pagina: VDF.id });
+  }
+  // Produto que não é de página nenhuma (a Formação, um order bump): gravado, mas fora das abas.
+  const formacao = carimbo(2);
+  aviso({ evento_em: formacao, aprovado_em: formacao, evento: "PURCHASE_APPROVED", status: "APPROVED", transacao: "HPFORA-FORMACAO-1", comprador_nome: "Comprou A Formação", comprador_email: "formacao@gmail.com", valor: 997, sck: null, pagina: null });
+  // Um reembolso, e o APPROVED dele chegou DEPOIS do REFUNDED (a primeira entrega falhou e a Hotmart
+  // repetiu 6 horas depois, e ganhou id novo). Pela hora do EVENTO, o último foi o reembolso: a
+  // venda sai da conta e a inscrição continua desmarcada (o aviso velho não sobrescreve o estado).
+  const reembolsadaVdf = inscricoes.find((i) => i.pagina === VDF.id && i.comprou_em && new Date(i.comprou_em).getTime() < agoraMs - 3 * DIA);
+  if (reembolsadaVdf) {
+    reembolsadaVdf._sck = sckQueFoi(reembolsadaVdf, "utm_term");
+    const [{ id: _primeiraEntrega, recebido_em: _chegada, ...aprovada }] = compras.splice(
+      compras.findIndex((c) => c.transacao === reembolsadaVdf.compra_transacao),
+      1
+    );
+    const reembolso = depois(reembolsadaVdf.comprou_em, 2 * DIA);
+    marcarDesfeita(reembolsadaVdf, "PURCHASE_REFUNDED", "REFUNDED", reembolso);
+    aviso({ ...aprovada, recebido_em: depois(reembolso, 6 * 3600000) });
+  }
+  // Um aviso antigo cujo payload não tinha creation_date nem approved_date: sem evento_em nem
+  // aprovado_em, a hora que vale é a da chegada (coalesce(evento_em, recebido_em) no SQL), inclusive
+  // para o comprou_em que ele gravou no inscrito.
+  const semHora = compras.find((c) => c.pagina === VDF.id && c.pagina_por === null && c.inscricao_id && c.transacao !== reembolsadaVdf?.compra_transacao);
+  if (semHora) {
+    semHora.evento_em = null;
+    semHora.aprovado_em = null;
+    const dono = inscricoes.find((i) => i.id === semHora.inscricao_id);
+    dono.comprou_em = semHora.recebido_em;
+    dono.compra_evento_em = semHora.recebido_em;
+  }
+
+  // --- Imersão GPS (página de outro site): 90 inscritos, e-mail só .com/.com.br, ~30% comprando o
+  //     ingresso (lote 1 R$ 5, lote 2 R$ 10), o utm_content é o sck. Mais: vendas sem inscrição
+  //     (outro e-mail, link direto sem sck, a própria Hotmart), um chargeback, um reembolso, compras
+  //     completas (a mesma transação duas vezes), boleto e abandono, e um criativo com HTML no nome.
+  const r4 = rng(seed + 303);
+  const GPS = CHK.PAGINAS["imersao-gps"];
+  const ORIGENS_GPS = [
+    { utm_source: "facebook", utm_medium: "paid", utm_campaign: "igps-set26-frio", utm_term: "publico-frio", utm_content: "video-iza-01" },
+    { utm_source: "facebook", utm_medium: "paid", utm_campaign: "igps-set26-frio", utm_term: "publico-frio", utm_content: "carrossel-02" },
+    { utm_source: "facebook", utm_medium: "paid", utm_campaign: "igps-set26-quente", utm_term: "lookalike-alunas", utm_content: "video-iza-01" },
+    { utm_source: "instagram", utm_medium: "stories", utm_campaign: "igps-organico", utm_term: null, utm_content: "stories-contagem" },
+    { utm_source: "whatsapp", utm_medium: "lista", utm_campaign: "lista-vip", utm_term: null, utm_content: null },
+    { utm_source: null, utm_medium: null, utm_campaign: null, utm_term: null, utm_content: null }
+  ];
+  const DOMINIOS_GPS = ["gmail.com", "gmail.com", "gmail.com", "hotmail.com", "outlook.com", "yahoo.com.br", "uol.com.br", "icloud.com"];
+  const XSS_SCK = `<img src=x onerror="window.__xss=2">criativo`;
+  for (let i = 0; i < 90; i++) {
+    const criado = i === 7 ? new Date(agoraMs - 3 * 3600000).toISOString() : carimbo(Math.floor(Math.pow(r4(), 1.3) * 9));
+    const origem = i === 7 ? { ...ORIGENS_GPS[0], utm_content: XSS_SCK } : ORIGENS_GPS[Math.floor(Math.pow(r4(), 1.4) * ORIGENS_GPS.length)];
+    const comprou = i === 7 || r4() < 0.3;
+    const nome = `${NOMES[Math.floor(r4() * NOMES.length)]} ${SOBRENOMES[Math.floor(r4() * SOBRENOMES.length)]}`;
+    const digits = `${DDD[Math.floor(r4() * DDD.length)]}9${String(10000000 + Math.floor(r4() * 89999999))}`.slice(0, 11);
+    const valor = r4() < 0.7 ? 5 : 10;
+    const compradoEm = comprou ? new Date(Math.min(new Date(criado).getTime() + 420000, agoraMs - 1000)).toISOString() : null;
+    const inscricao = {
+      id: `30000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+      pagina: GPS.id,
+      criado_em: criado,
+      atualizado_em: criado,
+      nome,
+      whatsapp: `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`,
+      whatsapp_digits: digits,
+      whatsapp_internacional: `55${digits}`,
+      email: `${nome.split(" ")[0].normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()}.gps${i}@${DOMINIOS_GPS[Math.floor(r4() * DOMINIOS_GPS.length)]}`,
+      cliques: 1 + (r4() < 0.3 ? 1 : 0),
+      clicou_em: criado,
+      comprou_em: compradoEm,
+      compra_status: comprou ? "APPROVED" : null,
+      compra_valor: comprou ? valor : null,
+      compra_transacao: comprou ? `HPGPS${200000 + i}` : null,
+      compra_evento_em: compradoEm,
+      ...origem,
+      fbclid: origem.utm_source === "facebook" ? `IwAR-gps-${i}` : null,
+      gclid: null,
+      page_url: `${GPS.origem}${GPS.rota}`,
+      referrer: null,
+      dispositivo: i % 9 === 0 ? "desktop" : "mobile"
+    };
+    inscricao.checkout_url = linkDoCheckout(GPS, inscricao, i);
+    inscricoes.push(inscricao);
+    if (comprou) {
+      // A do criativo com HTML no nome chegou 2 h depois do evento (o webhook estava fora do ar e a
+      // Hotmart repetiu): em "Compras recentes", o "Quando" é a hora do EVENTO, não a da chegada.
+      aviso({ evento_em: compradoEm, aprovado_em: compradoEm, ...(i === 7 ? { recebido_em: depois(compradoEm, 2 * 3600000) } : {}), evento: "PURCHASE_APPROVED", status: "APPROVED", transacao: inscricao.compra_transacao, comprador_nome: nome, comprador_email: inscricao.email, valor, sck: sckQueFoi(inscricao, "utm_content"), pagina: GPS.id, inscricao_id: inscricao.id, casou: true });
+    }
+  }
+  const compradasGps = inscricoes.filter((i) => i.pagina === GPS.id && i.comprou_em);
+  // Garantia vencida: a Hotmart manda PURCHASE_COMPLETE da MESMA transação (uma venda, não duas),
+  // dias depois e com a data de aprovação de antes: a venda continua no dia em que foi APROVADA, e
+  // não aparece como venda do dia da completa. O segundo chegou sem o sck: a venda fica com o do
+  // APPROVED (o sck mais recente que veio preenchido).
+  for (const [k, inscricao] of compradasGps.filter((i) => new Date(i.comprou_em).getTime() < agoraMs - 2 * DIA).slice(0, 2).entries()) {
+    const completa = depois(inscricao.comprou_em, 7 * DIA);
+    aviso({ evento_em: completa, aprovado_em: inscricao.comprou_em, evento: "PURCHASE_COMPLETE", status: "COMPLETE", transacao: inscricao.compra_transacao, comprador_nome: inscricao.nome, comprador_email: inscricao.email, valor: inscricao.compra_valor, sck: k === 1 ? null : sckQueFoi(inscricao, "utm_content"), pagina: GPS.id, inscricao_id: inscricao.id, casou: true });
+    inscricao.compra_status = "COMPLETE";
+    inscricao.compra_evento_em = completa;
+  }
+  const reembolsadaGps = compradasGps.filter((i) => new Date(i.comprou_em).getTime() < agoraMs - 2 * DIA)[2];
+  if (reembolsadaGps) {
+    reembolsadaGps._sck = sckQueFoi(reembolsadaGps, "utm_content");
+    marcarDesfeita(reembolsadaGps, "PURCHASE_REFUNDED", "REFUNDED", depois(reembolsadaGps.comprou_em, DIA));
+  }
+  // Vendas do ingresso que não casam com ninguém: clicou no anúncio mas pagou com outro e-mail e
+  // outro telefone (sck do criativo), link direto da Hotmart (sem sck), a própria Hotmart vendendo.
+  for (const [dias, fora] of [
+    [1, { transacao: "HPGPS-FORA-1", comprador_nome: "Bruna Outro E-mail", comprador_email: "bruna.outro@gmail.com", valor: 5, sck: "video-iza-01" }],
+    [2, { transacao: "HPGPS-FORA-2", comprador_nome: "Link Direto", comprador_email: "direto@hotmail.com", valor: 10, sck: null }],
+    [3, { transacao: "HPGPS-FORA-3", comprador_nome: "Afiliada Hotmart", comprador_email: "afiliada@outlook.com", valor: 5, sck: "HOTMART_SALES_AGENT" }]
+  ]) {
+    const quando = carimbo(dias);
+    aviso({ evento_em: quando, aprovado_em: quando, evento: "PURCHASE_APPROVED", status: "APPROVED", ...fora, pagina: GPS.id });
+  }
+  // Aprovada e depois chargeback: sai das vendas.
+  const aprovadaChargeback = carimbo(5);
+  const contestado = { transacao: "HPGPS-FORA-4", comprador_nome: "Cartão Contestado", comprador_email: "contestado@gmail.com", valor: 5, sck: "carrossel-02", aprovado_em: aprovadaChargeback, pagina: GPS.id };
+  aviso({ evento_em: aprovadaChargeback, evento: "PURCHASE_APPROVED", status: "APPROVED", ...contestado });
+  aviso({ evento_em: depois(aprovadaChargeback, DIA), evento: "PURCHASE_CHARGEBACK", status: "CHARGEBACK", ...contestado });
+  // Boleto gerado e checkout abandonado de quem se inscreveu e não pagou: aviso, não venda.
+  const naoCompraramGps = inscricoes.filter((i) => i.pagina === GPS.id && !i.compra_transacao);
+  if (naoCompraramGps[0]) {
+    const x = naoCompraramGps[0];
+    aviso({ evento_em: depois(x.criado_em, 300000), evento: "PURCHASE_BILLET_PRINTED", status: "BILLET_PRINTED", transacao: "HPGPS-BOLETO-1", comprador_nome: x.nome, comprador_email: x.email, valor: 10, sck: x.utm_content, pagina: GPS.id, inscricao_id: x.id, casou: true });
+  }
+  if (naoCompraramGps[1]) {
+    const x = naoCompraramGps[1];
+    aviso({ evento_em: depois(x.criado_em, 240000), evento: "PURCHASE_OUT_OF_SHOPPING_CART", status: null, transacao: null, comprador_nome: x.nome, comprador_email: x.email, valor: null, sck: null, pagina: GPS.id, inscricao_id: x.id, casou: true });
+  }
+  for (const inscricao of inscricoes) {
+    delete inscricao._sck;
+    delete inscricao._reenviou;
   }
   return { visitantes, pessoas: respostas, eventos, inscricoes, compras };
 }
@@ -597,35 +777,120 @@ export function paginas(dados, { desde, ate } = {}) {
 /* ------------------------------------------------------------------ Inscrições (espelho do SQL) */
 
 const diaDe = (iso) => diaSP(iso);
+const APROVADOS = ["PURCHASE_APPROVED", "PURCHASE_COMPLETE"];
+const DESFECHOS = [...APROVADOS, "PURCHASE_CANCELED", "PURCHASE_REFUNDED", "PURCHASE_CHARGEBACK", "PURCHASE_PROTEST"];
+const ms = (iso) => new Date(iso).getTime();
+/** Ordem de chegada do SQL: recebido_em desc, id desc (o mais recente primeiro). */
+const porChegada = (a, b) => ms(b.recebido_em) - ms(a.recebido_em) || b.id - a.id;
+/** coalesce(evento_em, recebido_em): quando o evento ACONTECEU (aviso sem a hora do evento: a chegada). */
+const momento = (c) => ms(c.evento_em ?? c.recebido_em);
+/** Ordem do histórico de uma venda no SQL: momento desc, recebido_em desc, id desc. */
+const porMomento = (a, b) => momento(b) - momento(a) || porChegada(a, b);
+/** btrim(x) do SQL: tira só espaços das pontas. */
+const btrim = (valor) => String(valor).replace(/^ +| +$/g, "");
+/** nullif(btrim(x), '') is not null */
+const preenchido = (valor) => valor != null && btrim(valor) !== "";
+const centavos = (valor) => Math.round(valor * 100) / 100;
+/** `collate "C"` do SQL: ordem de byte (os valores das fixtures são ASCII). */
+const ordemC = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
-/** O que inscricoes_resumo devolve, calculado em JS sobre as fixtures. */
+/**
+ * Os CTEs `historico` e `vendas` de inscricoes_resumo: uma linha por VENDA (transação) do lado da
+ * Hotmart que conta no recorte.
+ *   . histórico = TODOS os avisos de compra/desfazimento da transação (do produto da página, se há
+ *     p_pagina) cujo EVENTO aconteceu antes de p_ate (coalesce(evento_em, recebido_em) < p_ate: a
+ *     venda de 23:59 cujo aviso chega 00:00, ou reenviado dias depois, fica no dia dela) — sem
+ *     cortar em p_desde;
+ *   . estado = o evento mais recente pela hora do EVENTO (coalesce(evento_em, recebido_em); a
+ *     chegada e o id desempatam): o APPROVED reenviado depois do REFUNDED não ressuscita a venda;
+ *   . sck = o mais recente preenchido; valor = o mais recente de aprovada/completa; inscricao_id =
+ *     o mais recente não nulo; aprovada_em = a PRIMEIRA aprovação (coalesce(aprovado_em, momento));
+ *   . conta se o estado é aprovada/completa e aprovada_em está em [p_desde, p_ate).
+ */
+function vendasDoRecorte(compras, { desde, ate, pagina }) {
+  const historico = compras
+    .filter((c) => (!pagina || c.pagina === pagina) && (!ate || momento(c) < ms(ate)) && c.transacao != null && DESFECHOS.includes(c.evento))
+    .sort(porMomento);
+  const porTransacao = new Map();
+  for (const h of historico) {
+    if (!porTransacao.has(h.transacao)) porTransacao.set(h.transacao, []);
+    porTransacao.get(h.transacao).push(h);
+  }
+  const vendas = [];
+  for (const [transacao, avisos] of porTransacao) {
+    const [ultimo] = avisos;
+    if (!APROVADOS.includes(ultimo.evento)) continue;
+    const aprovados = avisos.filter((h) => APROVADOS.includes(h.evento));
+    const aprovadaEm = Math.min(...aprovados.map((h) => ms(h.aprovado_em ?? h.evento_em ?? h.recebido_em)));
+    if ((desde && aprovadaEm < ms(desde)) || (ate && aprovadaEm >= ms(ate))) continue;
+    vendas.push({
+      transacao,
+      evento: ultimo.evento,
+      pagina: ultimo.pagina ?? null,
+      sck: avisos.find((h) => preenchido(h.sck))?.sck ?? null,
+      valor: aprovados.find((h) => h.valor != null)?.valor ?? null,
+      inscricao_id: avisos.find((h) => h.inscricao_id != null)?.inscricao_id ?? null,
+      aprovada_em: new Date(aprovadaEm).toISOString()
+    });
+  }
+  return vendas;
+}
+
+/**
+ * O que inscricoes_resumo(p_desde, p_ate, p_pagina) devolve, calculado em JS sobre as fixtures.
+ * Mesmo contrato do supabase.sql (seção 6): inscritos pela data da inscrição; com p_pagina, os
+ * avisos são só os do produto daquela página; `vendas` (e vendas_receita, vendas_por_sck e
+ * compras_sem_inscricao) saem de vendasDoRecorte, a régua do SQL; compras_recentes são os avisos
+ * que CHEGARAM no período.
+ */
 export function inscricoesResumo(dados, { desde, ate, pagina } = {}) {
   const todas = (dados.inscricoes || []).filter(
     (i) => noRecorte(i.criado_em, desde, ate) && (!pagina || i.pagina === pagina)
   );
-  const compras = (dados.compras || []).filter(
-    (c) => noRecorte(c.recebido_em, desde, ate) && (!pagina || c.pagina === pagina || c.pagina == null)
-  );
-  const paginas = pagina ? [pagina] : Array.from(new Set(todas.map((i) => i.pagina))).sort();
+  const eventos = (dados.compras || [])
+    .filter((c) => noRecorte(c.recebido_em, desde, ate) && (!pagina || c.pagina === pagina))
+    .sort(porChegada);
+  const vendas = vendasDoRecorte(dados.compras || [], { desde, ate, pagina });
+  // Com p_pagina, só ela (mesmo zerada). Sem, toda página que teve inscrição OU venda no período.
+  const paginas = pagina
+    ? [pagina]
+    : Array.from(new Set([...todas.map((i) => i.pagina), ...vendas.map((v) => v.pagina).filter((p) => p != null)])).sort(ordemC);
 
   const divisao = (lista, campo, chave) => {
     const grupos = new Map();
     for (const i of lista) {
-      const k = (i[campo] && String(i[campo]).trim()) || "(sem utm)";
+      const k = preenchido(i[campo]) ? btrim(i[campo]) : "(sem utm)";
       if (!grupos.has(k)) grupos.set(k, { inscritos: 0, compras: 0 });
       const g = grupos.get(k);
       g.inscritos += 1;
       if (i.comprou_em) g.compras += 1;
     }
     return Array.from(grupos, ([valor, g]) => ({ [chave]: valor, inscritos: g.inscritos, compras: g.compras }))
-      .sort((a, b) => b.inscritos - a.inscritos || b.compras - a.compras || (a[chave] < b[chave] ? -1 : 1))
+      .sort((a, b) => b.inscritos - a.inscritos || b.compras - a.compras || ordemC(a[chave], b[chave]))
       .slice(0, 50);
+  };
+
+  const porSck = (lista) => {
+    const grupos = new Map();
+    for (const v of lista) {
+      const k = preenchido(v.sck) ? btrim(v.sck) : "(sem sck)";
+      if (!grupos.has(k)) grupos.set(k, { vendas: 0, receita: 0, casadas: 0 });
+      const g = grupos.get(k);
+      g.vendas += 1;
+      g.receita += Number(v.valor || 0);
+      if (v.inscricao_id != null) g.casadas += 1;
+    }
+    // limit 500 no SQL: é por venda, e com utm_content={{ad.name}} passa fácil de 50 criativos.
+    return Array.from(grupos, ([sck, g]) => ({ sck, vendas: g.vendas, receita: centavos(g.receita), casadas: g.casadas }))
+      .sort((a, b) => b.vendas - a.vendas || b.receita - a.receita || ordemC(a.sck, b.sck))
+      .slice(0, 500);
   };
 
   return {
     paginas: paginas.map((id) => {
       const minhas = todas.filter((i) => i.pagina === id);
       const compradas = minhas.filter((i) => i.comprou_em);
+      const minhasVendas = vendas.filter((v) => v.pagina === id);
       const dias = new Map();
       for (const i of minhas) {
         const d = diaDe(i.criado_em);
@@ -643,19 +908,76 @@ export function inscricoesResumo(dados, { desde, ate, pagina } = {}) {
         inscritos,
         cliques: minhas.reduce((s, i) => s + i.cliques, 0),
         compras: compradas.length,
-        receita: Math.round(compradas.reduce((s, i) => s + Number(i.compra_valor || 0), 0) * 100) / 100,
+        receita: centavos(compradas.reduce((s, i) => s + Number(i.compra_valor || 0), 0)),
         taxa_compra: inscritos ? Math.round((compradas.length / inscritos) * 1000) / 10 : 0,
         por_origem: divisao(minhas, "utm_source", "utm_source"),
+        por_midia: divisao(minhas, "utm_medium", "utm_medium"),
         por_campanha: divisao(minhas, "utm_campaign", "utm_campaign"),
+        por_conteudo: divisao(minhas, "utm_content", "utm_content"),
         por_termo: divisao(minhas, "utm_term", "utm_term"),
+        vendas: minhasVendas.length,
+        vendas_receita: centavos(minhasVendas.reduce((s, v) => s + Number(v.valor || 0), 0)),
+        vendas_por_sck: porSck(minhasVendas),
         por_dia: Array.from(dias, ([dia, g]) => ({ dia, ...g })).sort((a, b) => a.dia.localeCompare(b.dia))
       };
     }),
-    compras_sem_inscricao: compras.filter((c) => !c.casou && ["PURCHASE_APPROVED", "PURCHASE_COMPLETE"].includes(c.evento)).length,
-    compras_recentes: compras
-      .slice()
-      .sort((a, b) => b.recebido_em.localeCompare(a.recebido_em))
-      .slice(0, 20)
+    // As vendas de cima que não casaram com ninguém (= vendas − casadas; a reembolsada já saiu). Sem
+    // p_pagina entram também as de produto de fora (pagina null).
+    compras_sem_inscricao: vendas.filter((v) => v.inscricao_id == null).length,
+    // Os que CHEGARAM no período (recebido_em), e com a hora do EVENTO na Hotmart (evento_em; null
+    // no aviso antigo sem creation_date).
+    compras_recentes: eventos.slice(0, 20).map((c) => ({
+      recebido_em: c.recebido_em,
+      evento_em: c.evento_em ?? null,
+      evento: c.evento,
+      status: c.status,
+      comprador_nome: c.comprador_nome,
+      comprador_email: c.comprador_email,
+      valor: c.valor,
+      pagina: c.pagina,
+      sck: c.sck,
+      casou: c.inscricao_id != null
+    }))
+  };
+}
+
+/**
+ * O mesmo resumo como o SQL ANTIGO (o de produção antes de por_midia, por_conteudo e das vendas)
+ * devolvia. Com `dados`, também o compras_sem_inscricao e o compras_recentes de lá: AVISOS de compra
+ * aprovada/completa no período que não casaram (um por aviso, reembolsada inclusive) e os avisos do
+ * período, os de produto de fora (pagina null) junto com os da página, sem o sck e sem o evento_em
+ * (só a hora da chegada); e, sem p_pagina, só as páginas que tiveram inscrição.
+ */
+export function comoSqlAntigo(resumo, dados, { desde, ate, pagina } = {}) {
+  const antigo = {
+    ...resumo,
+    paginas: resumo.paginas.map((linha) => {
+      const { por_midia, por_conteudo, vendas, vendas_receita, vendas_por_sck, ...resto } = linha;
+      return resto;
+    }),
+    compras_recentes: resumo.compras_recentes.map((compra) => {
+      const { sck, evento_em, ...resto } = compra;
+      return resto;
+    })
+  };
+  if (!dados) return antigo;
+  const eventos = (dados.compras || [])
+    .filter((c) => noRecorte(c.recebido_em, desde, ate) && (!pagina || c.pagina === pagina || c.pagina == null))
+    .sort(porChegada);
+  return {
+    ...antigo,
+    paginas: antigo.paginas.filter((linha) => pagina || linha.inscritos > 0),
+    compras_sem_inscricao: eventos.filter((c) => c.inscricao_id == null && APROVADOS.includes(c.evento)).length,
+    compras_recentes: eventos.slice(0, 20).map((c) => ({
+      recebido_em: c.recebido_em,
+      evento: c.evento,
+      status: c.status,
+      comprador_nome: c.comprador_nome,
+      comprador_email: c.comprador_email,
+      valor: c.valor,
+      pagina: c.pagina,
+      casou: c.inscricao_id != null
+    }))
   };
 }
 

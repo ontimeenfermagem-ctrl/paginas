@@ -204,13 +204,15 @@ const MAPA_PERFIL_PAGINA = Object.freeze(
   Object.fromEntries(Array.from(obrigado.LISTA).flatMap((pagina) => Array.from(pagina.perfis, (perfil) => [perfil, pagina.id])))
 );
 
-// Páginas de inscrição com checkout na Hotmart (js/checkout-config.js). Hoje é uma só
-// (/viver-de-furo-inscricao), mas nada aqui usa o nome dela: a LISTA manda. Cada rota serve o
-// arquivo de mesmo nome (/viver-de-furo-inscricao → viver-de-furo-inscricao.html).
+// Páginas de inscrição com checkout na Hotmart (js/checkout-config.js). Nada aqui usa o nome de
+// nenhuma: a LISTA manda. Cada rota de página que mora AQUI serve o arquivo de mesmo nome
+// (/viver-de-furo-inscricao → viver-de-furo-inscricao.html). Página com `origem` mora em outro site
+// (a venda da Imersão GPS): não tem arquivo aqui, só manda o formulário para o /api/inscricao.
 const PAGINAS_CHECKOUT = Array.from(checkout.LISTA);
-const ARQUIVO_INSCRICAO = new Map(PAGINAS_CHECKOUT.map((pagina) => [pagina.rota, `${pagina.rota}.html`]));
+const PAGINAS_CHECKOUT_LOCAIS = PAGINAS_CHECKOUT.filter((pagina) => !pagina.origem);
+const ARQUIVO_INSCRICAO = new Map(PAGINAS_CHECKOUT_LOCAIS.map((pagina) => [pagina.rota, `${pagina.rota}.html`]));
 // O caminho do arquivo → a rota pública dele (para og:url, canonical e o cache do estático).
-const ROTA_DA_INSCRICAO = new Map(PAGINAS_CHECKOUT.map((pagina) => [`${pagina.rota}.html`, pagina.rota]));
+const ROTA_DA_INSCRICAO = new Map(PAGINAS_CHECKOUT_LOCAIS.map((pagina) => [`${pagina.rota}.html`, pagina.rota]));
 
 const routeAliases = new Map([
   [PESQUISA_ROTA, PESQUISA_PAGE],
@@ -333,6 +335,60 @@ function acceptsJsonBody(request, response) {
   if (JSON_CONTENT_TYPE_PATTERN.test(String(request.headers["content-type"] || ""))) return true;
   sendJson(response, 415, { ok: false, error: "unsupported_media_type" });
   return false;
+}
+
+/*
+ * CORS do POST /api/inscricao. A página de venda da Imersão GPS mora em outro site
+ * (io.escolaenfermagemdevalor.com.br) e manda o formulário para cá. Só as origens da lista
+ * (js/checkout-config.js ORIGENS + INSCRICAO_ORIGENS, para teste e preview) recebem
+ * Access-Control-Allow-Origin; sem cookie, sem credencial.
+ *
+ * De uma origem liberada, o corpo JSON também é aceito como text/plain: é o "simple request" do
+ * navegador — sem preflight (uma ida a menos antes do checkout) e o único tipo que o
+ * navigator.sendBeacon consegue mandar de outro site. De qualquer outra origem, continua valendo
+ * só application/json, que um formulário HTML de outro site não consegue enviar.
+ */
+const TEXT_PLAIN_PATTERN = /^text\/plain\b/i;
+
+export function normalizarOrigem(valor) {
+  const texto = String(valor ?? "").trim().toLowerCase().replace(/\/+$/, "");
+  return /^https?:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)*(?::\d{1,5})?$/.test(texto) ? texto : "";
+}
+
+function origemLiberada(request, options) {
+  const origem = normalizarOrigem(primeiroValor(request.headers.origin));
+  return origem && options.origensInscricao.has(origem) ? origem : "";
+}
+
+function aceitaCorpoDaInscricao(request, response, options) {
+  const tipo = String(request.headers["content-type"] || "");
+  if (JSON_CONTENT_TYPE_PATTERN.test(tipo)) return true;
+  if (TEXT_PLAIN_PATTERN.test(tipo) && origemLiberada(request, options)) return true;
+  sendJson(response, 415, { ok: false, error: "unsupported_media_type" });
+  return false;
+}
+
+/** Cabeçalhos CORS da origem liberada (antes de qualquer resposta) e o preflight. true = já respondeu. */
+function corsDaInscricao(request, response, options) {
+  const origem = origemLiberada(request, options);
+  if (origem) {
+    response.setHeader("Access-Control-Allow-Origin", origem);
+    response.setHeader("Vary", "Origin");
+  }
+  if (request.method !== "OPTIONS") return false;
+  if (!origem) {
+    sendJson(response, 403, { ok: false, error: "origin_not_allowed" });
+    return true;
+  }
+  response.writeHead(204, {
+    "Access-Control-Allow-Methods": "POST",
+    "Access-Control-Allow-Headers": "Content-Type",
+    // 2 h é o teto do Chrome: o preflight não se repete a cada envio.
+    "Access-Control-Max-Age": "7200",
+    "Cache-Control": "no-store"
+  });
+  response.end();
+  return true;
 }
 
 // O proxy (Railway) acrescenta o IP real à DIREITA do X-Forwarded-For; tudo o que vem antes é
@@ -582,9 +638,10 @@ function normalizarUuid(valor) {
 
 /**
  * Valida o contato com as MESMAS regras da tela. Devolve { contato } ou { campos } com as
- * mensagens prontas, para a tela mostrar no campo certo.
+ * mensagens prontas, para a tela mostrar no campo certo. `opcoes.somenteComBr` é a régua de e-mail
+ * de uma página de inscrição (js/checkout-config.js, emailSomenteComBr); a pesquisa não passa nada.
  */
-export function validarContato(fonte) {
+export function validarContato(fonte, opcoes = {}) {
   const c = isPlainObject(fonte) ? fonte : {};
   const campos = {};
 
@@ -602,7 +659,7 @@ export function validarContato(fonte) {
   if (erroWhatsapp) campos.whatsapp = leadRules.message("phone", erroWhatsapp);
 
   const email = leadRules.normalizeEmail(typeof c.email === "string" ? c.email : "");
-  const erroEmail = leadRules.emailError(email);
+  const erroEmail = leadRules.emailError(email, { somenteComBr: Boolean(opcoes && opcoes.somenteComBr === true) });
   if (erroEmail) campos.email = leadRules.message("email", erroEmail);
 
   if (Object.keys(campos).length) return { campos };
@@ -1172,7 +1229,8 @@ async function handleSalvar(request, response, options) {
 /* ------------------------------------------------------------------------------------------ */
 
 /**
- * POST /api/inscricao — o formulário de /viver-de-furo-inscricao.
+ * POST /api/inscricao — o formulário das páginas de inscrição: /viver-de-furo-inscricao (daqui) e o
+ * pré-formulário da venda da Imersão GPS (de outro site, por CORS; ver corsDaInscricao).
  *
  * Quem monta o link do checkout é o SERVIDOR (EVCheckout.montarUrlCheckout), e é essa URL que a
  * resposta devolve: o navegador não remonta nada, então uma UTM não se perde por causa de um
@@ -1180,8 +1238,9 @@ async function handleSalvar(request, response, options) {
  * MESMA régua do /api/pesquisa/salvar, inclusive a checagem de domínio do e-mail.
  */
 async function handleInscricao(request, response, options) {
-  if (request.method !== "POST") return methodNotAllowed(response, "POST");
-  if (!acceptsJsonBody(request, response)) return;
+  if (corsDaInscricao(request, response, options)) return;
+  if (request.method !== "POST") return methodNotAllowed(response, "POST, OPTIONS");
+  if (!aceitaCorpoDaInscricao(request, response, options)) return;
 
   if (!options.allowInscricao(request)) {
     sendJson(response, 429, { ok: false, error: "too_many_requests" });
@@ -1199,7 +1258,7 @@ async function handleInscricao(request, response, options) {
     return;
   }
 
-  const validacao = validarContato(body.contato);
+  const validacao = validarContato(body.contato, { somenteComBr: pagina.emailSomenteComBr === true });
   if (validacao.campos) {
     sendJson(response, 422, { ok: false, error: "invalid_contact", campos: validacao.campos });
     return;
@@ -1217,7 +1276,9 @@ async function handleInscricao(request, response, options) {
   }
 
   const rastreio = normalizarRastreio(body.rastreio);
-  const checkoutUrl = checkout.montarUrlCheckout(pagina.checkout, { utm: rastreio, contato });
+  // `checkout` = o link do botão que a pessoa tocou. Só vale a oferta dele, e só se for do mesmo
+  // produto do config (troca de lote sem mexer aqui); qualquer outra coisa usa o link do config.
+  const checkoutUrl = checkout.urlDoCheckout(pagina, { base: body.checkout, utm: rastreio, contato });
 
   try {
     await callRpc(options, "inscricao_salvar", {
@@ -1279,10 +1340,28 @@ function texto(valor, tamanho = 500) {
   return nullableString(valor, tamanho);
 }
 
+function primeiroTexto(valores, tamanho = 500) {
+  for (const valor of valores) {
+    const limpo = texto(valor, tamanho);
+    if (limpo) return limpo;
+  }
+  return null;
+}
+
+/** O sck que foi de fato no link do checkout aberto (o último, se a pessoa enviou mais de uma vez). */
+function sckDoLink(url) {
+  try {
+    return new URL(String(url || "")).searchParams.get("sck") || "";
+  } catch {
+    return "";
+  }
+}
+
 /**
  * Os campos que importam do payload da Hotmart (Webhook 2.0), tolerando as variações de formato:
- * o comprador vem em data.buyer OU em data.purchase.buyer; o rastreio em
- * data.purchase.tracking.{source,source_sck,external_code} OU em data.purchase.sckPaymentLink.
+ * o comprador vem em data.buyer OU em data.purchase.buyer; a oferta em data.purchase.offer OU em
+ * data.offer (aviso de carrinho abandonado); o rastreio em data.purchase.origin.{sck,src} (é onde
+ * os avisos reais trazem), com data.purchase.tracking e data.purchase.sckPaymentLink de reserva.
  * O que não for reconhecido não se perde: o payload CRU vai inteiro para compras.payload.
  */
 export function extrairVendaHotmart(corpo) {
@@ -1292,7 +1371,8 @@ export function extrairVendaHotmart(corpo) {
   const buyer = isPlainObject(d.buyer) ? d.buyer : isPlainObject(purchase.buyer) ? purchase.buyer : {};
   const product = isPlainObject(d.product) ? d.product : {};
   const price = isPlainObject(purchase.price) ? purchase.price : {};
-  const offer = isPlainObject(purchase.offer) ? purchase.offer : {};
+  const offer = isPlainObject(purchase.offer) ? purchase.offer : isPlainObject(d.offer) ? d.offer : {};
+  const origin = isPlainObject(purchase.origin) ? purchase.origin : {};
   const tracking = isPlainObject(purchase.tracking) ? purchase.tracking : {};
 
   // checkout_phone_code é o DDI (55) e vem separado do número: juntar é o que faz os dígitos
@@ -1309,6 +1389,8 @@ export function extrairVendaHotmart(corpo) {
     transacao: texto(purchase.transaction, 120),
     status: texto(purchase.status, 60),
     produto_id: texto(product.id ?? product.ucode, 120),
+    // Só para reconhecer a página (EVCheckout.paginaDaVenda): o SQL não tem coluna para ele.
+    produto_ucode: texto(product.ucode, 120),
     produto_nome: texto(product.name, 300),
     oferta: texto(offer.code ?? offer.key, 120),
     valor: numeroOuNull(price.value ?? price.total),
@@ -1317,8 +1399,9 @@ export function extrairVendaHotmart(corpo) {
     comprador_email: leadRules.normalizeEmail(texto(buyer.email, 254) || "") || null,
     comprador_telefone: telefone || null,
     comprador_digits: telefone ? leadRules.normalizePhoneDigits(telefone) || null : null,
-    sck: texto(tracking.source_sck ?? purchase.sckPaymentLink ?? tracking.external_code, 500),
-    src: texto(tracking.source, 500),
+    // O primeiro NÃO VAZIO: origin.sck = "" não pode esconder o sck que veio numa das reservas.
+    sck: primeiroTexto([origin.sck, tracking.source_sck, purchase.sckPaymentLink, tracking.external_code], 500),
+    src: primeiroTexto([origin.src, tracking.source], 500),
     pedido_em: dataHotmart(purchase.order_date),
     aprovado_em: dataHotmart(purchase.approved_date)
   };
@@ -1371,9 +1454,15 @@ async function handleHotmartVenda(request, response, options) {
     return;
   }
 
+  // De qual página é este produto (pela oferta ou pelo id do produto, no config). null = produto que
+  // o config não conhece: o SQL ainda tenta reconhecer pela oferta dos links que as páginas abriram.
+  const paginaDaVenda = checkout.paginaDaVenda(venda);
+
   let resultado;
   try {
-    resultado = await readObjectResponse(await callRpc(options, "hotmart_registrar_compra", { p: { ...venda, payload: body } }));
+    resultado = await readObjectResponse(
+      await callRpc(options, "hotmart_registrar_compra", { p: { ...venda, pagina: paginaDaVenda ? paginaDaVenda.id : null, payload: body } })
+    );
   } catch (error) {
     // 502 de propósito: a Hotmart reenvia o aviso, e nenhuma venda se perde.
     console.error(`Falha ao registrar compra da Hotmart: ${error?.message || "erro"}`);
@@ -1971,9 +2060,11 @@ async function exportarCsv(request, response, options, { rotulo, colunas, nomeAr
   });
 
   const dia = DIA_BRASILIA.format(new Date(options.now()));
+  // O nome pode depender do filtro (o CSV de cada página de inscrição sai com o id dela).
+  const nome = typeof nomeArquivo === "function" ? nomeArquivo(params) : nomeArquivo;
   response.writeHead(200, {
     "Content-Type": "text/csv; charset=utf-8",
-    "Content-Disposition": `attachment; filename="${nomeArquivo}-${dia}.csv"`,
+    "Content-Disposition": `attachment; filename="${nome}-${dia}.csv"`,
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff"
   });
@@ -2028,8 +2119,9 @@ function handleExportarCsv(request, response, options) {
 }
 
 /**
- * As colunas do CSV de inscrições. `sck` é o utm_term: é ele que vai no link do checkout e volta
- * no aviso de venda da Hotmart — a coluna existe com o nome que o cliente vê no relatório de lá.
+ * As colunas do CSV de inscrições. `sck` é a UTM que a página da linha escolheu (utm_term na Viver
+ * de Furo, utm_content na Imersão GPS): é ela que vai no link do checkout e volta no aviso de venda
+ * da Hotmart — a coluna existe com o nome que o cliente vê no relatório de lá.
  */
 export const COLUNAS_CSV_INSCRICOES = Object.freeze(
   [
@@ -2049,7 +2141,9 @@ export const COLUNAS_CSV_INSCRICOES = Object.freeze(
     ["utm_campaign", (l) => l.utm_campaign],
     ["utm_term", (l) => l.utm_term],
     ["utm_content", (l) => l.utm_content],
-    ["sck", (l) => l.utm_term],
+    // O sck que foi para a Hotmart: o do link aberto (a pessoa pode ter voltado por outro link, com
+    // outra UTM, e aberto o checkout de novo); sem link gravado, a UTM que a página escolheu.
+    ["sck", (l) => sckDoLink(l.checkout_url) || l[checkout.sckDaPagina(checkout.paginaPorId(l.pagina))]],
     ["fbclid", (l) => l.fbclid],
     ["gclid", (l) => l.gclid],
     ["page_url", (l) => l.page_url],
@@ -2062,7 +2156,12 @@ function handleExportarInscricoesCsv(request, response, options) {
   return exportarCsv(request, response, options, {
     rotulo: "o CSV de inscrições",
     colunas: COLUNAS_CSV_INSCRICOES,
-    nomeArquivo: "inscricoes",
+    // inscricoes-imersao-gps-AAAA-MM-DD.csv: os CSVs das duas abas não saem com o mesmo nome. O id
+    // já passou por lerPaginaCheckout (só [a-z0-9_-]), então pode ir no cabeçalho.
+    nomeArquivo: (params) => {
+      const pedida = safeString(params.get("pagina"), 60);
+      return PAGINAS_CHECKOUT.some((item) => item.id === pedida) ? `inscricoes-${pedida}` : "inscricoes";
+    },
     paginaDeDados: (params) => {
       const { desde, ate } = lerPeriodo(params);
       const pagina = lerPaginaCheckout(params);
@@ -2389,6 +2488,8 @@ export function createServerApp({
   webhookUrl = "",
   webhookEsperasMs = WEBHOOK_ESPERAS_MS,
   siteUrl = "",
+  // Origens extras que podem mandar o POST /api/inscricao (além das `origem` do checkout-config).
+  origensInscricao = [],
   // Reenvio automático ao n8n: desligado por padrão (teste nenhum dispara varredura sozinho).
   // true liga com 30 s / 10 min; um objeto { atrasoInicialMs, intervaloMs } troca os tempos.
   reenvio = false,
@@ -2414,6 +2515,9 @@ export function createServerApp({
     webhookUrl: String(webhookUrl || "").trim().toLowerCase() === "off" ? "" : webhookUrl,
     webhookEsperasMs: Array.isArray(webhookEsperasMs) && webhookEsperasMs.length ? webhookEsperasMs : WEBHOOK_ESPERAS_MS,
     siteUrl: normalizarSiteUrl(siteUrl),
+    origensInscricao: new Set(
+      [...checkout.ORIGENS, ...(Array.isArray(origensInscricao) ? origensInscricao : [])].map(normalizarOrigem).filter(Boolean)
+    ),
     metaPixelId: normalizarPixelId(metaPixelId),
     fetchImpl,
     now: agora,
@@ -2571,6 +2675,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     hotmartChave: env.HOTMART_WEBHOOK_CHAVE || "",
     webhookUrl,
     siteUrl: env.SITE_URL || "",
+    origensInscricao: String(env.INSCRICAO_ORIGENS || "").split(","),
     metaPixelId,
     reenvio: true
   });

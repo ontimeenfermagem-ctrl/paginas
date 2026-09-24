@@ -1,6 +1,8 @@
 /*
- * server.mjs — rotas públicas: estático, redirect, pixel, cabeçalhos, as duas APIs da pesquisa e as
- * páginas de obrigado (rotas /obrigado-* e POST /api/pagina/evento).
+ * server.mjs — rotas públicas: estático, redirect, pixel, cabeçalhos, as duas APIs da pesquisa, as
+ * páginas de obrigado (rotas /obrigado-* e POST /api/pagina/evento), a inscrição com checkout na
+ * Hotmart (POST /api/inscricao, inclusive o CORS da venda da Imersão GPS, que mora em outro site) e
+ * o webhook de venda da Hotmart (POST /api/hotmart/venda).
  *
  * Nada sai da máquina: o Supabase e o webhook são um fetch falso que grava as chamadas, e o DNS
  * do e-mail é um resolvedor falso. O estático vem de uma pasta temporária com arquivos de
@@ -16,7 +18,17 @@ import path from "node:path";
 import { after, afterEach, before, test } from "node:test";
 import vm from "node:vm";
 import { gunzipSync, brotliDecompressSync } from "node:zlib";
-import { createServerApp, respostasLegiveis, calcularPosicao, extrairVendaHotmart, dataHotmart, montarPayloadWebhook, origemDaRequisicao } from "../server.mjs";
+import {
+  createServerApp,
+  respostasLegiveis,
+  calcularPosicao,
+  extrairVendaHotmart,
+  dataHotmart,
+  montarPayloadWebhook,
+  origemDaRequisicao,
+  normalizarOrigem,
+  validarContato
+} from "../server.mjs";
 
 const SUPABASE_URL = "https://projeto-de-teste.supabase.co";
 const SUPABASE_KEY = "chave-service-role-de-teste";
@@ -58,6 +70,9 @@ before(async () => {
     "obrigado.html": HTML_OBRIGADO,
     "obrigado-velho.html": "<html>segredo</html>",
     "viver-de-furo-inscricao.html": HTML_INSCRICAO,
+    // A venda da Imersão GPS mora em OUTRO site. O arquivo existe aqui de propósito: a rota dela não
+    // pode apontar para ele (ver o teste da rota /igps_set_lp_26-ingresso).
+    "igps_set_lp_26-ingresso.html": HTML_INSCRICAO,
     "painel.html": HTML_PAINEL,
     "js/pesquisa.js": `console.log(${JSON.stringify("x".repeat(4000))});`,
     "js/painel.js": "console.log('painel');",
@@ -1763,8 +1778,7 @@ test("reenvio: concluída que não chegou à tela de fim vai com concluida_em = 
   assert.equal(aviso.body.sessao_id, SESSAO);
 });
 
-test("contato: o nome é gravado com maiúsculas certas, seja como for digitado", async () => {
-  const { validarContato } = await import("../server.mjs");
+test("contato: o nome é gravado com maiúsculas certas, seja como for digitado", () => {
   const r = validarContato({ nome: "MARIA DA SILVA", whatsapp: "(11) 91234-5678", email: "Maria@Gmail.com" });
   assert.equal(r.contato.nome, "Maria da Silva");
   assert.equal(r.contato.email, "maria@gmail.com");
@@ -1778,7 +1792,11 @@ for (const arquivo of ["js/lead-rules.js", "js/checkout-config.js"]) {
   vm.runInContext(readFileSync(new URL(`../${arquivo}`, import.meta.url), "utf8"), contextoCheckout, { filename: arquivo });
 }
 const CHECKOUT = contextoCheckout.EVCheckout;
-const PAGINA_INSCRICAO = CHECKOUT.LISTA[0];
+// A primeira página que mora AQUI (sem `origem`): é ela que tem rota e arquivo neste servidor.
+const PAGINA_INSCRICAO = CHECKOUT.LISTA.find((pagina) => !pagina.origem);
+// A venda da Imersão GPS: mora no outro site e só manda o formulário para cá (CORS).
+const PAGINA_GPS = CHECKOUT.PAGINAS["imersao-gps"];
+const ORIGEM_GPS = PAGINA_GPS.origem;
 
 function corpoInscricao(extra = {}) {
   return {
@@ -1907,7 +1925,13 @@ test("/api/inscricao: método, tipo, corpo e página — 405, 415, 400, 413, 422
 
   const get = await fetch(`${appUrl}/api/inscricao`);
   assert.equal(get.status, 405);
-  assert.equal(get.headers.get("allow"), "POST");
+  // OPTIONS também é método da rota: é o preflight do CORS da venda da Imersão GPS.
+  assert.equal(get.headers.get("allow"), "POST, OPTIONS");
+  for (const metodo of ["PUT", "DELETE", "PATCH"]) {
+    const response = await fetch(`${appUrl}/api/inscricao`, { method: metodo });
+    assert.equal(response.status, 405, metodo);
+    assert.equal(response.headers.get("allow"), "POST, OPTIONS", metodo);
+  }
 
   const semJson = await fetch(`${appUrl}/api/inscricao`, {
     method: "POST",
@@ -2011,6 +2035,503 @@ test("/api/inscricao: rate limit próprio de 240/min por IP, sem atrapalhar a pe
   // E outro IP continua livre na própria rota.
   const outro = await postJson(appUrl, "/api/inscricao", corpoInscricao(), { "X-Forwarded-For": "200.2.2.2" });
   assert.equal(outro.status, 200);
+});
+
+/* ================================================================== inscrição da Imersão GPS (outro site → CORS) */
+
+// O formulário da venda da Imersão GPS, do jeito que a página do outro site manda.
+function corpoGps(extra = {}) {
+  return corpoInscricao({
+    pagina: PAGINA_GPS.id,
+    contato: { nome: "  ana   souza ", whatsapp: "(21) 99876-5432", email: " Ana@Gmail.com " },
+    rastreio: {
+      page_url: `${ORIGEM_GPS}${PAGINA_GPS.rota}?utm_source=facebook`,
+      referrer: "https://www.instagram.com/",
+      dispositivo: "mobile",
+      utm_source: "facebook",
+      utm_medium: "cpc",
+      utm_campaign: "gps-set",
+      utm_term: "publico-quente",
+      utm_content: "criativo-gps-03",
+      fbclid: "IwAR-gps"
+    },
+    ...extra
+  });
+}
+
+function preflight(appUrl, origem, headers = {}) {
+  return fetch(`${appUrl}/api/inscricao`, {
+    method: "OPTIONS",
+    headers: {
+      ...(origem === undefined ? {} : { Origin: origem }),
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "content-type",
+      ...headers
+    }
+  });
+}
+
+function assertComCors(response, origem, rotulo) {
+  assert.equal(response.headers.get("access-control-allow-origin"), origem, rotulo);
+  assert.equal(response.headers.get("vary"), "Origin", rotulo);
+  // Sem cookie, sem credencial: o formulário não precisa, e liberar abriria a porta para o resto.
+  assert.equal(response.headers.get("access-control-allow-credentials"), null, rotulo);
+}
+
+function assertSemCors(response, rotulo) {
+  assert.equal(response.headers.get("access-control-allow-origin"), null, rotulo);
+  assert.equal(response.headers.get("vary"), null, rotulo);
+  assert.equal(response.headers.get("access-control-allow-methods"), null, rotulo);
+}
+
+test("CORS /api/inscricao: preflight da origem liberada → 204 com os cabeçalhos exatos, sem ir ao banco", async () => {
+  const backend = backendInscricao();
+  const appUrl = await listen(app({ backend }).server);
+
+  for (const extra of [{}, { "Access-Control-Request-Headers": "" }]) {
+    const response = await preflight(appUrl, ORIGEM_GPS, extra);
+    assert.equal(response.status, 204);
+    assertComCors(response, ORIGEM_GPS);
+    assert.equal(response.headers.get("access-control-allow-methods"), "POST");
+    assert.equal(response.headers.get("access-control-allow-headers"), "Content-Type");
+    assert.equal(response.headers.get("access-control-max-age"), "7200");
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(await response.text(), "");
+  }
+  assert.equal(backend.chamadas.length, 0, "o preflight não grava nada");
+});
+
+test("CORS /api/inscricao: preflight de outra origem (ou sem Origin) → 403 origin_not_allowed, sem cabeçalho CORS", async () => {
+  const backend = backendInscricao();
+  const appUrl = await listen(app({ backend }).server);
+
+  for (const origem of [
+    "https://evil.example",
+    "https://lp.escolaenfermagemdevalor.com.br", // o próprio site não precisa de CORS
+    "http://io.escolaenfermagemdevalor.com.br", // sem https
+    "https://io.escolaenfermagemdevalor.com.br:8443",
+    "https://io.escolaenfermagemdevalor.com.br.evil.com",
+    "https://www.io.escolaenfermagemdevalor.com.br",
+    "https://escolaenfermagemdevalor.com.br",
+    "null",
+    "",
+    undefined
+  ]) {
+    const response = await preflight(appUrl, origem);
+    assert.equal(response.status, 403, String(origem));
+    assert.deepEqual(await response.json(), { ok: false, error: "origin_not_allowed" }, String(origem));
+    assertSemCors(response, String(origem));
+  }
+  assert.equal(backend.chamadas.length, 0);
+});
+
+test("CORS /api/inscricao: da origem liberada, TODA resposta leva Access-Control-Allow-Origin e Vary", async () => {
+  const backend = backendInscricao();
+  const appUrl = await listen(app({ backend }).server);
+  const daOrigem = { Origin: ORIGEM_GPS };
+
+  const ok = await postJson(appUrl, "/api/inscricao", corpoGps(), daOrigem);
+  assert.equal(ok.status, 200);
+  assertComCors(ok, ORIGEM_GPS, "200");
+  assert.equal((await ok.json()).ok, true);
+
+  const metodo = await fetch(`${appUrl}/api/inscricao`, { headers: daOrigem });
+  assert.equal(metodo.status, 405);
+  assert.equal(metodo.headers.get("allow"), "POST, OPTIONS");
+  assertComCors(metodo, ORIGEM_GPS, "405");
+
+  const tipo = await fetch(`${appUrl}/api/inscricao`, {
+    method: "POST",
+    headers: { ...daOrigem, "Content-Type": "application/x-www-form-urlencoded" },
+    body: "pagina=imersao-gps"
+  });
+  assert.equal(tipo.status, 415);
+  assertComCors(tipo, ORIGEM_GPS, "415");
+
+  const quebrado = await postJson(appUrl, "/api/inscricao", "{", daOrigem);
+  assert.equal(quebrado.status, 400);
+  assertComCors(quebrado, ORIGEM_GPS, "400");
+
+  const gigante = await postJson(appUrl, "/api/inscricao", { pagina: "x".repeat(70 * 1024) }, daOrigem);
+  assert.equal(gigante.status, 413);
+  assertComCors(gigante, ORIGEM_GPS, "413");
+
+  const pagina = await postJson(appUrl, "/api/inscricao", corpoGps({ pagina: "outra" }), daOrigem);
+  assert.equal(pagina.status, 422);
+  assertComCors(pagina, ORIGEM_GPS, "422 invalid_page");
+
+  const contato = await postJson(appUrl, "/api/inscricao", corpoGps({ contato: { nome: "Ana", whatsapp: "1", email: "x" } }), daOrigem);
+  assert.equal(contato.status, 422);
+  assertComCors(contato, ORIGEM_GPS, "422 invalid_contact");
+  // Sem o cabeçalho, o navegador esconderia o corpo — e a tela não mostraria o erro no campo certo.
+  assert.deepEqual(Object.keys((await contato.json()).campos).sort(), ["email", "nome", "whatsapp"]);
+
+  // Banco fora (502) e sem banco (503) também: a tela precisa ler o erro para liberar o botão.
+  const fora = createFakeBackend({ rpc: { inscricao_salvar: () => jsonResponse({ message: "x" }, 500) } });
+  const appFora = await listen(app({ backend: fora }).server);
+  const r502 = await postJson(appFora, "/api/inscricao", corpoGps(), daOrigem);
+  assert.equal(r502.status, 502);
+  assertComCors(r502, ORIGEM_GPS, "502");
+
+  const semBanco = await listen(createServerApp({ rootDirectory: root, resolveEmailDomain: async () => "ok" }));
+  const r503 = await postJson(semBanco, "/api/inscricao", corpoGps(), daOrigem);
+  assert.equal(r503.status, 503);
+  assertComCors(r503, ORIGEM_GPS, "503");
+});
+
+test("CORS /api/inscricao: o 429 do rate limit também leva o cabeçalho da origem liberada", async () => {
+  const appUrl = await listen(app({ backend: backendInscricao() }).server);
+  const cabecalhos = { Origin: ORIGEM_GPS, "X-Forwarded-For": "200.3.3.3" };
+  for (let i = 0; i < 240; i += 1) {
+    const response = await postJson(appUrl, "/api/inscricao", corpoGps(), cabecalhos);
+    assert.equal(response.status, 200, `requisição ${i + 1}`);
+  }
+  const bloqueada = await postJson(appUrl, "/api/inscricao", corpoGps(), cabecalhos);
+  assert.equal(bloqueada.status, 429);
+  assertComCors(bloqueada, ORIGEM_GPS, "429");
+  assert.deepEqual(await bloqueada.json(), { ok: false, error: "too_many_requests" });
+  // O preflight não gasta nem é barrado pelo limite.
+  const opcoes = await preflight(appUrl, ORIGEM_GPS, { "X-Forwarded-For": "200.3.3.3" });
+  assert.equal(opcoes.status, 204);
+});
+
+test("CORS /api/inscricao: POST de outra origem (ou sem Origin) segue como antes, sem cabeçalho CORS", async () => {
+  const backend = backendInscricao();
+  const appUrl = await listen(app({ backend }).server);
+
+  // O servidor não barra o POST (quem barra a leitura da resposta é o navegador, e um JSON de outro
+  // site já exigiria o preflight que responde 403): só não libera.
+  for (const headers of [{ Origin: "https://evil.example" }, { Origin: "https://lp.escolaenfermagemdevalor.com.br" }, {}]) {
+    const response = await postJson(appUrl, "/api/inscricao", corpoInscricao(), headers);
+    assert.equal(response.status, 200, JSON.stringify(headers));
+    assertSemCors(response, JSON.stringify(headers));
+
+    const erro = await postJson(appUrl, "/api/inscricao", corpoInscricao({ pagina: "outra" }), headers);
+    assert.equal(erro.status, 422, JSON.stringify(headers));
+    assertSemCors(erro, JSON.stringify(headers));
+  }
+});
+
+test("CORS: só o /api/inscricao responde à origem liberada (pesquisa, obrigado e Hotmart ficam como estavam)", async () => {
+  const { server } = appHotmart({ backend: createFakeBackend() });
+  const appUrl = await listen(server);
+  const daOrigem = { Origin: ORIGEM_GPS };
+
+  for (const rota of ["/api/pesquisa/salvar", "/api/pesquisa/evento", "/api/pagina/evento", "/api/hotmart/venda", "/api/painel/login"]) {
+    const opcoes = await fetch(`${appUrl}${rota}`, { method: "OPTIONS", headers: { ...daOrigem, "Access-Control-Request-Method": "POST" } });
+    assert.equal(opcoes.status, 405, rota);
+    assertSemCors(opcoes, rota);
+
+    const post = await postJson(appUrl, rota, "{", daOrigem);
+    assertSemCors(post, rota);
+  }
+});
+
+test("CORS /api/inscricao: text/plain (simple request, sendBeacon) só da origem liberada; de outra → 415", async () => {
+  const backend = backendInscricao();
+  const appUrl = await listen(app({ backend }).server);
+  const comoTexto = (headers, body = JSON.stringify(corpoGps())) =>
+    fetch(`${appUrl}/api/inscricao`, { method: "POST", headers, body });
+
+  // É o que o fetch do navegador manda com corpo string e sem Content-Type, e o que o sendBeacon manda.
+  for (const tipo of ["text/plain;charset=UTF-8", "text/plain", "TEXT/PLAIN; charset=utf-8"]) {
+    const response = await comoTexto({ Origin: ORIGEM_GPS, "Content-Type": tipo });
+    assert.equal(response.status, 200, tipo);
+    assertComCors(response, ORIGEM_GPS, tipo);
+    assert.equal((await response.json()).ok, true, tipo);
+  }
+  assert.equal(backend.chamadas.length, 3);
+  // Gravou igual ao JSON: mesmo `p`, mesmo checkout.
+  const porJson = backendInscricao();
+  const appJson = await listen(app({ backend: porJson }).server);
+  await postJson(appJson, "/api/inscricao", corpoGps(), { Origin: ORIGEM_GPS });
+  assert.deepEqual(backend.chamadas[0].body, porJson.chamadas[0].body);
+
+  // Corpo quebrado em text/plain: o mesmo 400 do JSON.
+  const quebrado = await comoTexto({ Origin: ORIGEM_GPS, "Content-Type": "text/plain" }, "{");
+  assert.equal(quebrado.status, 400);
+  assertComCors(quebrado, ORIGEM_GPS, "400");
+
+  // De outra origem, ou sem Origin: text/plain continua 415 (um formulário HTML de outro site não
+  // consegue mandar application/json; é isso que segura o POST cruzado).
+  for (const headers of [{ Origin: "https://evil.example", "Content-Type": "text/plain" }, { "Content-Type": "text/plain;charset=UTF-8" }]) {
+    const response = await comoTexto(headers);
+    assert.equal(response.status, 415, JSON.stringify(headers));
+    assert.deepEqual(await response.json(), { ok: false, error: "unsupported_media_type" });
+    assertSemCors(response, JSON.stringify(headers));
+  }
+  // Da origem liberada, outro tipo qualquer continua 415.
+  for (const tipo of ["text/html", "multipart/form-data; boundary=x", "application/x-www-form-urlencoded", "text/plainx"]) {
+    const response = await comoTexto({ Origin: ORIGEM_GPS, "Content-Type": tipo });
+    assert.equal(response.status, 415, tipo);
+    assertComCors(response, ORIGEM_GPS, tipo);
+  }
+  assert.equal(backend.chamadas.length, 3, "nada além dos três primeiros foi gravado");
+});
+
+test("CORS /api/inscricao: origensInscricao acrescenta origens (normalizadas) sem tirar as do config", async () => {
+  const { server } = app({
+    backend: backendInscricao(),
+    origensInscricao: ["https://preview.exemplo.com/", " HTTPS://Outra.Exemplo.com:8443 ", "lixo", "", null, "https://x.exemplo.com/caminho"]
+  });
+  const appUrl = await listen(server);
+
+  for (const [origem, esperada] of [
+    ["https://preview.exemplo.com", "https://preview.exemplo.com"],
+    ["https://outra.exemplo.com:8443", "https://outra.exemplo.com:8443"],
+    [ORIGEM_GPS, ORIGEM_GPS]
+  ]) {
+    const response = await preflight(appUrl, origem);
+    assert.equal(response.status, 204, origem);
+    assertComCors(response, esperada, origem);
+    const post = await postJson(appUrl, "/api/inscricao", corpoGps(), { Origin: origem });
+    assert.equal(post.status, 200, origem);
+    assertComCors(post, esperada, origem);
+  }
+  // Lixo não vira origem: nem "lixo", nem uma origem com caminho.
+  for (const origem of ["lixo", "https://x.exemplo.com", "https://outra.exemplo.com"]) {
+    assert.equal((await preflight(appUrl, origem)).status, 403, origem);
+  }
+
+  // Sem a opção, a preview não passa; com algo que não é lista, a opção é ignorada.
+  for (const origensInscricao of [undefined, "https://preview.exemplo.com", { a: "https://preview.exemplo.com" }]) {
+    const outro = await listen(app({ backend: backendInscricao(), origensInscricao }).server);
+    assert.equal((await preflight(outro, "https://preview.exemplo.com")).status, 403, JSON.stringify(origensInscricao));
+    assert.equal((await preflight(outro, ORIGEM_GPS)).status, 204, JSON.stringify(origensInscricao));
+  }
+});
+
+test("normalizarOrigem: minúsculas, sem barra no fim; o que não é esquema://host[:porta] vira vazio", () => {
+  assert.equal(normalizarOrigem("https://io.escolaenfermagemdevalor.com.br/"), "https://io.escolaenfermagemdevalor.com.br");
+  assert.equal(normalizarOrigem("HTTPS://IO.EscolaEnfermagemDeValor.com.BR"), "https://io.escolaenfermagemdevalor.com.br");
+  assert.equal(normalizarOrigem("  https://preview.exemplo.com//  "), "https://preview.exemplo.com");
+  assert.equal(normalizarOrigem("http://localhost:3000"), "http://localhost:3000");
+  assert.equal(normalizarOrigem("http://127.0.0.1:8080/"), "http://127.0.0.1:8080");
+  assert.equal(normalizarOrigem("https://meu-app.up.railway.app"), "https://meu-app.up.railway.app");
+  for (const lixo of [
+    "",
+    "   ",
+    null,
+    undefined,
+    42,
+    {},
+    "null",
+    "io.escolaenfermagemdevalor.com.br",
+    "//io.escolaenfermagemdevalor.com.br",
+    "ftp://exemplo.com",
+    "javascript:alert(1)",
+    "https://",
+    "https://exemplo.com/caminho",
+    "https://exemplo.com?x=1",
+    "https://exemplo.com#x",
+    "https://usuario@exemplo.com",
+    "https://exemplo .com",
+    "https://*.exemplo.com",
+    "https://exemplo..com",
+    "https://exemplo.com:123456",
+    "https://exemplo.com, https://outra.com"
+  ]) {
+    assert.equal(normalizarOrigem(lixo), "", String(lixo));
+  }
+});
+
+test("Imersão GPS: grava pagina imersao-gps; o checkout é o do GPS e o sck é o utm_content", async () => {
+  const backend = backendInscricao();
+  const appUrl = await listen(app({ backend }).server);
+
+  const response = await postJson(appUrl, "/api/inscricao", corpoGps(), { Origin: ORIGEM_GPS });
+  assert.equal(response.status, 200);
+  const corpo = await response.json();
+  assert.deepEqual(Object.keys(corpo).sort(), ["checkout", "ok"]);
+
+  const url = new URL(corpo.checkout);
+  assert.equal(`${url.origin}${url.pathname}`, "https://pay.hotmart.com/R107667362D");
+  assert.equal(url.searchParams.get("off"), "l0r77by6");
+  assert.equal(url.searchParams.get("checkoutMode"), "10");
+  assert.equal(url.searchParams.get("utm_source"), "facebook");
+  assert.equal(url.searchParams.get("utm_medium"), "cpc");
+  assert.equal(url.searchParams.get("utm_campaign"), "gps-set");
+  assert.equal(url.searchParams.get("utm_term"), "publico-quente");
+  assert.equal(url.searchParams.get("utm_content"), "criativo-gps-03");
+  assert.equal(url.searchParams.get("sck"), "criativo-gps-03", "no GPS o sck é o utm_content");
+  assert.equal(url.searchParams.get("name"), "Ana Souza");
+  assert.equal(url.searchParams.get("email"), "ana@gmail.com");
+  assert.equal(url.searchParams.get("phoneac"), "21");
+  assert.equal(url.searchParams.get("phonenumber"), "998765432");
+  assert.equal(url.searchParams.get("fbclid"), null);
+  assert.equal(
+    corpo.checkout,
+    CHECKOUT.urlDoCheckout(PAGINA_GPS, {
+      utm: { utm_source: "facebook", utm_medium: "cpc", utm_campaign: "gps-set", utm_term: "publico-quente", utm_content: "criativo-gps-03" },
+      contato: { nome: "ana souza", email: "ana@gmail.com", whatsapp: "21998765432" }
+    })
+  );
+
+  const [chamada] = backend.chamadas;
+  assert.match(chamada.url, /\/rest\/v1\/rpc\/inscricao_salvar$/);
+  assert.deepEqual(chamada.body.p, {
+    id: SESSAO,
+    pagina: "imersao-gps",
+    visitante_id: VISITANTE,
+    nome: "Ana Souza",
+    whatsapp: "(21) 99876-5432",
+    whatsapp_digits: "21998765432",
+    email: "ana@gmail.com",
+    checkout_url: corpo.checkout,
+    page_url: `${ORIGEM_GPS}${PAGINA_GPS.rota}?utm_source=facebook`,
+    referrer: "https://www.instagram.com/",
+    dispositivo: "mobile",
+    utm_source: "facebook",
+    utm_medium: "cpc",
+    utm_campaign: "gps-set",
+    utm_content: "criativo-gps-03",
+    utm_term: "publico-quente",
+    fbclid: "IwAR-gps",
+    gclid: null
+  });
+});
+
+test("o sck do GPS é o utm_content e o da Viver de Furo continua o utm_term (mesmo rastreio)", async () => {
+  const appUrl = await listen(app({ backend: backendInscricao() }).server);
+  const rastreio = { dispositivo: "mobile", utm_source: "ig", utm_term: "termo-1", utm_content: "conteudo-1" };
+
+  const gps = await (await postJson(appUrl, "/api/inscricao", corpoGps({ rastreio }), { Origin: ORIGEM_GPS })).json();
+  assert.equal(new URL(gps.checkout).searchParams.get("sck"), "conteudo-1");
+  const viver = await (await postJson(appUrl, "/api/inscricao", corpoInscricao({ rastreio }))).json();
+  assert.equal(new URL(viver.checkout).searchParams.get("sck"), "termo-1");
+
+  // Sem a UTM da página, sem sck — nenhuma das duas cai para a outra UTM.
+  const gpsSemConteudo = await (await postJson(appUrl, "/api/inscricao", corpoGps({ rastreio: { utm_term: "termo-1" } }), { Origin: ORIGEM_GPS })).json();
+  assert.equal(new URL(gpsSemConteudo.checkout).searchParams.get("sck"), null);
+  const viverSemTermo = await (await postJson(appUrl, "/api/inscricao", corpoInscricao({ rastreio: { utm_content: "conteudo-1" } }))).json();
+  assert.equal(new URL(viverSemTermo.checkout).searchParams.get("sck"), null);
+});
+
+test("Imersão GPS: e-mail fora de .com/.com.br → 422 com a mensagem com_br; .com.br passa; a Viver de Furo segue aceitando", async () => {
+  const resolver = fakeResolver();
+  const backend = backendInscricao();
+  const appUrl = await listen(app({ backend, resolver }).server);
+  const MENSAGEM = "Use um e-mail que termine em .com ou .com.br.";
+
+  for (const email of ["ana@hospital.org", "ana@provedor.net", "ana@saude.sp.gov.br", "ana@usp.edu.br", "ana@empresa.com.pt"]) {
+    const response = await postJson(appUrl, "/api/inscricao", corpoGps({ contato: { nome: "Ana Souza", whatsapp: "21998765432", email } }), { Origin: ORIGEM_GPS });
+    assert.equal(response.status, 422, email);
+    assert.deepEqual(await response.json(), { ok: false, error: "invalid_contact", campos: { email: MENSAGEM } }, email);
+  }
+  assert.deepEqual(resolver.consultas, [], "recusado antes de consultar o DNS");
+  assert.equal(backend.chamadas.length, 0, "nada foi gravado");
+
+  // Erro de digitação continua com a mensagem de digitação (a tela oferece a correção).
+  const typo = await postJson(appUrl, "/api/inscricao", corpoGps({ contato: { nome: "Ana Souza", whatsapp: "21998765432", email: "ana@gmail.con" } }), { Origin: ORIGEM_GPS });
+  assert.equal((await typo.json()).campos.email, "Confere o final do e-mail, parece que tem um erro de digitação.");
+
+  // .com.br de hospital passa (e o DNS é consultado como na pesquisa).
+  const comBr = await postJson(appUrl, "/api/inscricao", corpoGps({ contato: { nome: "Ana Souza", whatsapp: "21998765432", email: "Ana@Hospital.com.BR" } }), { Origin: ORIGEM_GPS });
+  assert.equal(comBr.status, 200);
+  assert.equal(backend.chamadas.at(-1).body.p.email, "ana@hospital.com.br");
+  assert.equal(backend.chamadas.at(-1).body.p.pagina, "imersao-gps");
+  assert.deepEqual(resolver.consultas, ["hospital.com.br"]);
+
+  // A Viver de Furo não tem a régua: o mesmo .org passa.
+  const viver = await postJson(appUrl, "/api/inscricao", corpoInscricao({ contato: { nome: "Ana Souza", whatsapp: "21998765432", email: "ana@hospital.org" } }));
+  assert.equal(viver.status, 200);
+  assert.equal(backend.chamadas.at(-1).body.p.pagina, PAGINA_INSCRICAO.id);
+});
+
+test("validarContato: { somenteComBr } liga a régua .com/.com.br; sem opção, nada muda", () => {
+  const contato = { nome: "Ana Souza", whatsapp: "21998765432", email: "ana@hospital.org" };
+  assert.deepEqual(validarContato(contato, { somenteComBr: true }), { campos: { email: "Use um e-mail que termine em .com ou .com.br." } });
+  for (const opcoes of [undefined, {}, { somenteComBr: false }]) {
+    assert.equal(validarContato(contato, opcoes).contato.email, "ana@hospital.org", JSON.stringify(opcoes));
+  }
+  assert.equal(validarContato({ ...contato, email: "ana@hospital.com.br" }, { somenteComBr: true }).contato.email, "ana@hospital.com.br");
+});
+
+test("validarContato: opções null (ou de tipo estranho) não lançam e valem como sem opção", () => {
+  const contato = { nome: "Ana Souza", whatsapp: "21998765432", email: "ana@hospital.org" };
+  for (const opcoes of [null, undefined, 0, "", "somenteComBr", true, 42, [], [true], { somenteComBr: "true" }, { somenteComBr: 1 }, Object.create(null)]) {
+    const rotulo = opcoes === null ? "null" : typeof opcoes === "object" ? JSON.stringify(opcoes) ?? "sem protótipo" : String(opcoes);
+    let resultado;
+    assert.doesNotThrow(() => {
+      resultado = validarContato(contato, opcoes);
+    }, rotulo);
+    assert.equal(resultado.contato.email, "ana@hospital.org", rotulo);
+    assert.equal(resultado.campos, undefined, rotulo);
+  }
+  // Contato e opções null juntos: os três campos voltam com erro, sem lançar.
+  const vazio = validarContato(null, null);
+  assert.deepEqual(Object.keys(vazio.campos).sort(), ["email", "nome", "whatsapp"]);
+  // Só o true de verdade liga a régua; e ela olha o domínio sem ligar para maiúsculas.
+  assert.equal(validarContato(contato, { somenteComBr: true }).campos.email, "Use um e-mail que termine em .com ou .com.br.");
+  for (const email of ["ANA@GMAIL.COM", "Ana@Hospital.COM.BR", "  ana@uol.Com.Br "]) {
+    const r = validarContato({ ...contato, email }, { somenteComBr: true });
+    assert.equal(r.campos, undefined, email);
+    assert.equal(r.contato.email, email.trim().toLowerCase(), email);
+  }
+});
+
+test("body.checkout: botão de lote novo do mesmo produto vira a base (off trocado); outro produto, outro site ou lixo é ignorado", async () => {
+  const backend = backendInscricao();
+  const appUrl = await listen(app({ backend }).server);
+  const enviar = async (corpo, headers = { Origin: ORIGEM_GPS }) => {
+    const response = await postJson(appUrl, "/api/inscricao", corpo, headers);
+    assert.equal(response.status, 200);
+    const { checkout } = await response.json();
+    assert.equal(backend.chamadas.at(-1).body.p.checkout_url, checkout, "o que vai para a tela é o que foi gravado");
+    return new URL(checkout);
+  };
+
+  const lote = await enviar(corpoGps({ checkout: "https://pay.hotmart.com/R107667362D?off=lote2abc&checkoutMode=10" }));
+  assert.equal(`${lote.origin}${lote.pathname}`, "https://pay.hotmart.com/R107667362D");
+  assert.equal(lote.searchParams.get("off"), "lote2abc");
+  assert.equal(lote.searchParams.get("checkoutMode"), "10");
+  assert.equal(lote.searchParams.get("sck"), "criativo-gps-03", "as UTMs e o sck seguem iguais");
+  assert.equal(lote.searchParams.get("name"), "Ana Souza");
+
+  // O botão não consegue trocar produto, site, UTM nem sck.
+  for (const pedido of [
+    CHECKOUT.PAGINAS["viver-de-furo"].checkout,
+    "https://pay.hotmart.com/OUTRO123X?off=lote2abc",
+    "https://evil.example/R107667362D?off=lote2abc",
+    "https://pay.hotmart.com/R107667362D?off=%3Cx%3E",
+    "https://pay.hotmart.com/R107667362D",
+    `https://pay.hotmart.com/R107667362D?off=lote2abc&x=${"a".repeat(3000)}`,
+    "",
+    42,
+    null,
+    { off: "lote2abc" },
+    ["https://pay.hotmart.com/R107667362D?off=lote2abc"]
+  ]) {
+    const url = await enviar(corpoGps({ checkout: pedido }));
+    assert.equal(`${url.origin}${url.pathname}`, "https://pay.hotmart.com/R107667362D", String(pedido).slice(0, 60));
+    assert.equal(url.searchParams.get("off"), "l0r77by6", String(pedido).slice(0, 60));
+  }
+  const forjado = await enviar(corpoGps({ checkout: "https://pay.hotmart.com/R107667362D?off=lote2abc&sck=forjado&utm_source=forjado" }));
+  assert.equal(forjado.searchParams.get("off"), "lote2abc");
+  assert.equal(forjado.searchParams.get("sck"), "criativo-gps-03");
+  assert.equal(forjado.searchParams.get("utm_source"), "facebook");
+
+  // Vale igual para a página daqui: oferta nova do MESMO produto da Viver de Furo.
+  const viver = await enviar(corpoInscricao({ checkout: "https://pay.hotmart.com/Y74893363S?off=novaoferta&checkoutMode=10" }), {});
+  assert.equal(viver.searchParams.get("off"), "novaoferta");
+  assert.equal(viver.searchParams.get("sck"), "criativo-07");
+  const viverComGps = await enviar(corpoInscricao({ checkout: PAGINA_GPS.checkout }), {});
+  assert.equal(viverComGps.searchParams.get("off"), "7j2nqptq");
+});
+
+test("a rota /igps_set_lp_26-ingresso NÃO é servida aqui (a página mora no outro site); /viver-de-furo-inscricao continua", async () => {
+  const appUrl = await listen(createServerApp({ rootDirectory: root, siteUrl: "https://lp.exemplo.com.br" }));
+
+  for (const caminho of [PAGINA_GPS.rota, `${PAGINA_GPS.rota}/`]) {
+    const response = await fetch(`${appUrl}${caminho}`);
+    assert.equal(response.status, 404, caminho);
+    assert.deepEqual(await response.json(), { ok: false, error: "not_found" }, caminho);
+  }
+  for (const caminho of ["/viver-de-furo-inscricao", "/viver-de-furo-inscricao/"]) {
+    const response = await fetch(`${appUrl}${caminho}`);
+    assert.equal(response.status, 200, caminho);
+    assert.ok((await response.text()).includes("inscrição"), caminho);
+  }
 });
 
 /* ================================================================== webhook de venda da Hotmart */
@@ -2139,7 +2660,18 @@ test("hotmart: os campos vão para o SQL com o payload CRU junto", async () => {
   assert.equal(p.evento_em, "2025-09-23T04:00:00.000Z");
   assert.equal(p.pedido_em, "2025-09-23T04:00:00.000Z");
   assert.equal(p.aprovado_em, "2025-09-23T04:01:00.000Z");
+  assert.equal(p.produto_ucode, "abc-ucode");
+  assert.equal(p.pagina, "viver-de-furo", "a oferta 7j2nqptq é da Viver de Furo (checkout-config)");
   assert.deepEqual(p.payload, payload, "o payload inteiro, do jeito que chegou");
+  assert.deepEqual(
+    Object.keys(p).sort(),
+    [
+      "aprovado_em", "comprador_digits", "comprador_email", "comprador_nome", "comprador_telefone", "evento", "evento_em",
+      "hotmart_id", "moeda", "oferta", "pagina", "payload", "pedido_em", "produto_id", "produto_nome", "produto_ucode",
+      "sck", "src", "status", "transacao", "valor"
+    ],
+    "o contrato com hotmart_registrar_compra"
+  );
 });
 
 test("hotmart: comprador em data.purchase.buyer, sck em sckPaymentLink, datas ISO e telefone já com DDI", async () => {
@@ -2256,6 +2788,219 @@ test("hotmart: compra que não casou com inscrição ainda responde 200 (o banco
   const response = await postJson(appUrl, "/api/hotmart/venda", payloadHotmart(), { "X-HOTMART-HOTTOK": HOTTOK });
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true });
+});
+
+/*
+ * O formato REAL do Webhook 2.0.0, como os avisos gravados em produção chegam: id do produto
+ * NUMÉRICO (não é o código do link), a oferta em purchase.offer.code e o sck em
+ * purchase.origin.sck — antes o servidor procurava o sck em purchase.tracking e gravava null.
+ */
+function avisoReal({ evento = "PURCHASE_APPROVED", produto = {}, purchase = {}, ...extra } = {}) {
+  return {
+    id: "5f0c3a1e-aviso-real",
+    creation_date: 1_758_600_000_000,
+    event: evento,
+    version: "2.0.0",
+    data: {
+      product: { id: 2332962, ucode: "0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b", name: "Furo de orelha humanizado", ...produto },
+      buyer: { name: "Maria da Silva", email: "Maria@Gmail.com", checkout_phone_code: "55", checkout_phone: "11912345678" },
+      purchase: {
+        transaction: "HP1700000001",
+        status: "APPROVED",
+        offer: { code: "7j2nqptq", name: "Oferta principal" },
+        origin: { sck: "HOTMART_SALES_AGENT" },
+        price: { value: 197, currency_value: "BRL" },
+        order_date: 1_758_600_000_000,
+        approved_date: 1_758_600_060_000,
+        ...purchase
+      }
+    },
+    ...extra
+  };
+}
+
+// Carrinho abandonado: vem SEM purchase; a oferta fica em data.offer.
+function avisoCarrinho({ oferta = "l0r77by6", produto = { id: 7654321, name: "Imersão GPS do Plantão Sem Medo" } } = {}) {
+  return {
+    id: "carrinho-1",
+    creation_date: 1_758_600_000_000,
+    event: "PURCHASE_OUT_OF_SHOPPING_CART",
+    version: "2.0.0",
+    data: {
+      offer: { code: oferta },
+      product: produto,
+      buyer: { name: "Ana Souza", email: "Ana@Gmail.com", phone: "21998765432" }
+    }
+  };
+}
+
+test("extrairVendaHotmart: formato REAL — sck em purchase.origin, oferta em offer.code, produto numérico e ucode", () => {
+  const venda = extrairVendaHotmart(avisoReal());
+  assert.equal(venda.evento, "PURCHASE_APPROVED");
+  assert.equal(venda.transacao, "HP1700000001");
+  assert.equal(venda.status, "APPROVED");
+  assert.equal(venda.produto_id, "2332962", "o id numérico vira texto");
+  assert.equal(venda.produto_ucode, "0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b");
+  assert.equal(venda.produto_nome, "Furo de orelha humanizado");
+  assert.equal(venda.oferta, "7j2nqptq");
+  assert.equal(venda.sck, "HOTMART_SALES_AGENT", "o sck vem de purchase.origin.sck");
+  assert.equal(venda.src, null);
+  assert.equal(venda.valor, 197);
+  assert.equal(venda.moeda, "BRL");
+  assert.equal(venda.comprador_email, "maria@gmail.com");
+  assert.equal(venda.comprador_digits, "11912345678");
+
+  // O sck que o nosso checkout manda (o utm_content, no GPS) volta em origin.sck; o src também.
+  const doGps = extrairVendaHotmart(avisoReal({ purchase: { offer: { code: "l0r77by6" }, origin: { sck: "criativo-gps-03", src: "facebook" } } }));
+  assert.equal(doGps.sck, "criativo-gps-03");
+  assert.equal(doGps.src, "facebook");
+  assert.equal(doGps.oferta, "l0r77by6");
+
+  // origin manda sobre tracking; sem origin (ou origin torto), tracking ainda vale.
+  const osDois = extrairVendaHotmart(avisoReal({ purchase: { origin: { sck: "da-origin", src: "src-origin" }, tracking: { source_sck: "do-tracking", source: "src-tracking" } } }));
+  assert.equal(osDois.sck, "da-origin");
+  assert.equal(osDois.src, "src-origin");
+  for (const origin of [undefined, "texto", [], null, {}]) {
+    const reserva = extrairVendaHotmart(avisoReal({ purchase: { origin, tracking: { source_sck: "do-tracking", source: "src-tracking" } } }));
+    assert.equal(reserva.sck, "do-tracking", JSON.stringify(origin));
+    assert.equal(reserva.src, "src-tracking", JSON.stringify(origin));
+  }
+
+  // Produto sem id: o ucode faz as vezes dos dois.
+  const soUcode = extrairVendaHotmart(avisoReal({ produto: { id: undefined } }));
+  assert.equal(soUcode.produto_id, "0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b");
+  assert.equal(soUcode.produto_ucode, "0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b");
+  // O produto 0 dos testes da Hotmart é "0", não "".
+  assert.equal(extrairVendaHotmart(avisoReal({ produto: { id: 0 } })).produto_id, "0");
+});
+
+test("extrairVendaHotmart: sck e src são o primeiro NÃO VAZIO das fontes, na ordem", () => {
+  const sckDe = (purchase) => extrairVendaHotmart(avisoReal({ purchase })).sck;
+  const srcDe = (purchase) => extrairVendaHotmart(avisoReal({ purchase })).src;
+  const tracking = { source_sck: "do-tracking", source: "src-tracking" };
+
+  // origin.sck vazio (a chave existe, mas sem nada) não esconde a reserva: antes o ?? parava nele.
+  for (const vazio of ["", "   ", "\t\n ", null, undefined]) {
+    assert.equal(sckDe({ origin: { sck: vazio, src: vazio }, tracking }), "do-tracking", JSON.stringify(vazio));
+    assert.equal(srcDe({ origin: { sck: vazio, src: vazio }, tracking }), "src-tracking", JSON.stringify(vazio));
+  }
+
+  // A ordem: origin.sck → tracking.source_sck → purchase.sckPaymentLink → tracking.external_code.
+  const todas = {
+    origin: { sck: "1-origin" },
+    tracking: { source_sck: "2-tracking", external_code: "4-external" },
+    sckPaymentLink: "3-link-de-pagamento"
+  };
+  assert.equal(sckDe(todas), "1-origin");
+  assert.equal(sckDe({ ...todas, origin: { sck: " " } }), "2-tracking");
+  assert.equal(sckDe({ ...todas, origin: {}, tracking: { source_sck: "", external_code: "4-external" } }), "3-link-de-pagamento");
+  assert.equal(sckDe({ origin: { sck: "" }, tracking: { source_sck: "  ", external_code: "4-external" }, sckPaymentLink: "" }), "4-external");
+  // Nada preenchido em lugar nenhum: null (vira "(sem sck)" no painel), nunca "".
+  assert.equal(sckDe({ origin: { sck: "" }, tracking: { source_sck: " ", external_code: "" }, sckPaymentLink: "   " }), null);
+  assert.equal(sckDe({ origin: undefined }), null);
+
+  // Espaços em volta saem; o valor é cortado em 500.
+  assert.equal(sckDe({ origin: { sck: "  criativo-gps-03  " } }), "criativo-gps-03");
+  assert.equal(sckDe({ origin: { sck: "" }, sckPaymentLink: "\tcriativo-09 " }), "criativo-09");
+  assert.equal(sckDe({ origin: { sck: "x".repeat(600) } }), "x".repeat(500));
+
+  // Número vira texto (0 inclusive: é um valor, não ausência); NaN, Infinity e outros tipos pulam.
+  assert.equal(sckDe({ origin: { sck: 12345 }, tracking }), "12345");
+  assert.equal(sckDe({ origin: { sck: 0 }, tracking }), "0");
+  assert.equal(sckDe({ origin: { sck: 1.5 } }), "1.5");
+  for (const estranho of [Number.NaN, Infinity, -Infinity, true, false, {}, [], ["criativo"], { sck: "x" }]) {
+    assert.equal(sckDe({ origin: { sck: estranho }, tracking }), "do-tracking", String(estranho));
+  }
+  assert.equal(srcDe({ origin: { src: 7 }, tracking }), "7");
+  assert.equal(srcDe({ origin: { src: {} }, tracking }), "src-tracking");
+
+  // O src tem só as duas fontes dele: sckPaymentLink e external_code nunca viram src.
+  assert.equal(srcDe({ origin: { src: "" }, tracking: { source: "", external_code: "4-external" }, sckPaymentLink: "3-link" }), null);
+  assert.equal(srcDe({ origin: { src: "  facebook " }, tracking }), "facebook");
+  // E o src nunca vira sck.
+  assert.equal(sckDe({ origin: { src: "facebook" }, tracking: { source: "facebook" } }), null);
+});
+
+test("hotmart: origin.sck vazio com o sck no tracking — o SQL recebe o do tracking (sck e src)", async () => {
+  const backend = backendHotmart();
+  const { server } = appHotmart({ backend });
+  const appUrl = await listen(server);
+
+  const casos = [
+    [{ origin: { sck: "", src: "" } }, "criativo-07", "facebook"],
+    [{ origin: { sck: "   ", src: "  " } }, "criativo-07", "facebook"],
+    [{ origin: { sck: 987, src: 0 } }, "987", "0"],
+    [{ origin: { sck: "", src: "" }, tracking: { source: "", source_sck: "" }, sckPaymentLink: "" }, null, null]
+  ];
+  for (const [dados] of casos) {
+    const response = await postJson(appUrl, "/api/hotmart/venda", payloadHotmart({}, dados), { "X-HOTMART-HOTTOK": HOTTOK });
+    assert.equal(response.status, 200, JSON.stringify(dados));
+  }
+  casos.forEach(([dados, sck, src], indice) => {
+    const { p } = backend.chamadas[indice].body;
+    assert.equal(p.sck, sck, JSON.stringify(dados));
+    assert.equal(p.src, src, JSON.stringify(dados));
+    assert.ok(Object.hasOwn(p, "sck") && Object.hasOwn(p, "src"), "as chaves vão sempre, mesmo null");
+  });
+});
+
+test("extrairVendaHotmart: carrinho abandonado (sem purchase) — a oferta sai de data.offer", () => {
+  const venda = extrairVendaHotmart(avisoCarrinho());
+  assert.equal(venda.evento, "PURCHASE_OUT_OF_SHOPPING_CART");
+  assert.equal(venda.oferta, "l0r77by6");
+  assert.equal(venda.produto_id, "7654321");
+  assert.equal(venda.produto_ucode, null);
+  assert.equal(venda.transacao, null);
+  assert.equal(venda.status, null);
+  assert.equal(venda.sck, null);
+  assert.equal(venda.valor, null);
+  assert.equal(venda.comprador_nome, "Ana Souza");
+  assert.equal(venda.comprador_email, "ana@gmail.com");
+  assert.equal(venda.comprador_digits, "21998765432");
+
+  // Com purchase.offer E data.offer, vale a da compra.
+  const comAsDuas = avisoReal();
+  comAsDuas.data.offer = { code: "outra-oferta" };
+  assert.equal(extrairVendaHotmart(comAsDuas).oferta, "7j2nqptq");
+  // data.offer torto não quebra nada.
+  for (const offer of ["texto", [], null]) {
+    const torto = avisoCarrinho();
+    torto.data.offer = offer;
+    assert.equal(extrairVendaHotmart(torto).oferta, null, JSON.stringify(offer));
+  }
+});
+
+test("hotmart: o servidor manda ao SQL a página do produto (checkout-config), ou null quando o produto é de fora", async () => {
+  const backend = backendHotmart();
+  const { server } = appHotmart({ backend });
+  const appUrl = await listen(server);
+
+  const casos = [
+    ["oferta do GPS", avisoReal({ produto: { id: 5550001 }, purchase: { offer: { code: "l0r77by6" } } }), "imersao-gps"],
+    ["produto 2332962 com oferta que o config não tem", avisoReal({ purchase: { offer: { code: "lote-desconhecido" } } }), "viver-de-furo"],
+    ["produto 2332962 sem oferta", avisoReal({ purchase: { offer: undefined } }), "viver-de-furo"],
+    ["oferta do GPS com o produto da Viver: vale a oferta", avisoReal({ purchase: { offer: { code: "l0r77by6" } } }), "imersao-gps"],
+    ["carrinho abandonado do GPS", avisoCarrinho(), "imersao-gps"],
+    ["outro produto (Imersão Viver de Furo de Orelha)", avisoReal({ produto: { id: 8519248, ucode: "u-8519248" }, purchase: { offer: { code: "outra" } } }), null],
+    ["produto 0 (teste da Hotmart)", avisoReal({ produto: { id: 0, ucode: "" }, purchase: { offer: { code: "teste" } } }), null],
+    ["sem produto e sem oferta", { id: "vazio", event: "PURCHASE_APPROVED", data: { purchase: { transaction: "HP0" } } }, null]
+  ];
+  for (const [rotulo, payload] of casos) {
+    const response = await postJson(appUrl, "/api/hotmart/venda", payload, { "X-HOTMART-HOTTOK": HOTTOK });
+    assert.equal(response.status, 200, rotulo);
+  }
+  assert.equal(backend.chamadas.length, casos.length);
+  casos.forEach(([rotulo, payload, pagina], indice) => {
+    const p = backend.chamadas[indice].body.p;
+    assert.ok(Object.hasOwn(p, "pagina"), `${rotulo}: a chave vai sempre, mesmo null`);
+    assert.equal(p.pagina, pagina, rotulo);
+    // Pela ida e volta do JSON: um campo `undefined` do dublê não existe no que a Hotmart manda.
+    assert.deepEqual(p.payload, JSON.parse(JSON.stringify(payload)), `${rotulo}: payload cru`);
+  });
+
+  // O sck real chega ao SQL.
+  assert.equal(backend.chamadas[0].body.p.sck, "HOTMART_SALES_AGENT");
+  assert.equal(backend.chamadas[0].body.p.produto_id, "5550001");
 });
 
 test("extrairVendaHotmart: payload vazio, torto ou de outro formato nunca lança", () => {
