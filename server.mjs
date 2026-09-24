@@ -2471,6 +2471,126 @@ function normalizarPixelId(valor) {
   return /^\d{5,20}$/.test(texto) ? texto : "";
 }
 
+/* ------------------------------------------------------------------------------------------ */
+/* GET /api/leads/perfil — a consulta do UnniChat                                              */
+/*                                                                                              */
+/* O UnniChat dispara o template no WhatsApp, a pessoa responde a pesquisa aqui e ele volta para */
+/* perguntar UMA coisa: que profissão este telefone escolheu na pergunta 1. Com isso ele escolhe */
+/* o funil (aferição, cuidador, evento). Por isso a resposta é mínima e a consulta é um índice:  */
+/* `perfil` já é COLUNA em pesquisa_respostas (não precisa abrir o JSON das respostas) e         */
+/* whatsapp_digits é indexado. O código interno sai do mesmo PERFIL_CODIGO que o n8n e o CSV já  */
+/* usam, então os quatro valores nunca saem de sincronia com a tela.                            */
+/* ------------------------------------------------------------------------------------------ */
+
+const LEADS_RATE_LIMIT_MAX = 1200;
+const LEADS_RATE_LIMIT_WINDOW_MS = 60_000;
+
+/**
+ * O telefone como o banco guarda: DDD + número, sem o 55 e sem o zero de operadora.
+ *
+ * Reaproveita normalizePhoneDigits (a mesma régua da tela), que já resolve "+55 45 99999-9999" e
+ * "045999999999". O corte extra do 55 cobre o formato que o UnniChat manda (5545999999999, 13
+ * dígitos, e 554599999999, 12, de número antigo sem o nono).
+ */
+function telefoneParaDigitos(bruto) {
+  let digitos = leadRules.normalizePhoneDigits(String(bruto || "").slice(0, 40));
+  if (digitos.length > 11 && digitos.startsWith("55")) digitos = digitos.slice(2);
+  return digitos;
+}
+
+/** Telefone no log sem virar cadastro exposto: 5545*****999. */
+function telefoneNoLog(digitos) {
+  if (!digitos) return "(vazio)";
+  const cheio = `55${digitos}`;
+  return `${cheio.slice(0, 4)}${"*".repeat(Math.max(0, cheio.length - 7))}${cheio.slice(-3)}`;
+}
+
+/** A primeira linha de uma consulta PostgREST, ou null. */
+async function primeiraLinha(options, restPath) {
+  const resposta = await supabaseRequest(options, restPath);
+  const linhas = await resposta.json();
+  return Array.isArray(linhas) && linhas.length ? linhas[0] : null;
+}
+
+/**
+ * Responde ao UnniChat. `idDireto` vem da rota /api/leads/perfil/<id> (a tentativa da pesquisa);
+ * sem ele, a busca é pelo telefone, que é o caminho principal.
+ *
+ * Nunca 500 por lead que ainda não respondeu: quem existe e não respondeu volta 200 com
+ * responded=false, e só telefone que não existe em lugar nenhum volta 404.
+ */
+async function handleLeadPerfil(request, response, options, idDireto = "") {
+  if (request.method !== "GET") return methodNotAllowed(response, "GET");
+
+  const semLead = (status, erro, telefone = null) =>
+    sendJson(response, status, { success: false, responded: false, phone: telefone, profession: null, error: erro });
+
+  if (!options.unnichatApiKey) return semLead(503, "api_key_not_configured");
+  const chave = String(request.headers["x-api-key"] || "");
+  if (!segredoIgual(chave, options.unnichatApiKey)) return semLead(401, "unauthorized");
+
+  if (!options.allowLeads(request)) return semLead(429, "too_many_requests");
+  if (!supabaseEnabled(options)) return semLead(503, "database_not_configured");
+
+  const params = new URL(request.url, "http://localhost").searchParams;
+  const digitos = idDireto ? "" : telefoneParaDigitos(params.get("telefone") ?? params.get("phone") ?? "");
+  const telefone = digitos ? `55${digitos}` : null;
+
+  if (!idDireto && digitos.length < 10) {
+    console.log(`leads/perfil: telefone inválido (${telefoneNoLog(digitos)})`);
+    return semLead(422, "invalid_phone", telefone);
+  }
+  if (idDireto && !UUID_PATTERN.test(idDireto)) return semLead(422, "invalid_id");
+
+  try {
+    const filtro = idDireto
+      ? `id=eq.${encodeURIComponent(idDireto)}`
+      : `pesquisa=eq.${encodeURIComponent(pesquisa.ID)}&whatsapp_digits=eq.${encodeURIComponent(digitos)}`;
+    const pessoa = await primeiraLinha(
+      options,
+      `pesquisa_pessoas?${filtro}&select=id,whatsapp_digits,whatsapp_internacional,perfil,concluido_em&limit=1`
+    );
+
+    if (pessoa) {
+      const profession = valorDoPerfil(pesquisa.PERFIL_CODIGO, pessoa.perfil);
+      const phone = pessoa.whatsapp_internacional || (pessoa.whatsapp_digits ? `55${pessoa.whatsapp_digits}` : telefone);
+      console.log(
+        `leads/perfil: ${telefoneNoLog(pessoa.whatsapp_digits || digitos)} respondeu a pesquisa; profissão ${profession || "(ainda não escolheu)"}`
+      );
+      return sendJson(response, 200, {
+        success: true,
+        responded: Boolean(profession),
+        phone,
+        profession: profession ?? null
+      });
+    }
+
+    // Quem entrou por uma página de inscrição (Viver de Furo, Imersão GPS) existe como lead, mas
+    // ainda não respondeu a pesquisa: é responded=false, não "não existe".
+    if (!idDireto) {
+      const inscrito = await primeiraLinha(
+        options,
+        `inscricoes?whatsapp_digits=eq.${encodeURIComponent(digitos)}&select=id,whatsapp_internacional&limit=1`
+      );
+      if (inscrito) {
+        console.log(`leads/perfil: ${telefoneNoLog(digitos)} é lead de inscrição e ainda não respondeu a pesquisa`);
+        return sendJson(response, 200, {
+          success: true,
+          responded: false,
+          phone: inscrito.whatsapp_internacional || telefone,
+          profession: null
+        });
+      }
+    }
+
+    console.log(`leads/perfil: ${idDireto ? `id ${idDireto}` : telefoneNoLog(digitos)} não encontrado`);
+    return semLead(404, "lead_not_found", telefone);
+  } catch (error) {
+    console.error(`Falha ao consultar o perfil do lead: ${error?.message || "erro"}`);
+    return semLead(502, "database_unavailable", telefone);
+  }
+}
+
 /**
  * Tudo injetável para teste. Sem credenciais explícitas, nada é gravado nem encaminhado — evita
  * envio acidental a partir de testes e scripts.
@@ -2485,6 +2605,8 @@ export function createServerApp({
   // Webhook de venda da Hotmart. Sem nenhuma das duas, POST /api/hotmart/venda responde 503.
   hotmartHottok = "",
   hotmartChave = "",
+  // Chave que o UnniChat manda no header X-API-Key para consultar o perfil de um telefone.
+  unnichatApiKey = "",
   webhookUrl = "",
   webhookEsperasMs = WEBHOOK_ESPERAS_MS,
   siteUrl = "",
@@ -2512,6 +2634,7 @@ export function createServerApp({
     painelSessaoSegredo,
     hotmartHottok,
     hotmartChave,
+    unnichatApiKey: String(unnichatApiKey || "").trim(),
     webhookUrl: String(webhookUrl || "").trim().toLowerCase() === "off" ? "" : webhookUrl,
     webhookEsperasMs: Array.isArray(webhookEsperasMs) && webhookEsperasMs.length ? webhookEsperasMs : WEBHOOK_ESPERAS_MS,
     siteUrl: normalizarSiteUrl(siteUrl),
@@ -2527,7 +2650,8 @@ export function createServerApp({
     allowPaginaEvento: createRateLimiter({ windowMs: EVENTO_RATE_LIMIT_WINDOW_MS, max: EVENTO_RATE_LIMIT_MAX, now: agora }),
     allowSalvar: createRateLimiter({ windowMs: SALVAR_RATE_LIMIT_WINDOW_MS, max: SALVAR_RATE_LIMIT_MAX, now: agora }),
     allowInscricao: createRateLimiter({ windowMs: INSCRICAO_RATE_LIMIT_WINDOW_MS, max: INSCRICAO_RATE_LIMIT_MAX, now: agora }),
-    allowLogin: createRateLimiter({ windowMs: PAINEL_LOGIN_WINDOW_MS, max: PAINEL_LOGIN_MAX, now: agora })
+    allowLogin: createRateLimiter({ windowMs: PAINEL_LOGIN_WINDOW_MS, max: PAINEL_LOGIN_MAX, now: agora }),
+    allowLeads: createRateLimiter({ windowMs: LEADS_RATE_LIMIT_WINDOW_MS, max: LEADS_RATE_LIMIT_MAX, now: agora })
   };
 
   const rotas = new Map([
@@ -2536,6 +2660,7 @@ export function createServerApp({
     ["/api/pagina/evento", handlePaginaEvento],
     ["/api/inscricao", handleInscricao],
     ["/api/hotmart/venda", handleHotmartVenda],
+    ["/api/leads/perfil", handleLeadPerfil],
     ["/api/painel/login", handleLogin],
     ["/api/painel/logout", handleLogout],
     [
@@ -2582,6 +2707,13 @@ export function createServerApp({
       const rota = rotas.get(url.pathname);
       if (rota) {
         await rota(request, response, options);
+        return;
+      }
+
+      // /api/leads/perfil/<id da tentativa>: mesmo handler, buscando pelo id em vez do telefone.
+      if (url.pathname.startsWith("/api/leads/perfil/")) {
+        const id = decodeURIComponent(url.pathname.slice("/api/leads/perfil/".length)).trim();
+        await handleLeadPerfil(request, response, options, id);
         return;
       }
 
@@ -2665,6 +2797,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.warn("Aviso: HOTMART_HOTTOK e HOTMART_WEBHOOK_CHAVE ausentes — o webhook de venda da Hotmart responde 503 e nenhuma compra é registrada.");
   }
 
+  if (!env.UNNICHAT_API_KEY) {
+    console.warn("Aviso: UNNICHAT_API_KEY ausente — GET /api/leads/perfil responde 503 e o UnniChat não consulta o perfil.");
+  }
+
   const server = createServerApp({
     supabaseUrl: env.SUPABASE_URL || "",
     supabaseKey: env.SUPABASE_SERVICE_ROLE_KEY || "",
@@ -2673,6 +2809,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     painelSessaoSegredo: env.PAINEL_SESSAO_SEGREDO || "",
     hotmartHottok: env.HOTMART_HOTTOK || "",
     hotmartChave: env.HOTMART_WEBHOOK_CHAVE || "",
+    unnichatApiKey: env.UNNICHAT_API_KEY || "",
     webhookUrl,
     siteUrl: env.SITE_URL || "",
     origensInscricao: String(env.INSCRICAO_ORIGENS || "").split(","),
