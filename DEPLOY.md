@@ -343,6 +343,55 @@ A página de venda mora no repositório `whatsapp-atendimento-centralizado` (Exp
 
 ---
 
+## 5.4 UnniChat — atualização de perfil pelo WhatsApp
+
+O caminho curto para descobrir a profissão de quem já está na base, sem pedir a pesquisa inteira. São três peças, todas já no ar:
+
+| Peça | O que é |
+|---|---|
+| `https://SEU-DOMINIO/atualizacao-perfil` | a página curta: contato e profissão, duas telas, ~40 segundos |
+| `GET https://SEU-DOMINIO/api/leads/perfil?telefone=...` | a consulta do UnniChat: devolve a profissão em código interno |
+| `UNNICHAT_API_KEY` | a chave que o UnniChat manda no header `X-API-Key` (variável do Railway) |
+
+**O link que vai na mensagem**, com o contato que o UnniChat já tem — a pessoa chega com os campos prontos e só confere:
+
+```
+https://SEU-DOMINIO/atualizacao-perfil?nome={{nome_do_contato}}&telefone={{telefone_do_contato}}&utm_source=unnichat&utm_medium=whatsapp&utm_campaign=atualizar-perfil
+```
+
+O link só **preenche** (nada é gravado por abrir a página): a pessoa ainda aperta CONTINUAR e escolhe a profissão. `?email=` também é aceito. Campo que ela já tinha corrigido aqui antes ganha do link, e telefone que não vira WhatsApp brasileiro (variável não substituída, número de fora) é ignorado em vez de entrar torto. As UTMs seguem para a página de obrigado e aparecem no painel, aba **Perfis atualizados**.
+
+**A consulta**, no nó de requisição HTTP: método `GET`, header `X-API-Key: <UNNICHAT_API_KEY>`, e a resposta
+
+```json
+{ "success": true, "responded": true, "phone": "5545999999999", "profession": "tecnico_enfermagem" }
+```
+
+`profession` é sempre um destes quatro: `auxiliar_atendente`, `cuidador`, `tecnico_enfermagem`, `enfermeiro`. E os três estados que o fluxo precisa distinguir:
+
+| Situação | HTTP | Como reconhecer |
+|---|---|---|
+| já disse a profissão | 200 | `responded: true` e `profession` preenchido |
+| está na base, sem profissão ainda | 200 | `responded: false`, `profession: null` |
+| não conhecemos esse telefone | 404 | cai na saída de **falha** do nó |
+
+Para o fluxo, **falha e `responded: false` são a mesma decisão**: ainda não sabemos quem é, então manda (ou remanda) o convite.
+
+**O fluxo, na ordem que funciona:**
+
+1. **Broadcast** com a lista.
+2. **Requisição HTTP** (a consulta acima) — *antes* do template. Quem já respondeu sai do fluxo aqui, e o disparo não incomoda quem já está mapeado.
+3. **Envio de template** com os dois botões ("Atualizar perfil" / "Agora não").
+4. Botão **Atualizar perfil** → **Envio de mensagem** com o link de cima.
+5. **Espera** de 10 a 15 minutos → **Requisição HTTP** de novo:
+   - `responded: true` → agradece e segue pelo `profession` (etiqueta, grupo, funil);
+   - ainda não → um lembrete, espera de novo (1 ou 2 horas) e consulta uma última vez.
+6. Botão **Agora não** → mensagem curta e fim.
+
+O passo 5 existe porque quem avisa que a pessoa terminou é a consulta, não a página: o site não chama o UnniChat de volta. Consultar logo depois de mandar o link (sem espera) devolve `responded: false` sempre — a pessoa ainda nem abriu.
+
+---
+
 ## 6. Checklist depois do deploy
 
 Faça pelo celular, de preferência abrindo o link de dentro do Instagram ou do WhatsApp (é onde o público vai estar).

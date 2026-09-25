@@ -213,6 +213,31 @@
     whatsappAnterior = campos.whatsapp.value;
   }
 
+  /**
+   * O contato que o UnniChat já tem, vindo no link (?nome=&telefone=&email=): a pessoa chega com os
+   * campos prontos e só confere. O que ela mesma corrigiu aqui antes tem preferência — o link só
+   * preenche campo vazio —, tudo passa pela mesma régua dos campos digitados, e nada é enviado
+   * sozinho: ela ainda aperta CONTINUAR e escolhe a profissão.
+   */
+  (function preencherDoLink() {
+    const params = new URLSearchParams(window.location.search);
+    const nome = (params.get("nome") || "").trim();
+    const telefone = (params.get("telefone") || params.get("whatsapp") || "").trim();
+    const email = (params.get("email") || "").trim();
+
+    if (nome && !campos.nome.value.trim()) campos.nome.value = L.formatName(nome.slice(0, 120));
+    if (telefone && !campos.whatsapp.value.trim()) {
+      const formatado = L.formatPhone(telefone);
+      // Número que não vira WhatsApp brasileiro (DDI de fora, variável não substituída) não entra:
+      // melhor o campo vazio do que a pessoa corrigindo lixo.
+      if (!L.phoneError(formatado)) {
+        campos.whatsapp.value = formatado;
+        whatsappAnterior = formatado;
+      }
+    }
+    if (email && !campos.email.value.trim()) campos.email.value = L.normalizeEmail(email.slice(0, 254));
+  })();
+
   /* ================================================================== */
   /* Validação (a mesma régua da pesquisa e da inscrição)                */
   /* ================================================================== */
