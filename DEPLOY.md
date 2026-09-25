@@ -402,7 +402,7 @@ Para o fluxo, **falha e `responded: false` são a mesma decisão**: ainda não s
 }
 ```
 
-Um aviso por pessoa (a segunda vez que a mesma linha fecha não dispara de novo). Três tentativas na hora; o que não for entregue fica marcado como pendente e a varredura reenvia por até 7 dias — então, se o destino ainda não existir quando alguém responder, o aviso **chega assim que ele for criado**.
+Um aviso por **pessoa**, garantido pelo telefone: preencher de novo (outro aparelho, link aberto duas vezes) não dispara a sequência outra vez. Três tentativas na hora; o que não for entregue fica marcado como pendente e a varredura reenvia por até 7 dias — então, se o destino ainda não existir quando alguém responder, o aviso **chega assim que ele for criado**.
 
 **Os dois fluxos, na ordem que funciona:**
 

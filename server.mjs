@@ -957,11 +957,46 @@ async function avisarWebhook(options, dados) {
 }
 
 /**
+ * Esta PESSOA já recebeu o aviso alguma vez? A garantia é por telefone, não por linha: a mesma
+ * pessoa preenchendo de novo (outro aparelho, outro navegador, link aberto duas vezes) cria outra
+ * tentativa no banco, e sem isto ela receberia a sequência duas vezes no WhatsApp.
+ *
+ * Na dúvida (banco fora), responde `false`: um aviso repetido incomoda menos do que a pessoa ficar
+ * sem a sequência.
+ */
+async function perfilJaAvisado(options, linha) {
+  const digits = textoOuNull(linha?.whatsapp_digits);
+  const id = textoOuNull(linha?.id);
+  if (!digits) return false;
+  const consulta = [
+    "select=id",
+    `pesquisa=eq.${encodeURIComponent(PESQUISA_ATUALIZACAO)}`,
+    `whatsapp_digits=eq.${encodeURIComponent(digits)}`,
+    "webhook_enviado_em=not.is.null",
+    ...(id ? [`id=neq.${encodeURIComponent(id)}`] : []),
+    "limit=1"
+  ].join("&");
+  try {
+    const linhas = await (await supabaseRequest(options, `pesquisa_respostas?${consulta}`)).json();
+    return Array.isArray(linhas) && linhas.length > 0;
+  } catch (error) {
+    console.error(`Aviso do perfil: falha ao conferir se a pessoa já foi avisada: ${error?.message || "erro"}`);
+    return false;
+  }
+}
+
+/**
  * Sem await de quem chama: a pessoa vai para a página de obrigado na hora e o aviso segue sozinho.
  * Mesmas três tentativas do aviso da pesquisa; com 2xx marca webhook_enviado_em na linha, e o que
  * não chegar a varredura reenvia.
  */
 async function avisarPerfil(options, dados) {
+  // Mesma pessoa já avisada: nada sai, e esta linha fica marcada para a varredura não tentar
+  // de novo amanhã.
+  if (await perfilJaAvisado(options, { whatsapp_digits: dados.linha?.whatsapp_digits ?? dados.contato?.whatsapp_digits, id: dados.id })) {
+    await marcarEnviado(options, dados.id);
+    return false;
+  }
   const payload = montarPayloadPerfil({ ...dados, agora: options.now() });
   const esperas = options.webhookEsperasMs;
 
@@ -1270,6 +1305,11 @@ function criarReenvio(options, { atrasoInicialMs = REENVIO_ATRASO_INICIAL_MS, in
       if (!isPlainObject(linha) || !linha.id) continue;
       const { webhookUrl, payload } = destinoDaLinha(options, linha, options.now());
       if (!webhookUrl) continue;
+      // A mesma pessoa pode ter preenchido duas vezes: só a primeira linha vira aviso.
+      if (linha.pesquisa === PESQUISA_ATUALIZACAO && (await perfilJaAvisado(options, linha))) {
+        await marcarEnviado(options, linha.id);
+        continue;
+      }
       try {
         await forwardToWebhook({ payload, webhookUrl, fetchImpl: options.fetchImpl });
       } catch (error) {

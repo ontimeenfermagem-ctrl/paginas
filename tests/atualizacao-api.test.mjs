@@ -353,7 +353,10 @@ test("a varredura cobre as DUAS pesquisas e manda cada linha para o endereço de
     const endereco = String(url);
     chamadas.push({ url: endereco, corpo: init.body ? JSON.parse(init.body) : null });
     if (endereco.includes("/rest/v1/pesquisa_respostas?") && (init.method || "GET") === "GET") {
-      return new Response(JSON.stringify(pendentes), { status: 200, headers: { "Content-Type": "application/json" } });
+      // A consulta "esta pessoa já foi avisada?" (webhook_enviado_em=not.is.null) é outra: aqui
+      // ninguém foi avisado ainda, então ela volta vazia.
+      const corpo = endereco.includes("webhook_enviado_em=not.is.null") ? [] : pendentes;
+      return new Response(JSON.stringify(corpo), { status: 200, headers: { "Content-Type": "application/json" } });
     }
     return new Response("", { status: 200 });
   };
@@ -382,4 +385,42 @@ test("a varredura cobre as DUAS pesquisas e manda cada linha para o endereço de
   assert.equal(paraPerfil[0].corpo.perfil_codigo, "enfermeiro");
   assert.equal(paraPesquisa[0].corpo.evento, "pesquisa_concluida");
   assert.equal(paraPesquisa[0].corpo.perfil_codigo, "tecnico_enfermagem");
+});
+
+test("a mesma pessoa preenchendo duas vezes recebe UM aviso só (a garantia é por telefone)", async () => {
+  const chamadas = [];
+  let avisar = () => {};
+  const avisado = new Promise((resolve) => (avisar = resolve));
+  const fetchImpl = async (url, init = {}) => {
+    const endereco = String(url);
+    chamadas.push({ url: endereco, corpo: init.body ? JSON.parse(init.body) : null });
+    if (endereco === PERFIL_WEBHOOK_URL) {
+      avisar(true);
+      return new Response("", { status: 200 });
+    }
+    // Uma tentativa ANTERIOR desta mesma pessoa já foi avisada.
+    if (endereco.includes("webhook_enviado_em=not.is.null")) {
+      return new Response(JSON.stringify([{ id: "99999999-9999-4999-8999-999999999999" }]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    return new Response(JSON.stringify({ ok: true, finalizou_agora: true, linha: linhaGravada(EV.PERFIL.tecnico) }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+  const server = createServerApp({ supabaseUrl: SUPABASE_URL, supabaseKey: SUPABASE_KEY, perfilWebhookUrl: PERFIL_WEBHOOK_URL, fetchImpl });
+  servers.push(server);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const { status } = await enviar(base, { id: UUID, contato: CONTATO, perfil: EV.PERFIL.tecnico, rastreio: RASTREIO });
+  assert.equal(status, 200);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.deepEqual(chamadas.filter((c) => c.url === PERFIL_WEBHOOK_URL), [], "nenhum aviso novo");
+  // A linha nova fica marcada como entregue, para a varredura não insistir nela amanhã.
+  const marca = chamadas.find((c) => c.url.includes("pesquisa_respostas?id=eq."));
+  assert.ok(marca && marca.corpo.webhook_enviado_em);
+  assert.ok(avisado);
 });
