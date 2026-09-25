@@ -33,10 +33,10 @@
       nome: "Obrigado — Aula de Aferição",
       perfis: Object.freeze([P.PERFIL.auxiliar]),
       grupo: "afericao",
-      eyebrow: "Aula ao vivo · dia 28 · 19h30 · on-line",
+      eyebrow: "Aula ao vivo · dia 30 · 19h30 · on-line",
       headline: "Pesquisa concluída! Agora falta só um passo. 💜",
       subheadline:
-        "Entre no grupo da aula ao vivo do dia 28, às 19h30, para receber todas as informações e o acesso ao encontro.",
+        "Entre no grupo da aula ao vivo do dia 30, às 19h30, para receber todas as informações e o acesso ao encontro.",
       introducao: "Na aula, a gente vai falar sobre:",
       topicos: Object.freeze([
         "o que é a aferição da profissão por tempo de serviço;",
@@ -77,10 +77,10 @@
       nome: "Obrigado — Evento Gratuito de Outubro",
       perfis: Object.freeze([P.PERFIL.tecnico, P.PERFIL.enfermeiro]),
       grupo: "evento_outubro",
-      eyebrow: "Evento gratuito · outubro",
+      eyebrow: "Evento gratuito · 20 de outubro",
       headline: "Pesquisa concluída! Seu próximo passo está aqui. 💜",
       subheadline:
-        "Entre no grupo oficial do evento gratuito de outubro para receber todas as informações e conteúdos de preparação.",
+        "Entre no grupo oficial do evento gratuito do dia 20 de outubro para receber todas as informações e conteúdos de preparação.",
       introducao: "O evento poderá abordar temas como:",
       topicos: Object.freeze([
         "prática profissional;",

@@ -182,7 +182,7 @@
     const codigoPerfil = (perfil && P.PERFIL_CODIGO && P.PERFIL_CODIGO[perfil]) || "";
 
     document.title = `${pagina.nome} | Escola Enfermagem de Valor`;
-    // Trechos curtos entre " · " ficam inteiros na quebra de linha ("dia 28" nunca se separa);
+    // Trechos curtos entre " · " ficam inteiros na quebra de linha ("dia 30" nunca se separa);
     // um trecho longo quebra normal, senão não caberia em 320px.
     const eyebrow = $("ob-eyebrow");
     eyebrow.textContent = "";
