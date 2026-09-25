@@ -156,6 +156,31 @@ test("lead novo: normaliza tudo, grava com a origem do servidor e responde creat
   assert.equal(p.seq, 1);
 });
 
+test("o ManyChat pode dizer de QUAL post/anúncio a pessoa veio (e só isso)", async () => {
+  const { base, gravacao } = await subir();
+  const { status } = await enviar(base, {
+    ...CORPO,
+    origem_detalhe: "post-afericao-25set",
+    anuncio: "criativo-07"
+  });
+  assert.equal(status, 200);
+  const p = gravacao().corpo.p;
+  assert.equal(p.utm_content, "post-afericao-25set");
+  assert.equal(p.utm_term, "criativo-07");
+  // E o que define a origem em si continua vindo do servidor.
+  assert.equal(p.utm_source, "instagram");
+  assert.equal(p.utm_medium, "instagram_dm");
+  assert.equal(p.utm_campaign, "manychat");
+});
+
+test("sem origem_detalhe nem anuncio, as duas colunas ficam vazias", async () => {
+  const { base, gravacao } = await subir();
+  await enviar(base, CORPO);
+  const p = gravacao().corpo.p;
+  assert.equal(p.utm_content, null);
+  assert.equal(p.utm_term, null);
+});
+
 test("a origem NUNCA vem do corpo do pedido", async () => {
   const { base, gravacao } = await subir();
   const { status } = await enviar(base, {
@@ -163,6 +188,8 @@ test("a origem NUNCA vem do corpo do pedido", async () => {
     utm_source: "facebook",
     utm_medium: "cpc",
     utm_campaign: "campanha-de-quem-chamou",
+    utm_content: "conteudo-de-quem-chamou",
+    utm_term: "termo-de-quem-chamou",
     origem: "tiktok",
     source: "google"
   });
@@ -171,6 +198,9 @@ test("a origem NUNCA vem do corpo do pedido", async () => {
   assert.equal(p.utm_source, "instagram");
   assert.equal(p.utm_medium, "instagram_dm");
   assert.equal(p.utm_campaign, "manychat");
+  // utm_content e utm_term só entram pelos nomes próprios (origem_detalhe e anuncio).
+  assert.equal(p.utm_content, null);
+  assert.equal(p.utm_term, null);
 });
 
 /* ------------------------------------------------------------------ profissão */

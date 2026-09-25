@@ -474,6 +474,8 @@ O grupo existe para não inventar informação: quem disse "enfermagem" não dis
 
 **Origem** não vem do corpo do pedido: tudo que entra aqui é DM do Instagram, então o servidor grava `utm_source=instagram`, `utm_medium=instagram_dm` e `utm_campaign=manychat` nas colunas de origem que o projeto já tem. Numa atualização, a origem que já estava na linha é preservada (primeiro toque).
 
+O que o ManyChat **pode** acrescentar é o detalhe de onde a pessoa veio, em dois campos opcionais do corpo: `origem_detalhe` (o post, a automação ou a palavra-chave → `utm_content`) e `anuncio` (o criativo → `utm_term`). Só por esses nomes: mandar `utm_source`/`utm_content` no corpo não muda nada, de propósito.
+
 **Sem duplicar.** A mesma pessoa é reconhecida nesta ordem: `manychat_contact_id` (guardado no jsonb `respostas`, sem coluna nova), telefone normalizado e e-mail. Achando, a linha é atualizada (`action: "updated"`); não achando, nasce uma (`action: "created"`). A busca acontece só entre os leads do ManyChat: a linha da pessoa na pesquisa de ICP ou na atualização por WhatsApp é outra coisa e não é sobrescrita.
 
 **Erros:** `400 invalid_payload` (com `campos`, dizendo o que está errado), `401 unauthorized`, `429 too_many_requests`, `503 api_key_not_configured` ou `database_not_configured`, `502 database_unavailable`. Nenhum expõe stack nem dado pessoal.

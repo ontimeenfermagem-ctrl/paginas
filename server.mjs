@@ -3217,7 +3217,12 @@ async function handleManychatLead(request, response, options) {
     tempos: {},
     // Origem decidida AQUI, nunca pelo corpo do pedido. São colunas de primeiro toque: numa
     // atualização, o pesquisa_salvar guarda a origem que já estava lá.
-    ...ORIGEM_MANYCHAT
+    ...ORIGEM_MANYCHAT,
+    // De onde no Instagram: qual post, automação ou palavra-chave trouxe a pessoa (utm_content) e
+    // qual anúncio (utm_term). São os dois campos que o ManyChat PODE mandar — o resto da origem
+    // continua sendo do servidor. Vazio não atrapalha nada.
+    utm_content: textoOuNull(typeof body.origem_detalhe === "string" ? body.origem_detalhe.slice(0, 200) : ""),
+    utm_term: textoOuNull(typeof body.anuncio === "string" ? body.anuncio.slice(0, 200) : "")
   };
 
   try {
