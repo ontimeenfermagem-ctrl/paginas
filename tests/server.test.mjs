@@ -1618,7 +1618,8 @@ test("reenvio: busca só as pendentes (filtros PostgREST), manda o MESMO payload
   assert.equal(u.pathname, "/rest/v1/pesquisa_respostas");
   assert.equal(busca.headers.apikey, SUPABASE_KEY);
   assert.equal(u.searchParams.get("select"), "*");
-  assert.equal(u.searchParams.get("pesquisa"), "eq.icp-escola-ev");
+  // Sem o webhook de perfil configurado, a varredura procura só a pesquisa de ICP.
+  assert.equal(u.searchParams.get("pesquisa"), "in.(icp-escola-ev)");
   assert.equal(u.searchParams.get("webhook_enviado_em"), "is.null");
   assert.equal(
     u.searchParams.get("or"),

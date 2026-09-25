@@ -30,6 +30,12 @@ const WEBHOOK_TIMEOUT_MS = 10_000;
 // quintino). PESQUISA_WEBHOOK_URL troca o endereço; "off" desliga. Só o processo de verdade usa
 // este padrão: createServerApp começa com "" para teste nenhum disparar um aviso real.
 const DEFAULT_WEBHOOK_URL = "https://n8n.tecnicadevalor.com.br/webhook/pesquisa-icp";
+// Aviso de PERFIL ATUALIZADO (/atualizacao-perfil): sai no instante em que a pessoa escolhe a
+// profissão, para a conversa no WhatsApp continuar sabendo com quem está falando — sem ninguém
+// ficar perguntando "já respondeu?" de tempos em tempos. PERFIL_WEBHOOK_URL troca o endereço (pode
+// apontar direto para o gatilho do UnniChat); "off" desliga. Como o da pesquisa, só o processo de
+// verdade usa este padrão: createServerApp começa com "".
+const DEFAULT_PERFIL_WEBHOOK_URL = "https://n8n.tecnicadevalor.com.br/webhook/perfil-atualizado";
 // Webhooks do n8n que recebem cada inscrição NOVA, por página de inscrição (id do
 // js/checkout-config.js). Ficam aqui, e não no config, porque o config é público (vai para o
 // navegador e para a cópia da página de venda): endereço de webhook exposto é convite para spam.
@@ -872,6 +878,53 @@ export function montarPayloadWebhook({ linha, id, contato, respostas, rastreio, 
   };
 }
 
+/**
+ * O aviso de perfil atualizado. É o gatilho da sequência no WhatsApp: leva o contato formatado e a
+ * profissão nos três formatos (rótulo da tela, código interno e etiqueta de CRM), com as UTMs.
+ * Não leva respostas de pesquisa porque esta página não tem nenhuma — só contato e profissão.
+ */
+export function montarPayloadPerfil({ linha, id, contato, perfil, rastreio, agora }) {
+  const l = isPlainObject(linha) ? linha : {};
+  const campo = (nome) => textoOuNull(l[nome]) ?? textoOuNull(rastreio?.[nome]);
+  const digits = textoOuNull(l.whatsapp_digits) ?? textoOuNull(contato?.whatsapp_digits);
+  const nome = textoOuNull(l.nome) ?? textoOuNull(contato?.nome);
+  const escolhido = textoOuNull(l.perfil) ?? (typeof perfil === "string" ? perfil : null);
+
+  return {
+    evento: "perfil_atualizado",
+    origem: PESQUISA_ATUALIZACAO,
+    lead_id: textoOuNull(l.id) ?? textoOuNull(id),
+    atualizado_em: isoOuNull(l.finalizado_em) ?? isoOuNull(l.concluido_em) ?? new Date(agora).toISOString(),
+    lead: {
+      nome,
+      primeiro_nome: nome ? pesquisa.primeiroNome(nome) : null,
+      whatsapp: textoOuNull(l.whatsapp) ?? textoOuNull(contato?.whatsapp),
+      whatsapp_digits: digits,
+      whatsapp_internacional: textoOuNull(l.whatsapp_internacional) ?? (digits ? `55${digits}` : null),
+      email: textoOuNull(l.email) ?? textoOuNull(contato?.email)
+    },
+    perfil: escolhido,
+    perfil_codigo: valorDoPerfil(pesquisa.PERFIL_CODIGO, escolhido),
+    segmento: valorDoPerfil(pesquisa.PERFIL_SEGMENTO, escolhido),
+    pagina_obrigado: paginaObrigadoDoPerfil(escolhido),
+    utm: {
+      utm_source: campo("utm_source"),
+      utm_medium: campo("utm_medium"),
+      utm_campaign: campo("utm_campaign"),
+      utm_content: campo("utm_content"),
+      utm_term: campo("utm_term")
+    },
+    rastreio: {
+      fbclid: campo("fbclid"),
+      gclid: campo("gclid"),
+      page_url: campo("page_url"),
+      referrer: campo("referrer"),
+      dispositivo: campo("dispositivo")
+    },
+    enviado_em: new Date(agora).toISOString()
+  };
+}
+
 function esperar(ms) {
   return new Promise((resolve) => {
     // unref: uma espera entre tentativas não segura o processo num deploy.
@@ -897,6 +950,29 @@ async function avisarWebhook(options, dados) {
       continue;
     }
 
+    await marcarEnviado(options, dados.id);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Sem await de quem chama: a pessoa vai para a página de obrigado na hora e o aviso segue sozinho.
+ * Mesmas três tentativas do aviso da pesquisa; com 2xx marca webhook_enviado_em na linha, e o que
+ * não chegar a varredura reenvia.
+ */
+async function avisarPerfil(options, dados) {
+  const payload = montarPayloadPerfil({ ...dados, agora: options.now() });
+  const esperas = options.webhookEsperasMs;
+
+  for (let tentativa = 0; tentativa < esperas.length; tentativa += 1) {
+    if (esperas[tentativa] > 0) await esperar(esperas[tentativa]);
+    try {
+      await forwardToWebhook({ payload, webhookUrl: options.perfilWebhookUrl, fetchImpl: options.fetchImpl });
+    } catch (error) {
+      console.error(`Falha ao avisar o webhook do perfil (tentativa ${tentativa + 1} de ${esperas.length}): ${error?.message || "erro"}`);
+      continue;
+    }
     await marcarEnviado(options, dados.id);
     return true;
   }
@@ -1132,6 +1208,17 @@ function payloadDaLinha(linha, agora) {
   return montarPayloadWebhook({ linha, id: linha.id, contato, respostas, rastreio: {}, agora });
 }
 
+function payloadPerfilDaLinha(linha, agora) {
+  return montarPayloadPerfil({ linha, id: linha.id, contato: null, perfil: linha.perfil, rastreio: {}, agora });
+}
+
+/** Para onde vai a linha pendente e o que sai nela: as duas pesquisas usam a mesma varredura. */
+function destinoDaLinha(options, linha, agora) {
+  return linha.pesquisa === PESQUISA_ATUALIZACAO
+    ? { webhookUrl: options.perfilWebhookUrl, payload: payloadPerfilDaLinha(linha, agora) }
+    : { webhookUrl: options.webhookUrl, payload: payloadDaLinha(linha, agora) };
+}
+
 /**
  * Varredura que reenvia ao n8n as tentativas finalizadas que ficaram sem webhook_enviado_em (n8n
  * fora nas três tentativas, ou servidor reiniciado no meio). Uma tentativa por linha; em 2xx marca
@@ -1155,9 +1242,13 @@ function criarReenvio(options, { atrasoInicialMs = REENVIO_ATRASO_INICIAL_MS, in
     const filtro =
       `(and(finalizado_em.gte.${desde},finalizado_em.lte.${ate}),` +
       `and(finalizado_em.is.null,status.eq.concluida,concluido_em.gte.${desde},atualizado_em.lte.${parada}))`;
+    // Só as pesquisas que TÊM para onde avisar: com o webhook desligado, a linha não fica sendo
+    // relida para sempre.
+    const pesquisas = [options.webhookUrl ? pesquisa.ID : "", options.perfilWebhookUrl ? PESQUISA_ATUALIZACAO : ""].filter(Boolean);
+    if (!pesquisas.length) return { pendentes: 0, entregues: 0 };
     const consulta = [
       "select=*",
-      `pesquisa=eq.${encodeURIComponent(pesquisa.ID)}`,
+      `pesquisa=in.(${pesquisas.map(encodeURIComponent).join(",")})`,
       "webhook_enviado_em=is.null",
       `or=${encodeURIComponent(filtro)}`,
       "order=criado_em.asc",
@@ -1177,8 +1268,10 @@ function criarReenvio(options, { atrasoInicialMs = REENVIO_ATRASO_INICIAL_MS, in
     for (const linha of linhas) {
       if (parado) break;
       if (!isPlainObject(linha) || !linha.id) continue;
+      const { webhookUrl, payload } = destinoDaLinha(options, linha, options.now());
+      if (!webhookUrl) continue;
       try {
-        await forwardToWebhook({ payload: payloadDaLinha(linha, options.now()), webhookUrl: options.webhookUrl, fetchImpl: options.fetchImpl });
+        await forwardToWebhook({ payload, webhookUrl, fetchImpl: options.fetchImpl });
       } catch (error) {
         console.error(`Reenvio ao n8n: falha ao entregar: ${error?.message || "erro"}`);
         continue;
@@ -2850,38 +2943,47 @@ async function handleAtualizacaoPerfil(request, response, options) {
   const rastreio = normalizarRastreio(body.rastreio);
   const paginaObrigado = paginaObrigadoDoPerfil(perfil);
 
+  const p = {
+    id: normalizarUuid(body.id) || randomUUID(),
+    pesquisa: PESQUISA_ATUALIZACAO,
+    pesquisa_versao: pesquisa.VERSAO,
+    visitante_id: normalizarUuid(body.visitante_id),
+    // seq alto e fixo: esta pesquisa tem uma resposta só, e um reenvio nunca "volta no tempo".
+    seq: 1,
+    ...contato,
+    perfil,
+    respostas: { perfil },
+    pergunta_atual: "fim",
+    etapa_atual: 1,
+    posicao: 1,
+    pergunta_posicao: "fim",
+    etapa_posicao: 1,
+    respondidas: 1,
+    obrigatorias: 1,
+    obrigatorias_respondidas: 1,
+    total_perguntas: 1,
+    progresso_percentual: 100,
+    completa: true,
+    finalizou: true,
+    tempos: {},
+    ...rastreio
+  };
+
+  let resultado;
   try {
-    await callRpc(options, "pesquisa_salvar", {
-      p: {
-        id: normalizarUuid(body.id) || randomUUID(),
-        pesquisa: PESQUISA_ATUALIZACAO,
-        pesquisa_versao: pesquisa.VERSAO,
-        visitante_id: normalizarUuid(body.visitante_id),
-        // seq alto e fixo: esta pesquisa tem uma resposta só, e um reenvio nunca "volta no tempo".
-        seq: 1,
-        ...contato,
-        perfil,
-        respostas: { perfil },
-        pergunta_atual: "fim",
-        etapa_atual: 1,
-        posicao: 1,
-        pergunta_posicao: "fim",
-        etapa_posicao: 1,
-        respondidas: 1,
-        obrigatorias: 1,
-        obrigatorias_respondidas: 1,
-        total_perguntas: 1,
-        progresso_percentual: 100,
-        completa: true,
-        finalizou: true,
-        tempos: {},
-        ...rastreio
-      }
-    });
+    resultado = await readObjectResponse(await callRpc(options, "pesquisa_salvar", { p }));
   } catch (error) {
     console.error(`Falha ao salvar a atualização de perfil: ${error?.message || "erro"}`);
     sendJson(response, 502, { ok: false, error: "database_unavailable" });
     return;
+  }
+
+  // O gatilho da sequência no WhatsApp, UMA vez por pessoa: finalizou_agora só vem true quando
+  // esta linha fecha pela primeira vez. Sem await — quem está na tela não espera o n8n.
+  if (resultado.finalizou_agora === true && options.perfilWebhookUrl) {
+    avisarPerfil(options, { linha: resultado.linha, id: p.id, contato, perfil, rastreio }).catch((error) => {
+      console.error(`Falha inesperada ao avisar o webhook do perfil: ${error?.message || "erro"}`);
+    });
   }
 
   console.log(`atualizacao-perfil: perfil ${profession} gravado`);
@@ -3028,6 +3130,8 @@ export function createServerApp({
   // Chave que o UnniChat manda no header X-API-Key para consultar o perfil de um telefone.
   unnichatApiKey = "",
   webhookUrl = "",
+  // Para onde vai o aviso de perfil atualizado (/atualizacao-perfil). Vazio = ninguém é avisado.
+  perfilWebhookUrl = "",
   webhookEsperasMs = WEBHOOK_ESPERAS_MS,
   siteUrl = "",
   // Origens extras que podem mandar o POST /api/inscricao (além das `origem` do checkout-config).
@@ -3058,6 +3162,8 @@ export function createServerApp({
     hotmartChave,
     unnichatApiKey: String(unnichatApiKey || "").trim(),
     webhookUrl: String(webhookUrl || "").trim().toLowerCase() === "off" ? "" : webhookUrl,
+    perfilWebhookUrl:
+      String(perfilWebhookUrl || "").trim().toLowerCase() === "off" ? "" : String(perfilWebhookUrl || "").trim(),
     webhookEsperasMs: Array.isArray(webhookEsperasMs) && webhookEsperasMs.length ? webhookEsperasMs : WEBHOOK_ESPERAS_MS,
     siteUrl: normalizarSiteUrl(siteUrl),
     webhooksInscricao: normalizarWebhooksInscricao(webhooksInscricao),
@@ -3155,8 +3261,8 @@ export function createServerApp({
     }
   });
 
-  // Sem webhook ou sem banco, não há o que reenviar: a varredura nem existe.
-  if (reenvio && options.webhookUrl && supabaseEnabled(options)) {
+  // Sem webhook nenhum (pesquisa e perfil) ou sem banco, não há o que reenviar: a varredura nem existe.
+  if (reenvio && (options.webhookUrl || options.perfilWebhookUrl) && supabaseEnabled(options)) {
     const varredura = criarReenvio(options, reenvio === true ? {} : reenvio);
     server.reenvio = varredura;
     server.on("listening", () => varredura.iniciar());
@@ -3224,6 +3330,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const webhookEnv = String(env.PESQUISA_WEBHOOK_URL || "").trim();
   const webhookUrl = webhookEnv.toLowerCase() === "off" ? "" : webhookEnv || DEFAULT_WEBHOOK_URL;
   if (!webhookUrl) console.warn("Aviso: PESQUISA_WEBHOOK_URL=off — nenhuma pesquisa concluída será enviada ao n8n.");
+  const perfilEnv = String(env.PERFIL_WEBHOOK_URL || "").trim();
+  const perfilWebhookUrl = perfilEnv.toLowerCase() === "off" ? "" : perfilEnv || DEFAULT_PERFIL_WEBHOOK_URL;
+  if (!perfilWebhookUrl) console.warn("Aviso: PERFIL_WEBHOOK_URL=off — quem atualizar o perfil não dispara a sequência no WhatsApp.");
   if (!normalizarSiteUrl(env.SITE_URL)) console.warn("Aviso: SITE_URL ausente — og:url, canonical e a imagem da prévia usam o endereço de cada requisição (Host/X-Forwarded-Host).");
   if (!normalizarPixelId(metaPixelId)) console.warn("Aviso: Meta Pixel desligado (META_PIXEL_ID = off ou inválido).");
 
@@ -3249,6 +3358,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     hotmartChave: [env.HOTMART_WEBHOOK_CHAVE, env.HOTMART_WEBHOOK_CHAVE_2].map((valor) => String(valor || "").trim()).filter(Boolean).join(","),
     unnichatApiKey: env.UNNICHAT_API_KEY || "",
     webhookUrl,
+    perfilWebhookUrl,
     siteUrl: env.SITE_URL || "",
     origensInscricao: String(env.INSCRICAO_ORIGENS || "").split(","),
     webhooksInscricao: {

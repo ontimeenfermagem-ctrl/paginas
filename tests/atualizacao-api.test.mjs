@@ -53,12 +53,31 @@ afterEach(async () => {
   );
 });
 
-async function subir({ semBanco = false, erroDoBanco = false, dominio = "ok" } = {}) {
+const PERFIL_WEBHOOK_URL = "https://n8n-de-teste.invalid/webhook/perfil-atualizado";
+
+async function subir({
+  semBanco = false,
+  erroDoBanco = false,
+  dominio = "ok",
+  perfilWebhookUrl = "",
+  finalizouAgora = true,
+  linha = null,
+  webhookStatus = 200,
+  ...opcoes
+} = {}) {
   const chamadas = [];
+  let avisar = () => {};
+  const avisado = new Promise((resolve) => (avisar = resolve));
   const fetchImpl = async (url, init = {}) => {
-    chamadas.push({ url: String(url), corpo: init.body ? JSON.parse(init.body) : null });
+    const endereco = String(url);
+    const chamada = { url: endereco, corpo: init.body ? JSON.parse(init.body) : null };
+    chamadas.push(chamada);
+    if (endereco === perfilWebhookUrl) {
+      avisar(chamada);
+      return new Response("", { status: webhookStatus });
+    }
     if (erroDoBanco) return new Response("boom", { status: 500 });
-    return new Response(JSON.stringify({ ok: true, novo: true }), {
+    return new Response(JSON.stringify({ ok: true, novo: true, finalizou_agora: finalizouAgora, linha }), {
       status: 200,
       headers: { "Content-Type": "application/json" }
     });
@@ -66,12 +85,35 @@ async function subir({ semBanco = false, erroDoBanco = false, dominio = "ok" } =
   const server = createServerApp({
     supabaseUrl: semBanco ? "" : SUPABASE_URL,
     supabaseKey: semBanco ? "" : SUPABASE_KEY,
+    perfilWebhookUrl,
     fetchImpl,
-    resolveEmailDomain: async () => dominio
+    resolveEmailDomain: async () => dominio,
+    ...opcoes
   });
   servers.push(server);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { base: `http://127.0.0.1:${server.address().port}`, chamadas };
+  return { base: `http://127.0.0.1:${server.address().port}`, chamadas, avisado };
+}
+
+/** A linha que o pesquisa_salvar devolve para quem acabou de fechar o perfil. */
+function linhaGravada(perfil, extra = {}) {
+  return {
+    id: UUID,
+    pesquisa: "atualizacao-perfil",
+    criado_em: "2026-09-25T12:00:00Z",
+    finalizado_em: "2026-09-25T12:00:40Z",
+    nome: "Maria da Silva",
+    whatsapp: "(11) 91234-5678",
+    whatsapp_digits: "11912345678",
+    whatsapp_internacional: "5511912345678",
+    email: "maria@gmail.com",
+    perfil,
+    utm_source: "unnichat",
+    utm_medium: "whatsapp",
+    utm_campaign: "atualizar-perfil",
+    dispositivo: "mobile",
+    ...extra
+  };
 }
 
 async function enviar(base, corpo, { tipo = "application/json", metodo = "POST" } = {}) {
@@ -224,4 +266,120 @@ test("sem JSON: 415; método errado: 405; sem banco: 503; banco fora: 502", asyn
   const r2 = await enviar(comErro.base, { contato: CONTATO, perfil: EV.PERFIL.tecnico, rastreio: RASTREIO });
   assert.equal(r2.status, 502);
   assert.equal(r2.json.error, "database_unavailable");
+});
+
+/* ------------------------------------------------------------------ o gatilho do WhatsApp */
+
+test("terminar o perfil dispara UM aviso, com a profissão nos três formatos", async () => {
+  const { base, chamadas, avisado } = await subir({
+    perfilWebhookUrl: PERFIL_WEBHOOK_URL,
+    linha: linhaGravada(EV.PERFIL.cuidador)
+  });
+  const { status } = await enviar(base, { id: UUID, contato: CONTATO, perfil: EV.PERFIL.cuidador, rastreio: RASTREIO });
+  assert.equal(status, 200);
+
+  const aviso = await avisado;
+  const p = aviso.corpo;
+  assert.equal(p.evento, "perfil_atualizado");
+  assert.equal(p.origem, "atualizacao-perfil");
+  assert.equal(p.lead_id, UUID);
+  assert.equal(p.perfil, EV.PERFIL.cuidador);
+  assert.equal(p.perfil_codigo, "cuidador");
+  assert.equal(p.segmento, EV.PERFIL_SEGMENTO[EV.PERFIL.cuidador]);
+  assert.equal(p.pagina_obrigado.rota, OB.paginaDoPerfil(EV.PERFIL.cuidador).rota);
+  assert.deepEqual(p.lead, {
+    nome: "Maria da Silva",
+    primeiro_nome: "Maria",
+    whatsapp: "(11) 91234-5678",
+    whatsapp_digits: "11912345678",
+    whatsapp_internacional: "5511912345678",
+    email: "maria@gmail.com"
+  });
+  assert.equal(p.utm.utm_source, "unnichat");
+  assert.equal(p.utm.utm_campaign, "atualizar-perfil");
+  assert.equal(p.rastreio.dispositivo, "mobile");
+  assert.ok(p.atualizado_em && p.enviado_em);
+  // Esta página não tem pesquisa: nada de respostas nem de lista de perguntas no aviso.
+  assert.equal(p.respostas, undefined);
+  assert.equal(p.perguntas, undefined);
+
+  // Um aviso só, e a linha fica marcada como entregue.
+  assert.equal(chamadas.filter((c) => c.url === PERFIL_WEBHOOK_URL).length, 1);
+  const marca = chamadas.find((c) => c.url.includes("pesquisa_respostas?id=eq."));
+  assert.ok(marca && marca.corpo.webhook_enviado_em, "marcou webhook_enviado_em");
+});
+
+test("quem já tinha terminado antes não dispara a sequência de novo", async () => {
+  const { base, chamadas } = await subir({ perfilWebhookUrl: PERFIL_WEBHOOK_URL, finalizouAgora: false });
+  const { status } = await enviar(base, { id: UUID, contato: CONTATO, perfil: EV.PERFIL.tecnico, rastreio: RASTREIO });
+  assert.equal(status, 200);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(chamadas.filter((c) => c.url === PERFIL_WEBHOOK_URL), []);
+});
+
+test("sem webhook de perfil configurado, nada sai (e a gravação segue igual)", async () => {
+  const { base, chamadas } = await subir({ finalizouAgora: true });
+  const { status, json } = await enviar(base, { id: UUID, contato: CONTATO, perfil: EV.PERFIL.enfermeiro, rastreio: RASTREIO });
+  assert.equal(status, 200);
+  assert.equal(json.profession, "enfermeiro");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(chamadas.length, 1, "só a gravação");
+});
+
+test("n8n fora não atrapalha a pessoa: ela recebe 200 e a linha NÃO é marcada (a varredura reenvia)", async () => {
+  const { base, chamadas, avisado } = await subir({
+    perfilWebhookUrl: PERFIL_WEBHOOK_URL,
+    webhookStatus: 503,
+    linha: linhaGravada(EV.PERFIL.tecnico),
+    // Sem espera entre as tentativas: o teste não pode ficar 13 segundos parado.
+    webhookEsperasMs: [0, 0, 0]
+  });
+  const { status } = await enviar(base, { id: UUID, contato: CONTATO, perfil: EV.PERFIL.tecnico, rastreio: RASTREIO });
+  assert.equal(status, 200, "a pessoa não espera pelo n8n");
+  await avisado;
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(chamadas.filter((c) => c.url === PERFIL_WEBHOOK_URL).length, 3, "três tentativas");
+  assert.equal(chamadas.some((c) => c.url.includes("pesquisa_respostas?id=eq.")), false, "não marca como entregue");
+});
+
+test("a varredura cobre as DUAS pesquisas e manda cada linha para o endereço dela", async () => {
+  const PESQUISA_WEBHOOK_URL = "https://n8n-de-teste.invalid/webhook/pesquisa-icp";
+  const chamadas = [];
+  const pendentes = [
+    linhaGravada(EV.PERFIL.enfermeiro, { id: "44444444-4444-4444-8444-444444444444" }),
+    { ...linhaGravada(EV.PERFIL.tecnico, { id: "55555555-5555-4555-8555-555555555555" }), pesquisa: "icp-escola-ev", respostas: { perfil: EV.PERFIL.tecnico } }
+  ];
+  const fetchImpl = async (url, init = {}) => {
+    const endereco = String(url);
+    chamadas.push({ url: endereco, corpo: init.body ? JSON.parse(init.body) : null });
+    if (endereco.includes("/rest/v1/pesquisa_respostas?") && (init.method || "GET") === "GET") {
+      return new Response(JSON.stringify(pendentes), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("", { status: 200 });
+  };
+  const server = createServerApp({
+    supabaseUrl: SUPABASE_URL,
+    supabaseKey: SUPABASE_KEY,
+    webhookUrl: PESQUISA_WEBHOOK_URL,
+    perfilWebhookUrl: PERFIL_WEBHOOK_URL,
+    fetchImpl,
+    reenvio: { atrasoInicialMs: 60_000, intervaloMs: 60_000 }
+  });
+  servers.push(server);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  const resultado = await server.reenvio.executar();
+  assert.deepEqual(resultado, { pendentes: 2, entregues: 2 });
+
+  const busca = new URL(chamadas[0].url).searchParams;
+  assert.equal(busca.get("pesquisa"), "in.(icp-escola-ev,atualizacao-perfil)");
+
+  const paraPerfil = chamadas.filter((c) => c.url === PERFIL_WEBHOOK_URL);
+  const paraPesquisa = chamadas.filter((c) => c.url === PESQUISA_WEBHOOK_URL);
+  assert.equal(paraPerfil.length, 1);
+  assert.equal(paraPesquisa.length, 1);
+  assert.equal(paraPerfil[0].corpo.evento, "perfil_atualizado");
+  assert.equal(paraPerfil[0].corpo.perfil_codigo, "enfermeiro");
+  assert.equal(paraPesquisa[0].corpo.evento, "pesquisa_concluida");
+  assert.equal(paraPesquisa[0].corpo.perfil_codigo, "tecnico_enfermagem");
 });

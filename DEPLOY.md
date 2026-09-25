@@ -209,6 +209,7 @@ A senha em si não é guardada em lugar nenhum, só o hash. Guarde a senha num g
    | `PAINEL_SENHA_HASH` | a linha do passo 3 (cole como está, sem aspas) |
    | `PAINEL_SESSAO_SEGREDO` | a linha do passo 3 |
    | `PESQUISA_WEBHOOK_URL` | opcional: vazio = `https://n8n.tecnicadevalor.com.br/webhook/pesquisa-icp`; outro endereço troca; `off` desliga. Recebe **um** aviso `pesquisa_concluida` por pessoa, quando ela chega à tela de fim. Se o n8n estiver fora, o servidor reenvia sozinho (varredura 30 s depois de subir e a cada 10 min, até 7 dias). A varredura também manda quem respondeu todas as obrigatórias e fechou antes da tela de fim, depois de 30 min parada |
+   | `PERFIL_WEBHOOK_URL` | opcional: vazio = `https://n8n.tecnicadevalor.com.br/webhook/perfil-atualizado`; outro endereço troca (pode ser o gatilho do UnniChat); `off` desliga. Recebe **um** aviso `perfil_atualizado` por pessoa, no instante em que ela escolhe a profissão na `/atualizacao-perfil`. Se o destino estiver fora, a varredura reenvia |
    | `GPS_WEBHOOK_URL` | opcional: vazio = `https://n8n.tecnicadevalor.com.br/webhook/gps-outubro`; outro endereço troca; `off` desliga. Recebe **um** aviso `inscricao` por pessoa inscrita na página da Imersão GPS (contato, as 5 UTMs, sck, rastreio e o link do checkout). Se o n8n estiver fora, a varredura reenvia (marca em `inscricoes.webhook_enviado_em`) |
    | `SITE_URL` | opcional, recomendado assim que o domínio existir (ex.: `https://pesquisa.seudominio.com.br`): fixa o endereço do `og:url`, do `canonical` e da imagem da prévia do WhatsApp. Sem ele, o servidor usa o endereço pelo qual a página foi pedida (cabeçalho `X-Forwarded-Host`/`Host`, validado), então a prévia já sai com imagem no domínio do Railway |
    | `HOTMART_HOTTOK` | o *Hottok* da Hotmart (Ferramentas > Webhook/Postback > aba **Autenticação**). Sem ele **e** sem `HOTMART_WEBHOOK_CHAVE`, `POST /api/hotmart/venda` responde 503 |
@@ -377,18 +378,49 @@ O link só **preenche** (nada é gravado por abrir a página): a pessoa ainda ap
 
 Para o fluxo, **falha e `responded: false` são a mesma decisão**: ainda não sabemos quem é, então manda (ou remanda) o convite.
 
-**O fluxo, na ordem que funciona:**
+**O aviso de quem acabou de responder.** Quando a pessoa escolhe a profissão, o servidor manda na hora um `POST` para `PERFIL_WEBHOOK_URL` (padrão: o n8n em `/webhook/perfil-atualizado`; pode apontar direto para o gatilho do UnniChat). É ele que inicia a sequência — ninguém precisa ficar perguntando "já respondeu?".
+
+```json
+{
+  "evento": "perfil_atualizado",
+  "origem": "atualizacao-perfil",
+  "lead": {
+    "nome": "Maria da Silva",
+    "primeiro_nome": "Maria",
+    "whatsapp": "(11) 91234-5678",
+    "whatsapp_digits": "11912345678",
+    "whatsapp_internacional": "5511912345678",
+    "email": "maria@gmail.com"
+  },
+  "perfil": "Cuidador(a)",
+  "perfil_codigo": "cuidador",
+  "segmento": "PERFIL_CUIDADOR",
+  "pagina_obrigado": { "id": "cuidador", "rota": "/obrigado-cuidador", "nome": "...", "grupo": "..." },
+  "utm": { "utm_source": "unnichat", "utm_medium": "whatsapp", "utm_campaign": "atualizar-perfil", "utm_content": null, "utm_term": null },
+  "rastreio": { "fbclid": null, "gclid": null, "page_url": "...", "referrer": null, "dispositivo": "mobile" },
+  "lead_id": "...", "atualizado_em": "...", "enviado_em": "..."
+}
+```
+
+Um aviso por pessoa (a segunda vez que a mesma linha fecha não dispara de novo). Três tentativas na hora; o que não for entregue fica marcado como pendente e a varredura reenvia por até 7 dias — então, se o destino ainda não existir quando alguém responder, o aviso **chega assim que ele for criado**.
+
+**Os dois fluxos, na ordem que funciona:**
+
+*Fluxo 1 — o disparo:*
 
 1. **Broadcast** com a lista.
 2. **Requisição HTTP** (a consulta acima) — *antes* do template. Quem já respondeu sai do fluxo aqui, e o disparo não incomoda quem já está mapeado.
 3. **Envio de template** com os dois botões ("Atualizar perfil" / "Agora não").
-4. Botão **Atualizar perfil** → **Envio de mensagem** com o link de cima.
-5. **Espera** de 10 a 15 minutos → **Requisição HTTP** de novo:
-   - `responded: true` → agradece e segue pelo `profession` (etiqueta, grupo, funil);
-   - ainda não → um lembrete, espera de novo (1 ou 2 horas) e consulta uma última vez.
-6. Botão **Agora não** → mensagem curta e fim.
+4. Botão **Atualizar perfil** → **Envio de mensagem** com o link de cima. O fluxo 1 acaba aqui.
+5. Botão **Agora não** → mensagem curta e fim.
 
-O passo 5 existe porque quem avisa que a pessoa terminou é a consulta, não a página: o site não chama o UnniChat de volta. Consultar logo depois de mandar o link (sem espera) devolve `responded: false` sempre — a pessoa ainda nem abriu.
+*Fluxo 2 — quem acabou de responder* (gatilho: o `perfil_atualizado` acima, direto ou passando pelo n8n):
+
+1. **Gatilho** com o telefone (`lead.whatsapp_internacional`) e, se o gatilho aceitar variáveis, o `perfil_codigo` e o `lead.primeiro_nome` já vêm junto.
+2. Se o gatilho não carregar variáveis: **uma Requisição HTTP** na consulta acima — aqui ela sempre responde `responded: true`, porque a pessoa acabou de gravar.
+3. **Condição** por `perfil_codigo` → a sequência de cada profissão.
+
+Aqui **não precisa de template**: quem clicou no botão do template abriu a janela de 24 horas (o clique conta como mensagem da pessoa), e a resposta chega minutos depois. Mensagem livre resolve, com o nome na variável.
 
 ---
 
