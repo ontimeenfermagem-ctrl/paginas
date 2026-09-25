@@ -406,8 +406,9 @@ caso("já concluída: reabrir a pesquisa leva direto ao obrigado; ?nova=1 recome
   const chegada = await esperarObrigado(page, "/obrigado-afericao");
   assert.equal(chegada.search, `?${QUERY}`);
   assert.equal(reg.salvar.length, salvos, "reabrir não grava de novo");
-  // "Responder a pesquisa como outra pessoa", no rodapé do obrigado.
-  await page.click('a[href="/pesquisa-icp?nova=1"]');
+  // O ?nova=1 não tem mais link no rodapé do obrigado (só confundia quem acabou de responder),
+  // mas o endereço continua recomeçando a pesquisa como outra pessoa.
+  await page.goto(base + "/pesquisa-icp?nova=1");
   await page.waitForSelector("#tela-boasvindas:not([hidden])");
   assert.equal(new URL(page.url()).search, "", "o ?nova=1 sai da URL");
   assert.equal(await page.textContent("#botao-comecar-texto"), "Começar");

@@ -489,23 +489,6 @@ a {
   letter-spacing: 0.04em;
 }
 
-.link-discreto {
-  display: inline-flex;
-  align-items: center;
-  min-height: 44px;
-  padding: 10px 14px;
-  color: var(--ink-soft);
-  font-size: 15px;
-  font-weight: 500;
-  text-decoration: underline;
-  text-underline-offset: 4px;
-  text-decoration-color: color-mix(in oklab, var(--ink-soft) 45%, transparent);
-  border-radius: 10px;
-}
-.link-discreto:hover {
-  color: var(--ember-deep);
-}
-
 /* ================================================================== */
 /* Sem JavaScript                                                      */
 /* ================================================================== */
