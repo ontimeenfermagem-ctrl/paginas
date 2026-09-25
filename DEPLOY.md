@@ -368,6 +368,15 @@ O link só **preenche** (nada é gravado por abrir a página): a pessoa ainda ap
 { "success": true, "responded": true, "phone": "5545999999999", "profession": "tecnico_enfermagem" }
 ```
 
+**Se a ferramenta só deixar preencher a URL** (sem header, sem leitura de JSON), a mesma consulta atende de dois jeitos mais simples:
+
+- `&chave=<UNNICHAT_API_KEY>` na URL substitui o header (como no webhook da Hotmart);
+- `&formato=texto` devolve **uma palavra só**, em `text/plain`, para a condição do fluxo comparar direto: `auxiliar_atendente`, `cuidador`, `tecnico_enfermagem`, `enfermeiro`, `sem_perfil` (existe, sem profissão ainda), `nao_encontrado` (200, porque é resposta e não erro), `telefone_invalido`, `nao_autorizado` ou `erro`.
+
+```
+https://SEU-DOMINIO/api/leads/perfil?telefone={{telefone_do_contato}}&chave=<UNNICHAT_API_KEY>&formato=texto
+```
+
 `profession` é sempre um destes quatro: `auxiliar_atendente`, `cuidador`, `tecnico_enfermagem`, `enfermeiro`. E os três estados que o fluxo precisa distinguir:
 
 | Situação | HTTP | Como reconhecer |

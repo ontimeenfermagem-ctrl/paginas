@@ -264,6 +264,18 @@ function paginaObrigadoDoPerfil(perfil) {
 /* Utilidades                                                                                  */
 /* ------------------------------------------------------------------------------------------ */
 
+/** Resposta de uma palavra só, para ferramenta que não sabe ler JSON (ver ?formato=texto). */
+function sendTexto(response, statusCode, palavra) {
+  const data = Buffer.from(`${palavra}\n`, "utf8");
+  response.writeHead(statusCode, {
+    "Cache-Control": "no-store",
+    "Content-Length": data.length,
+    "Content-Type": "text/plain; charset=utf-8",
+    "X-Content-Type-Options": "nosniff"
+  });
+  response.end(data);
+}
+
 function sendJson(response, statusCode, body, headers = {}) {
   const data = Buffer.from(JSON.stringify(body));
   response.writeHead(statusCode, {
@@ -3043,6 +3055,18 @@ async function handleAtualizacaoPerfil(request, response, options) {
 /* usam, então os quatro valores nunca saem de sincronia com a tela.                            */
 /* ------------------------------------------------------------------------------------------ */
 
+// ?formato=texto: cada situação vira UMA palavra, para a condição do fluxo comparar direto.
+const PALAVRA_DO_ERRO = Object.freeze({
+  lead_not_found: "nao_encontrado",
+  invalid_phone: "telefone_invalido",
+  invalid_id: "id_invalido",
+  unauthorized: "nao_autorizado",
+  too_many_requests: "muitas_consultas",
+  api_key_not_configured: "erro",
+  database_not_configured: "erro",
+  database_unavailable: "erro"
+});
+
 const LEADS_RATE_LIMIT_MAX = 1200;
 const LEADS_RATE_LIMIT_WINDOW_MS = 60_000;
 
@@ -3083,17 +3107,26 @@ async function primeiraLinha(options, restPath) {
 async function handleLeadPerfil(request, response, options, idDireto = "") {
   if (request.method !== "GET") return methodNotAllowed(response, "GET");
 
+  const params = new URL(request.url, "http://localhost").searchParams;
+  // Ferramenta de automação que só deixa preencher a URL não manda header nem lê JSON. Para ela:
+  // a chave vai em ?chave= (como no webhook da Hotmart) e ?formato=texto devolve UMA palavra —
+  // a profissão, ou o porquê de não ter. Quem manda header e lê JSON continua igual.
+  const modoTexto = String(params.get("formato") || "").trim().toLowerCase() === "texto";
   const semLead = (status, erro, telefone = null) =>
-    sendJson(response, status, { success: false, responded: false, phone: telefone, profession: null, error: erro });
+    modoTexto
+      ? // "não encontrado" em texto é 200 de propósito: é resposta, não erro, e assim a condição
+        // do fluxo compara palavra com palavra sem depender da saída de falha do nó.
+        sendTexto(response, erro === "lead_not_found" ? 200 : status, PALAVRA_DO_ERRO[erro] || "erro")
+      : sendJson(response, status, { success: false, responded: false, phone: telefone, profession: null, error: erro });
+  const comPerfil = (corpo) => (modoTexto ? sendTexto(response, 200, corpo.profession || "sem_perfil") : sendJson(response, 200, corpo));
 
   if (!options.unnichatApiKey) return semLead(503, "api_key_not_configured");
-  const chave = String(request.headers["x-api-key"] || "");
+  const chave = String(request.headers["x-api-key"] || params.get("chave") || "");
   if (!segredoIgual(chave, options.unnichatApiKey)) return semLead(401, "unauthorized");
 
   if (!options.allowLeads(request)) return semLead(429, "too_many_requests");
   if (!supabaseEnabled(options)) return semLead(503, "database_not_configured");
 
-  const params = new URL(request.url, "http://localhost").searchParams;
   const digitos = idDireto ? "" : telefoneParaDigitos(params.get("telefone") ?? params.get("phone") ?? "");
   const telefone = digitos ? `55${digitos}` : null;
 
@@ -3121,12 +3154,7 @@ async function handleLeadPerfil(request, response, options, idDireto = "") {
       console.log(
         `leads/perfil: ${telefoneNoLog(pessoa.whatsapp_digits || digitos)} respondeu a pesquisa; profissão ${profession || "(ainda não escolheu)"}`
       );
-      return sendJson(response, 200, {
-        success: true,
-        responded: Boolean(profession),
-        phone,
-        profession: profession ?? null
-      });
+      return comPerfil({ success: true, responded: Boolean(profession), phone, profession: profession ?? null });
     }
 
     // Quem entrou por uma página de inscrição (Viver de Furo, Imersão GPS) existe como lead, mas
@@ -3138,12 +3166,7 @@ async function handleLeadPerfil(request, response, options, idDireto = "") {
       );
       if (inscrito) {
         console.log(`leads/perfil: ${telefoneNoLog(digitos)} é lead de inscrição e ainda não respondeu a pesquisa`);
-        return sendJson(response, 200, {
-          success: true,
-          responded: false,
-          phone: inscrito.whatsapp_internacional || telefone,
-          profession: null
-        });
+        return comPerfil({ success: true, responded: false, phone: inscrito.whatsapp_internacional || telefone, profession: null });
       }
     }
 

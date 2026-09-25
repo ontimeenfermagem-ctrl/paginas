@@ -77,6 +77,23 @@ function pessoa(digits, perfil, extra = {}) {
   };
 }
 
+/** A mesma consulta, mas devolvendo o corpo cru (para o modo texto). */
+async function consultarCru(base, caminho, { apiKey = null } = {}) {
+  return await new Promise((resolve, reject) => {
+    const req = httpRequest(
+      `${base}${caminho}`,
+      { method: "GET", headers: apiKey === null ? {} : { "X-API-Key": apiKey } },
+      (res) => {
+        let corpo = "";
+        res.on("data", (pedaco) => (corpo += pedaco));
+        res.on("end", () => resolve({ status: res.statusCode, tipo: res.headers["content-type"] || "", corpo }));
+      }
+    );
+    req.on("error", reject);
+    req.end();
+  });
+}
+
 async function consultar(base, caminho, { apiKey = API_KEY, metodo = "GET" } = {}) {
   return await new Promise((resolve, reject) => {
     const req = httpRequest(
@@ -271,4 +288,71 @@ test("id que não é uuid: 422 invalid_id", async () => {
   assert.equal(status, 422);
   assert.equal(json.error, "invalid_id");
   assert.deepEqual(chamadas, []);
+});
+
+/* ------------------------------------------------------------------ ferramenta sem header */
+
+test("a chave também vale em ?chave= (ferramenta que só deixa preencher a URL)", async () => {
+  const { base } = await subir({ pessoas: { "45999999999": pessoa("45999999999", "Enfermeiro(a)") } });
+  const { status, json } = await consultar(base, `/api/leads/perfil?telefone=5545999999999&chave=${encodeURIComponent(API_KEY)}`, {
+    apiKey: null
+  });
+  assert.equal(status, 200);
+  assert.equal(json.profession, "enfermeiro");
+});
+
+test("?chave= errada continua sendo 401", async () => {
+  const { base, chamadas } = await subir();
+  const { status, json } = await consultar(base, "/api/leads/perfil?telefone=5545999999999&chave=outra", { apiKey: null });
+  assert.equal(status, 401);
+  assert.equal(json.error, "unauthorized");
+  assert.deepEqual(chamadas, []);
+});
+
+/* ------------------------------------------------------------------ ?formato=texto */
+
+test("formato=texto devolve UMA palavra: a profissão, com content-type de texto", async () => {
+  for (const [rotulo, codigo] of PERFIS) {
+    const { base } = await subir({ pessoas: { "45999999999": pessoa("45999999999", rotulo) } });
+    const r = await consultarCru(base, `/api/leads/perfil?telefone=5545999999999&formato=texto&chave=${encodeURIComponent(API_KEY)}`);
+    assert.equal(r.status, 200, rotulo);
+    assert.match(r.tipo, /text\/plain/);
+    assert.equal(r.corpo.trim(), codigo, rotulo);
+  }
+});
+
+test("formato=texto: quem existe sem perfil é 'sem_perfil'; telefone desconhecido é 'nao_encontrado' em 200", async () => {
+  const semPerfil = await subir({ pessoas: { "45999999999": pessoa("45999999999", null) } });
+  const r1 = await consultarCru(semPerfil.base, "/api/leads/perfil?telefone=5545999999999&formato=texto", { apiKey: API_KEY });
+  assert.equal(r1.status, 200);
+  assert.equal(r1.corpo.trim(), "sem_perfil");
+
+  const ninguem = await subir();
+  const r2 = await consultarCru(ninguem.base, "/api/leads/perfil?telefone=5545999999999&formato=texto", { apiKey: API_KEY });
+  // 200 de propósito: é resposta, não erro — a condição do fluxo compara palavra com palavra.
+  assert.equal(r2.status, 200);
+  assert.equal(r2.corpo.trim(), "nao_encontrado");
+});
+
+test("formato=texto: chave errada, telefone torto e banco fora também viram palavra", async () => {
+  const semChave = await subir();
+  const r1 = await consultarCru(semChave.base, "/api/leads/perfil?telefone=5545999999999&formato=texto");
+  assert.equal(r1.status, 401);
+  assert.equal(r1.corpo.trim(), "nao_autorizado");
+
+  const r2 = await consultarCru(semChave.base, "/api/leads/perfil?telefone=123&formato=texto", { apiKey: API_KEY });
+  assert.equal(r2.status, 422);
+  assert.equal(r2.corpo.trim(), "telefone_invalido");
+
+  const quebrado = await subir({ erroDoBanco: true });
+  const r3 = await consultarCru(quebrado.base, "/api/leads/perfil?telefone=5545999999999&formato=texto", { apiKey: API_KEY });
+  assert.equal(r3.status, 502);
+  assert.equal(r3.corpo.trim(), "erro");
+});
+
+test("sem formato=texto, a resposta continua sendo o JSON de sempre", async () => {
+  const { base } = await subir({ pessoas: { "45999999999": pessoa("45999999999", "Cuidador(a)") } });
+  const r = await consultarCru(base, "/api/leads/perfil?telefone=5545999999999", { apiKey: API_KEY });
+  assert.match(r.tipo, /application\/json/);
+  assert.deepEqual(JSON.parse(r.corpo), { success: true, responded: true, phone: "5545999999999", profession: "cuidador" });
 });
