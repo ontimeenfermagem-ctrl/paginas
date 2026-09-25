@@ -173,6 +173,17 @@ const OBRIGADO_PAGE = "/obrigado.html";
 const PERFIL_ROTA = "/atualizacao-perfil";
 const PERFIL_PAGE = "/atualizacao-perfil.html";
 const PESQUISA_ATUALIZACAO = "atualizacao-perfil";
+// Leads que o ManyChat coleta na DM do Instagram. Mesma tabela, id de pesquisa próprio: eles não
+// se misturam com o ICP nem com a página de atualização, e a varredura de webhook não os toca
+// (quem ramifica o funil desses é o próprio ManyChat).
+const PESQUISA_MANYCHAT = "manychat-instagram";
+// A origem NÃO vem do cliente: tudo que entra por aquela rota é DM do Instagram, via ManyChat.
+// Vai nas colunas de origem que o projeto já tem (as UTMs de primeiro toque), e não em coluna nova.
+const ORIGEM_MANYCHAT = Object.freeze({
+  utm_source: "instagram",
+  utm_medium: "instagram_dm",
+  utm_campaign: "manychat"
+});
 
 const brotliCompressAsync = promisify(brotliCompress);
 const gzipAsync = promisify(gzip);
@@ -207,6 +218,13 @@ const PERGUNTAS = pesquisa.PERGUNTAS;
 const POSICAO_FIM = PERGUNTAS.length + 1;
 const INDICE_PERGUNTA = new Map(PERGUNTAS.map((pergunta, indice) => [pergunta.id, indice + 1]));
 const PERFIS_VALIDOS = new Set(Object.values(pesquisa.PERFIL));
+// Na aba de perfis entram também os GRUPOS (hoje "enfermagem", do ManyChat): eles são profissão
+// gravada como qualquer outra, só não separam as duas. Ficam fora dos filtros da pesquisa de ICP.
+const PERFIS_CONTADOS = Object.freeze([
+  ...Object.values(pesquisa.PERFIL),
+  ...Object.values(pesquisa.PERFIL_GRUPO).map((grupo) => grupo.rotulo)
+]);
+const PERFIS_CONTADOS_SET = new Set(PERFIS_CONTADOS);
 const CHAVES_TEXTO = Array.from(pesquisa.chavesTexto());
 const CHAVES_TEXTO_SET = new Set(CHAVES_TEXTO);
 const IDS_ANALISAVEIS = new Set(pesquisa.perguntasAnalisaveis().map((pergunta) => pergunta.id));
@@ -2249,6 +2267,8 @@ const PERFIS_COLUNAS = [
   "whatsapp_digits",
   "email",
   "perfil",
+  // De qual origem veio a linha (a página curta do WhatsApp ou a DM do Instagram).
+  "pesquisa",
   // Se a sequência do WhatsApp já foi disparada para esta pessoa (o aviso perfil_atualizado).
   "webhook_enviado_em",
   "dispositivo",
@@ -2273,14 +2293,16 @@ function handlePerfisPainel(request, response, options) {
     const { desde, ate } = lerPeriodo(params);
     const busca = lerBusca(params);
     const perfilPedido = params.get("perfil") || null;
-    if (perfilPedido !== null && !PERFIS_VALIDOS.has(perfilPedido)) invalido();
+    if (perfilPedido !== null && !PERFIS_CONTADOS_SET.has(perfilPedido)) invalido();
     const limite = lerInteiro(params, "limite", { padrao: PAINEL_LIST_PADRAO, minimo: 1, maximo: PAINEL_LIST_MAX });
     const offset = lerInteiro(params, "offset", { padrao: 0, minimo: 0 });
 
     // O recorte comum: cada consulta parte daqui, então um filtro vale para a lista e para as contagens.
     const recorte = () => {
       const query = new URLSearchParams();
-      query.set("pesquisa", `eq.${PESQUISA_ATUALIZACAO}`);
+      // As duas origens de "contato + profissão": a página curta do WhatsApp e a DM do Instagram.
+      // A coluna de origem da lista (utm_source) diz qual é qual, linha por linha.
+      query.set("pesquisa", `in.(${PESQUISA_ATUALIZACAO},${PESQUISA_MANYCHAT})`);
       if (desde) query.append("criado_em", `gte.${desde}`);
       if (ate) query.append("criado_em", `lt.${ate}`);
       if (busca) {
@@ -2302,7 +2324,7 @@ function handlePerfisPainel(request, response, options) {
 
     // Uma contagem por profissão, sem trazer linha nenhuma (limit=0): o número vem no Content-Range.
     // A contagem ignora o filtro de profissão de propósito — os quatro cartões continuam visíveis.
-    const profissoes = Array.from(PERFIS_VALIDOS);
+    const profissoes = Array.from(PERFIS_CONTADOS);
     const contagens = profissoes.map((nome) => {
       const query = recorte();
       query.set("select", "id");
@@ -2317,11 +2339,16 @@ function handlePerfisPainel(request, response, options) {
 
     const itens = await listaResponse.json();
     if (!Array.isArray(itens)) throw new Error("supabase_unexpected_shape");
-    const porPerfil = profissoes.map((nome, indice) => ({
-      perfil: nome,
-      codigo: pesquisa.PERFIL_CODIGO[nome] || null,
-      total: totalFromContentRange(contagemResponses[indice], 0)
-    }));
+    const porPerfil = profissoes.map((nome, indice) => {
+      const grupo = pesquisa.grupoDoRotulo(nome);
+      return {
+        perfil: nome,
+        codigo: pesquisa.codigoDoPerfil(nome),
+        // Rótulo curto da aba. Só vem para grupo: das quatro profissões, o painel já tem o dele.
+        ...(grupo ? { curto: grupo.curto } : {}),
+        total: totalFromContentRange(contagemResponses[indice], 0)
+      };
+    });
 
     return {
       itens,
@@ -3045,6 +3072,174 @@ async function handleAtualizacaoPerfil(request, response, options) {
 }
 
 /* ------------------------------------------------------------------------------------------ */
+/* POST /api/integrations/manychat/lead — o lead que vem da DM do Instagram                    */
+/*                                                                                              */
+/* O ManyChat coleta nome, e-mail, telefone e profissão na conversa e manda UM post. Aqui nada é */
+/* inventado: contato passa pelo validarContato (a mesma régua da pesquisa e da inscrição), a    */
+/* profissão vira um dos rótulos do projeto (ou o GRUPO "enfermagem", quando a DM não separa     */
+/* técnica de enfermeira) e a gravação é o mesmo pesquisa_salvar de todo o resto. A ramificação  */
+/* do funil continua no ManyChat: o servidor só guarda e responde.                              */
+/* ------------------------------------------------------------------------------------------ */
+
+/** Chave de comparação de profissão: sem acento, sem caixa e sem pontuação. */
+function chaveDoPerfil(valor) {
+  return String(valor || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * O que a automação manda -> o rótulo que vai para a coluna `perfil`.
+ *
+ * Aceita os códigos internos (os quatro do projeto e o grupo), os rótulos da tela e as variações
+ * que a DM costuma escrever. O que não estiver aqui é recusado: melhor um 400 do que um lead com
+ * profissão adivinhada.
+ */
+const PERFIL_DA_AUTOMACAO = new Map(
+  [
+    // Auxiliar / antiga atendente
+    [pesquisa.PERFIL.auxiliar, ["auxiliar_atendente", "auxiliar", "atendente", "auxiliar/antiga atendente", "auxiliar ou antiga atendente", "auxiliar de enfermagem", "atendente de enfermagem", pesquisa.PERFIL.auxiliar]],
+    // Cuidador
+    [pesquisa.PERFIL.cuidador, ["cuidador", "cuidadora", "cuidador(a)", "cuidador de idosos", pesquisa.PERFIL.cuidador]],
+    // As duas profissões separadas, para quando a DM perguntar qual das duas
+    [pesquisa.PERFIL.tecnico, ["tecnico_enfermagem", "tecnico", "tecnica", "tecnico de enfermagem", "tecnica de enfermagem", pesquisa.PERFIL.tecnico]],
+    [pesquisa.PERFIL.enfermeiro, ["enfermeiro", "enfermeira", "enfermeiro(a)", pesquisa.PERFIL.enfermeiro]],
+    // O grupo: a DM só perguntou "enfermagem" e não sabe qual das duas
+    [
+      pesquisa.PERFIL_GRUPO.enfermagem.rotulo,
+      ["enfermagem", "tecnico de enfermagem/enfermeiro", "tecnico_enfermagem_ou_enfermeiro", "tecnicos e enfermeiros", pesquisa.PERFIL_GRUPO.enfermagem.rotulo]
+    ]
+  ].flatMap(([rotulo, entradas]) => entradas.map((entrada) => [chaveDoPerfil(entrada), rotulo]))
+);
+
+function perfilDaAutomacao(valor) {
+  const chave = chaveDoPerfil(valor);
+  return chave && PERFIL_DA_AUTOMACAO.has(chave) ? PERFIL_DA_AUTOMACAO.get(chave) : null;
+}
+
+/**
+ * A MESMA pessoa que já entrou por aqui, para não duplicar lead. Na ordem que o cliente pediu:
+ * id do ManyChat, telefone e e-mail — três consultas curtas, todas em colunas indexadas, e a
+ * primeira que achar manda. Procura só dentro dos leads do ManyChat: a linha da pessoa na pesquisa
+ * de ICP ou na atualização por WhatsApp é outra coisa e não pode ser sobrescrita por aqui.
+ */
+async function leadManychatExistente(options, { contactId, digits, email }) {
+  const base = `pesquisa_respostas?pesquisa=eq.${encodeURIComponent(PESQUISA_MANYCHAT)}&select=id,seq,criado_em&order=criado_em.asc&limit=1`;
+  const buscas = [
+    contactId ? `&respostas->>manychat_contact_id=eq.${encodeURIComponent(contactId)}` : "",
+    digits ? `&whatsapp_digits=eq.${encodeURIComponent(digits)}` : "",
+    email ? `&email=eq.${encodeURIComponent(email)}` : ""
+  ].filter(Boolean);
+
+  for (const busca of buscas) {
+    const linha = await primeiraLinha(options, `${base}${busca}`);
+    if (linha && linha.id) return linha;
+  }
+  return null;
+}
+
+async function handleManychatLead(request, response, options) {
+  if (request.method !== "POST") return methodNotAllowed(response, "POST");
+
+  const recusar = (status, erro, extra = {}) => sendJson(response, status, { success: false, error: erro, ...extra });
+
+  // Chave no header (padrão do projeto) ou em ?chave=, para ferramenta que só deixa preencher a URL.
+  if (!options.manychatApiKey) return recusar(503, "api_key_not_configured");
+  const chaveDaUrl = new URL(request.url, "http://localhost").searchParams.get("chave");
+  const chave = String(request.headers["x-api-key"] || chaveDaUrl || "");
+  if (!segredoIgual(chave, options.manychatApiKey)) return recusar(401, "unauthorized");
+
+  if (!options.allowSalvar(request)) return recusar(429, "too_many_requests");
+
+  // Corpo lido aqui (e não pelo readObjectBody) para o ManyChat receber SEMPRE o mesmo contrato:
+  // qualquer corpo que não sirva é 400 { success: false, error: "invalid_payload" }.
+  let body;
+  try {
+    body = await readJsonBody(request, MAX_BODY_BYTES);
+  } catch (error) {
+    return recusar(Number(error?.statusCode) === 413 ? 413 : 400, error?.message === "payload_too_large" ? "payload_too_large" : "invalid_payload");
+  }
+  if (!isPlainObject(body)) return recusar(400, "invalid_payload");
+
+  // O contato passa pela régua de sempre: nome com sobrenome e maiúsculas certas, telefone em
+  // (DD) 9xxxx-xxxx + dígitos, e-mail minúsculo e com formato válido.
+  const validacao = validarContato({ nome: body.nome, whatsapp: body.telefone ?? body.whatsapp ?? body.phone, email: body.email });
+  if (validacao.campos) return recusar(400, "invalid_payload", { campos: validacao.campos });
+  const { contato } = validacao;
+
+  if ((await options.checkEmailDomain(leadRules.emailDomain(contato.email))) === "missing") {
+    return recusar(400, "invalid_payload", { campos: { email: leadRules.MESSAGES.email.domain } });
+  }
+
+  const perfil = perfilDaAutomacao(body.profissao ?? body.perfil ?? body.profession);
+  if (!perfil) return recusar(400, "invalid_payload", { campos: { profissao: "Profissão não reconhecida." } });
+  const profession = pesquisa.codigoDoPerfil(perfil);
+
+  if (!supabaseEnabled(options)) return recusar(503, "database_not_configured");
+
+  const contactId = textoOuNull(typeof body.manychat_contact_id === "string" || typeof body.manychat_contact_id === "number" ? String(body.manychat_contact_id).slice(0, 120) : "");
+
+  let existente;
+  try {
+    existente = await leadManychatExistente(options, { contactId, digits: contato.whatsapp_digits, email: contato.email });
+  } catch (error) {
+    console.error(`Falha ao procurar o lead do ManyChat: ${error?.message || "erro"}`);
+    return recusar(502, "database_unavailable");
+  }
+
+  const id = existente ? existente.id : randomUUID();
+  const p = {
+    id,
+    pesquisa: PESQUISA_MANYCHAT,
+    pesquisa_versao: pesquisa.VERSAO,
+    // seq sempre maior que o da linha: é o que faz pesquisa_salvar aplicar a atualização.
+    seq: existente ? Number(existente.seq || 0) + 1 : 1,
+    ...contato,
+    perfil,
+    // O id do ManyChat mora no jsonb que já existe (respostas), junto da profissão: nada de coluna
+    // nem migration para guardar um identificador externo.
+    respostas: contactId ? { perfil, manychat_contact_id: contactId } : { perfil },
+    pergunta_atual: "fim",
+    etapa_atual: 1,
+    posicao: 1,
+    pergunta_posicao: "fim",
+    etapa_posicao: 1,
+    respondidas: 1,
+    obrigatorias: 1,
+    obrigatorias_respondidas: 1,
+    total_perguntas: 1,
+    progresso_percentual: 100,
+    completa: true,
+    // Sem finalizou: este lead não dispara aviso ao n8n — o ManyChat já continua a conversa dele.
+    finalizou: false,
+    tempos: {},
+    // Origem decidida AQUI, nunca pelo corpo do pedido. São colunas de primeiro toque: numa
+    // atualização, o pesquisa_salvar guarda a origem que já estava lá.
+    ...ORIGEM_MANYCHAT
+  };
+
+  try {
+    await callRpc(options, "pesquisa_salvar", { p });
+  } catch (error) {
+    console.error(`Falha ao salvar o lead do ManyChat: ${error?.message || "erro"}`);
+    return recusar(502, "database_unavailable");
+  }
+
+  const action = existente ? "updated" : "created";
+  console.log(`manychat/lead: ${action} ${telefoneNoLog(contato.whatsapp_digits)} perfil ${profession}`);
+  sendJson(response, 200, {
+    success: true,
+    action,
+    lead_id: id,
+    profession,
+    phone: `55${contato.whatsapp_digits}`,
+    source: ORIGEM_MANYCHAT.utm_source
+  });
+}
+
+/* ------------------------------------------------------------------------------------------ */
 /* GET /api/leads/perfil — a consulta do UnniChat                                              */
 /*                                                                                              */
 /* O UnniChat dispara o template no WhatsApp, a pessoa responde a pesquisa aqui e ele volta para */
@@ -3139,9 +3334,10 @@ async function handleLeadPerfil(request, response, options, idDireto = "") {
   try {
     const filtro = idDireto
       ? `id=eq.${encodeURIComponent(idDireto)}`
-      : // As duas pesquisas: o mapeamento completo (/pesquisa-icp) e a atualização curta
-        // (/atualizacao-perfil). Quem respondeu nas duas volta pela linha que TEM perfil.
-        `pesquisa=in.(${encodeURIComponent(pesquisa.ID)},${encodeURIComponent(PESQUISA_ATUALIZACAO)})` +
+      : // As três origens: o mapeamento completo (/pesquisa-icp), a atualização curta
+        // (/atualizacao-perfil) e o lead da DM do Instagram (ManyChat). Quem respondeu em mais de
+        // uma volta pela linha que TEM perfil.
+        `pesquisa=in.(${encodeURIComponent(pesquisa.ID)},${encodeURIComponent(PESQUISA_ATUALIZACAO)},${encodeURIComponent(PESQUISA_MANYCHAT)})` +
         `&whatsapp_digits=eq.${encodeURIComponent(digitos)}&order=perfil.asc.nullslast,atualizado_em.desc`;
     const pessoa = await primeiraLinha(
       options,
@@ -3149,7 +3345,8 @@ async function handleLeadPerfil(request, response, options, idDireto = "") {
     );
 
     if (pessoa) {
-      const profession = valorDoPerfil(pesquisa.PERFIL_CODIGO, pessoa.perfil);
+      // codigoDoPerfil entende as quatro profissões E o grupo "enfermagem" (lead do ManyChat).
+      const profession = pesquisa.codigoDoPerfil(pessoa.perfil);
       const phone = pessoa.whatsapp_internacional || (pessoa.whatsapp_digits ? `55${pessoa.whatsapp_digits}` : telefone);
       console.log(
         `leads/perfil: ${telefoneNoLog(pessoa.whatsapp_digits || digitos)} respondeu a pesquisa; profissão ${profession || "(ainda não escolheu)"}`
@@ -3194,6 +3391,8 @@ export function createServerApp({
   hotmartChave = "",
   // Chave que o UnniChat manda no header X-API-Key para consultar o perfil de um telefone.
   unnichatApiKey = "",
+  // Chave que o ManyChat manda no header X-API-Key ao entregar um lead da DM do Instagram.
+  manychatApiKey = "",
   webhookUrl = "",
   // Para onde vai o aviso de perfil atualizado (/atualizacao-perfil). Vazio = ninguém é avisado.
   perfilWebhookUrl = "",
@@ -3226,6 +3425,7 @@ export function createServerApp({
     hotmartHottok,
     hotmartChave,
     unnichatApiKey: String(unnichatApiKey || "").trim(),
+    manychatApiKey: String(manychatApiKey || "").trim(),
     webhookUrl: String(webhookUrl || "").trim().toLowerCase() === "off" ? "" : webhookUrl,
     perfilWebhookUrl:
       String(perfilWebhookUrl || "").trim().toLowerCase() === "off" ? "" : String(perfilWebhookUrl || "").trim(),
@@ -3254,6 +3454,7 @@ export function createServerApp({
     ["/api/pagina/evento", handlePaginaEvento],
     ["/api/inscricao", handleInscricao],
     ["/api/hotmart/venda", handleHotmartVenda],
+    ["/api/integrations/manychat/lead", handleManychatLead],
     ["/api/atualizacao-perfil", handleAtualizacaoPerfil],
     ["/api/leads/perfil", handleLeadPerfil],
     ["/api/painel/login", handleLogin],
@@ -3412,6 +3613,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.warn("Aviso: UNNICHAT_API_KEY ausente — GET /api/leads/perfil responde 503 e o UnniChat não consulta o perfil.");
   }
 
+  if (!env.MANYCHAT_API_KEY) {
+    console.warn("Aviso: MANYCHAT_API_KEY ausente — POST /api/integrations/manychat/lead responde 503 e nenhum lead do Instagram é gravado.");
+  }
+
   const server = createServerApp({
     supabaseUrl: env.SUPABASE_URL || "",
     supabaseKey: env.SUPABASE_SERVICE_ROLE_KEY || "",
@@ -3422,6 +3627,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     // Uma variável por produto, todas aceitas no mesmo endereço (cada uma vira um ?chave= próprio).
     hotmartChave: [env.HOTMART_WEBHOOK_CHAVE, env.HOTMART_WEBHOOK_CHAVE_2].map((valor) => String(valor || "").trim()).filter(Boolean).join(","),
     unnichatApiKey: env.UNNICHAT_API_KEY || "",
+    manychatApiKey: env.MANYCHAT_API_KEY || "",
     webhookUrl,
     perfilWebhookUrl,
     siteUrl: env.SITE_URL || "",

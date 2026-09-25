@@ -53,7 +53,9 @@ const DADOS = gerar();
 
 // Perfis atualizados (/atualizacao-perfil): doze pessoas fixas, uma profissão de cada vez, sempre
 // na mesma ordem — a aba mostra contato e profissão, e nada mais.
-const PERFIS_LISTA = Object.values(EV.PERFIL);
+// As quatro profissões da pesquisa + o GRUPO que o ManyChat manda (enfermagem sem separar).
+const GRUPO_PERFIL = EV.PERFIL_GRUPO.enfermagem;
+const PERFIS_LISTA = [...Object.values(EV.PERFIL), GRUPO_PERFIL.rotulo];
 const PERFIS_PESSOAS = Array.from({ length: 12 }, (_, i) => ({
   id: `aaaaaaaa-aaaa-4aaa-8aaa-${String(i).padStart(12, "0")}`,
   criado_em: new Date(Date.UTC(2026, 8, 24, 12, 0, 0) - i * 3_600_000).toISOString(),
@@ -63,7 +65,9 @@ const PERFIS_PESSOAS = Array.from({ length: 12 }, (_, i) => ({
   email: `pessoa${i + 1}@gmail.com`,
   perfil: PERFIS_LISTA[i % PERFIS_LISTA.length],
   // Uma pessoa com o aviso ainda pendente: é o único caso em que o selo aparece.
-  webhook_enviado_em: i === 2 ? null : "2026-09-24T12:00:05Z",
+  webhook_enviado_em: i === 2 || i % 5 === 4 ? null : "2026-09-24T12:00:05Z",
+  // A cada cinco, uma pessoa veio da DM do Instagram (ManyChat), que não tem aviso ao n8n.
+  pesquisa: i % 5 === 4 ? "manychat-instagram" : "atualizacao-perfil",
   utm_source: i % 2 ? "unnichat" : "",
   utm_campaign: i % 2 ? "atualizar-perfil" : ""
 }));
@@ -159,7 +163,8 @@ function criarMock(page, { dados = DADOS, logado = true } = {}) {
             // As contagens NÃO olham o filtro de profissão: os quatro cartões continuam completos.
             por_perfil: PERFIS_LISTA.map((perfil) => ({
               perfil,
-              codigo: EV.PERFIL_CODIGO[perfil],
+              codigo: EV.codigoDoPerfil(perfil),
+              ...(EV.grupoDoRotulo(perfil) ? { curto: EV.grupoDoRotulo(perfil).curto } : {}),
               total: doRecorte.filter((p) => p.perfil === perfil).length
             })),
             gerado_em: new Date().toISOString()
@@ -1120,6 +1125,12 @@ cenario("perfis", async () => {
       const quantos = PERFIS_PESSOAS.filter((p) => p.perfil === perfil).length;
       confere(abasPerfil.includes(`${perfil}|${fmt(quantos)}`), `${largura}: ${perfil} = ${quantos}`);
     }
+    // O grupo do ManyChat é uma aba como as outras, com o rótulo curto que o servidor manda.
+    const textoAbas = await page.$$eval("[data-perfis-corpo] [data-perfil-aba]", (els) => els.map((e) => e.textContent));
+    confere(
+      textoAbas.some((t) => t.startsWith(GRUPO_PERFIL.curto)),
+      `${largura}: aba do grupo com o rótulo curto (${textoAbas.join(" / ")})`
+    );
 
     // A ficha de cada pessoa: nome, WhatsApp clicável, e-mail e a profissão.
     const primeira = PERFIS_PESSOAS[0];
@@ -1131,8 +1142,12 @@ cenario("perfis", async () => {
     // O código interno (o que o UnniChat recebe) fica no title, para conferir sem abrir o banco.
     confere((await ficha.locator(".pessoa-selos .selo").getAttribute("title")).includes(EV.PERFIL_CODIGO[primeira.perfil]), `${largura}: código interno no title`);
 
-    // O aviso que inicia a sequência no WhatsApp: selo só em quem ainda não foi avisado.
-    const pendente = PERFIS_PESSOAS.find((p) => !p.webhook_enviado_em);
+    // O aviso que inicia a sequência no WhatsApp: selo só em quem ainda não foi avisado E veio da
+    // página curta. Lead do Instagram não tem esse aviso, então não pode ganhar selo nenhum.
+    const doInstagram = PERFIS_PESSOAS.find((p) => p.pesquisa === "manychat-instagram");
+    const selosInstagram = await page.$$eval(`[data-perfil-pessoa='${doInstagram.id}'] .pessoa-selos .selo`, (els) => els.map((e) => e.textContent));
+    confere(!selosInstagram.includes("Aviso pendente"), `${largura}: lead do Instagram sem selo de aviso (${selosInstagram.join(" / ")})`);
+    const pendente = PERFIS_PESSOAS.find((p) => !p.webhook_enviado_em && p.pesquisa === "atualizacao-perfil");
     const selosPendente = await page.$$eval(`[data-perfil-pessoa='${pendente.id}'] .pessoa-selos .selo`, (els) => els.map((e) => e.textContent));
     confere(selosPendente.includes("Aviso pendente"), `${largura}: quem não foi avisado tem o selo (${selosPendente.join(" / ")})`);
     const selosOk = await page.$$eval(`[data-perfil-pessoa='${PERFIS_PESSOAS[0].id}'] .pessoa-selos .selo`, (els) => els.map((e) => e.textContent));

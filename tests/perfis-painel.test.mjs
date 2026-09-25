@@ -21,6 +21,7 @@ const contexto = {};
 vm.runInNewContext(readFileSync(path.join(RAIZ, "js", "lead-rules.js"), "utf8"), contexto);
 vm.runInNewContext(readFileSync(path.join(RAIZ, "js", "pesquisa-config.js"), "utf8"), contexto);
 const EV = contexto.EVPesquisa;
+const GRUPO = EV.PERFIL_GRUPO.enfermagem;
 
 const SUPABASE_URL = "https://projeto-de-teste.supabase.co";
 const SUPABASE_KEY = "chave-service-role-de-teste";
@@ -138,17 +139,19 @@ test("lê só a pesquisa da página curta, com a lista e uma contagem por profis
   assert.equal(corpo.itens[0].nome, "Maria da Silva");
   // O somatório dos quatro cartões é o número grande da tela.
   assert.equal(corpo.respondentes, 40);
-  assert.deepEqual(
-    corpo.por_perfil,
-    Object.values(EV.PERFIL).map((perfil) => ({ perfil, codigo: EV.PERFIL_CODIGO[perfil], total: totais[perfil] }))
-  );
+  assert.deepEqual(corpo.por_perfil, [
+    ...Object.values(EV.PERFIL).map((perfil) => ({ perfil, codigo: EV.PERFIL_CODIGO[perfil], total: totais[perfil] })),
+    // O grupo do ManyChat entra como uma "profissão" a mais na aba, com o rótulo curto dele.
+    { perfil: GRUPO.rotulo, codigo: GRUPO.codigo, curto: GRUPO.curto, total: totais[GRUPO.rotulo] ?? 0 }
+  ]);
   assert.ok(corpo.gerado_em);
 
-  // Cinco consultas: a lista e as quatro contagens — todas na mesma pesquisa, nenhuma no ICP.
+  // Seis consultas: a lista, as quatro profissões e o grupo "enfermagem" — nenhuma no ICP.
   const pedidas = consultas();
-  assert.equal(pedidas.length, 5);
+  assert.equal(pedidas.length, 6);
   for (const chamada of pedidas) {
-    assert.equal(chamada.params.get("pesquisa"), "eq.atualizacao-perfil");
+    // As duas origens de contato + profissão: a página curta do WhatsApp e a DM do Instagram.
+    assert.equal(chamada.params.get("pesquisa"), "in.(atualizacao-perfil,manychat-instagram)");
     assert.equal(chamada.headers.Prefer, "count=exact");
   }
   const lista = pedidas[0];
@@ -156,13 +159,13 @@ test("lê só a pesquisa da página curta, com a lista e uma contagem por profis
   assert.equal(lista.params.get("limit"), "100");
   assert.equal(lista.params.get("offset"), "0");
   // A lista traz o contato e a profissão; respostas da pesquisa grande, não.
-  assert.match(lista.params.get("select"), /nome,whatsapp,whatsapp_digits,email,perfil,webhook_enviado_em/);
+  assert.match(lista.params.get("select"), /nome,whatsapp,whatsapp_digits,email,perfil,pesquisa,webhook_enviado_em/);
   assert.doesNotMatch(lista.params.get("select"), /respostas/);
   // As contagens não trazem linha nenhuma: só o número do Content-Range.
   for (const contagem of pedidas.slice(1)) assert.equal(contagem.params.get("limit"), "0");
   assert.deepEqual(
     pedidas.slice(1).map((c) => c.params.get("perfil")),
-    Object.values(EV.PERFIL).map((perfil) => `eq.${perfil}`)
+    [...Object.values(EV.PERFIL), GRUPO.rotulo].map((perfil) => `eq.${perfil}`)
   );
 });
 
@@ -190,7 +193,7 @@ test("escolher uma profissão filtra a lista, mas os quatro cartões continuam c
 
   const pedidas = consultas();
   assert.equal(pedidas[0].params.get("perfil"), `eq.${EV.PERFIL.cuidador}`);
-  assert.equal(pedidas.length, 5, "as contagens dos outros três continuam sendo pedidas");
+  assert.equal(pedidas.length, 6, "as contagens das outras profissões continuam sendo pedidas");
   assert.equal(corpo.por_perfil.find((item) => item.perfil === EV.PERFIL.tecnico).total, 11);
   assert.equal(corpo.total, 3, "a lista é só da profissão escolhida");
 });

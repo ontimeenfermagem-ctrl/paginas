@@ -69,6 +69,62 @@
     [PERFIL.enfermeiro]: "enfermeiro(a)"
   });
 
+  /**
+   * GRUPOS de perfil, para automação de fora que NÃO separa duas profissões — hoje o ManyChat, no
+   * Instagram, pergunta só "enfermagem" (técnica e enfermeira caem no mesmo fluxo dele).
+   *
+   * Ficam fora de PERFIL e de PERFIL_CODIGO de propósito: a pergunta 1 da pesquisa continua com
+   * quatro opções e o painel continua com quatro cartões. O grupo existe só para NÃO inventar
+   * informação — quem disse "enfermagem" não disse qual das duas, e gravar "Técnico(a) de
+   * enfermagem" para uma enfermeira erraria o CRM em silêncio.
+   */
+  const PERFIL_GRUPO = Object.freeze({
+    enfermagem: Object.freeze({
+      codigo: "enfermagem",
+      rotulo: "Enfermagem (técnica ou enfermeira)",
+      curto: "Enfermagem (sem separar)",
+      segmento: "PERFIL_ENFERMAGEM",
+      perfis: Object.freeze([PERFIL.tecnico, PERFIL.enfermeiro])
+    })
+  });
+
+  const GRUPO_POR_ROTULO = Object.freeze(
+    Object.fromEntries(Object.values(PERFIL_GRUPO).map((grupo) => [grupo.rotulo, grupo]))
+  );
+
+  /** O grupo de um rótulo gravado no banco ("Enfermagem (técnica ou enfermeira)"), ou null. */
+  function grupoDoRotulo(rotulo) {
+    return typeof rotulo === "string" && Object.prototype.hasOwnProperty.call(GRUPO_POR_ROTULO, rotulo)
+      ? GRUPO_POR_ROTULO[rotulo]
+      : null;
+  }
+
+  /** O grupo de um código interno ("enfermagem"), ou null. */
+  function grupoDoCodigo(codigo) {
+    return typeof codigo === "string" && Object.prototype.hasOwnProperty.call(PERFIL_GRUPO, codigo)
+      ? PERFIL_GRUPO[codigo]
+      : null;
+  }
+
+  /**
+   * Código interno de um perfil gravado, seja uma das quatro profissões ou um grupo. É o que sai
+   * para o UnniChat, o ManyChat, o n8n e o CRM.
+   */
+  function codigoDoPerfil(rotulo) {
+    if (typeof rotulo !== "string") return null;
+    if (Object.prototype.hasOwnProperty.call(PERFIL_CODIGO, rotulo)) return PERFIL_CODIGO[rotulo];
+    const grupo = grupoDoRotulo(rotulo);
+    return grupo ? grupo.codigo : null;
+  }
+
+  /** Etiqueta de CRM de um perfil gravado (profissão ou grupo). */
+  function segmentoDoPerfil(rotulo) {
+    if (typeof rotulo !== "string") return null;
+    if (Object.prototype.hasOwnProperty.call(PERFIL_SEGMENTO, rotulo)) return PERFIL_SEGMENTO[rotulo];
+    const grupo = grupoDoRotulo(rotulo);
+    return grupo ? grupo.segmento : null;
+  }
+
   /** Rótulo curto para abas, cartões e gráficos do painel. */
   const PERFIL_CURTO = Object.freeze({
     [PERFIL.auxiliar]: "Auxiliares e antigas atendentes",
@@ -1160,6 +1216,11 @@
     PERFIL_CURTO,
     PERFIL_CODIGO,
     PERFIL_SEGMENTO,
+    PERFIL_GRUPO,
+    grupoDoRotulo,
+    grupoDoCodigo,
+    codigoDoPerfil,
+    segmentoDoPerfil,
     ESTADOS,
     REGIOES,
     ETAPAS,

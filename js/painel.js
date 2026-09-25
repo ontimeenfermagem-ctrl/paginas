@@ -3595,7 +3595,9 @@
     const abas = [{ valor: "", curto: "Todas", total: perf.respondentes }].concat(
       perf.porPerfil.map((item) => ({
         valor: item.perfil,
-        curto: EV.PERFIL_CURTO[item.perfil] || item.perfil,
+        // Grupo (o "enfermagem" do ManyChat) manda o rótulo curto dele; profissão do projeto usa o
+        // curto do config.
+        curto: item.curto || EV.PERFIL_CURTO[item.perfil] || item.perfil,
         total: num(item.total)
       }))
     );
@@ -3640,11 +3642,13 @@
     const profissao = item.perfil
       ? `<span class="selo rep" title="${escapeHtml(codigo ? `Vai para o UnniChat como ${codigo}` : item.perfil)}">${escapeHtml(item.perfil)}</span>`
       : `<span class="selo meio">Sem profissão</span>`;
-    // O aviso que inicia a sequência no WhatsApp. Só aparece quando ainda NÃO saiu: o normal é
-    // sair em segundos, então um selo em cada linha seria ruído.
-    const aviso = item.webhook_enviado_em
-      ? ""
-      : `<span class="selo meio" title="O aviso que inicia a sequência no WhatsApp ainda não foi entregue. O servidor tenta de novo sozinho, de 10 em 10 minutos, por até 7 dias.">Aviso pendente</span>`;
+    // O aviso que inicia a sequência no WhatsApp. Só aparece quando ainda NÃO saiu, e só para
+    // quem veio da página curta: o lead da DM do Instagram não tem esse aviso (quem continua a
+    // conversa dele é o ManyChat).
+    const aviso =
+      item.webhook_enviado_em || (item.pesquisa && item.pesquisa !== "atualizacao-perfil")
+        ? ""
+        : `<span class="selo meio" title="O aviso que inicia a sequência no WhatsApp ainda não foi entregue. O servidor tenta de novo sozinho, de 10 em 10 minutos, por até 7 dias.">Aviso pendente</span>`;
     return `<article class="pessoa" data-perfil-pessoa="${escapeHtml(item.id)}">
       <div class="pessoa-cabeca">
         <div class="pessoa-quem">

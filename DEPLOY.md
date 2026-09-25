@@ -215,6 +215,7 @@ A senha em si não é guardada em lugar nenhum, só o hash. Guarde a senha num g
    | `HOTMART_HOTTOK` | o *Hottok* da Hotmart (Ferramentas > Webhook/Postback > aba **Autenticação**). Sem ele **e** sem `HOTMART_WEBHOOK_CHAVE`, `POST /api/hotmart/venda` responde 503 |
    | `HOTMART_WEBHOOK_CHAVE` | um segredo **nosso**, que vai na URL do webhook (`?chave=...`). Gere com `node -e "console.log(require('node:crypto').randomBytes(24).toString('base64url'))"` |
    | `HOTMART_WEBHOOK_CHAVE_2` | opcional: uma segunda chave, para um produto separado. As duas valem no mesmo endereço (cada uma com o seu `?chave=`), e assim dá para trocar ou desligar o aviso de um produto sem mexer no do outro |
+   | `MANYCHAT_API_KEY` | a chave que o ManyChat manda no header `X-API-Key` ao entregar um lead da DM do Instagram (`POST /api/integrations/manychat/lead`). Sem ela o endereço responde 503 |
    | `META_PIXEL_ID` | opcional: vazio = `538380380948773` (pixel da Enfermagem de Valor); `off` desliga |
    | `INSCRICAO_ORIGENS` | opcional: sites de **fora** que também podem mandar o formulário para o `POST /api/inscricao` (CORS), separados por vírgula, com `https://` e sem barra no fim — por exemplo o preview do Railway da página de venda ou `http://localhost:3001` para testar na sua máquina. A de produção (`https://io.escolaenfermagemdevalor.com.br`) **já vem** do `js/checkout-config.js` e não precisa estar aqui. Vazio = só as do config |
 
@@ -430,6 +431,54 @@ Um aviso por **pessoa**, garantido pelo telefone: preencher de novo (outro apare
 3. **Condição** por `perfil_codigo` → a sequência de cada profissão.
 
 Aqui **não precisa de template**: quem clicou no botão do template abriu a janela de 24 horas (o clique conta como mensagem da pessoa), e a resposta chega minutos depois. Mensagem livre resolve, com o nome na variável.
+
+---
+
+## 5.5 ManyChat — lead da DM do Instagram
+
+A automação do Instagram coleta nome, e-mail, telefone e profissão na conversa e manda **um** post para cá. Quem ramifica o funil continua sendo o ManyChat: o servidor só normaliza, grava sem duplicar e responde.
+
+```
+POST https://SEU-DOMINIO/api/integrations/manychat/lead
+Content-Type: application/json
+X-API-Key: <MANYCHAT_API_KEY>
+```
+
+```json
+{
+  "manychat_contact_id": "123456789",
+  "nome": "Maria da Silva",
+  "email": "maria@gmail.com",
+  "telefone": "(45) 99811-2233",
+  "profissao": "enfermagem"
+}
+```
+
+Resposta:
+
+```json
+{ "success": true, "action": "created", "lead_id": "...", "profession": "enfermagem", "phone": "5545998112233", "source": "instagram" }
+```
+
+**Profissão.** São três valores, porque a DM não separa técnica de enfermeira:
+
+| O ManyChat manda | Vai para o banco como |
+|---|---|
+| `auxiliar_atendente` | Auxiliar ou antiga atendente de enfermagem |
+| `cuidador` | Cuidador(a) |
+| `enfermagem` | Enfermagem (técnica ou enfermeira) — o **grupo** |
+
+O grupo existe para não inventar informação: quem disse "enfermagem" não disse qual das duas, e gravar "Técnico(a) de enfermagem" para uma enfermeira erraria o CRM em silêncio. Ele aparece como uma aba a mais em **Perfis atualizados** e o `GET /api/leads/perfil` devolve `enfermagem` para essas pessoas. Se um dia a DM perguntar qual é, mande `tecnico_enfermagem` ou `enfermeiro`: o endereço aceita os quatro valores do projeto também, e aí o dado fica fino. Rótulos e variações comuns ("Auxiliar/Antiga Atendente", "Cuidador(a)", "Técnico de Enfermagem/Enfermeiro", "Enfermeira") também são aceitos; o que não estiver na lista é recusado com 400, em vez de virar profissão adivinhada.
+
+**Normalização** é a mesma dos formulários (`js/lead-rules.js`): nome com trim, espaços duplicados removidos e maiúsculas certas ("maria da silva" → "Maria da Silva"); e-mail com trim e minúsculas; telefone em `(DD) 9xxxx-xxxx` mais os dígitos. Vale também a regra anti-lixo: número com todos os dígitos repetidos (`(45) 99999-9999`) é **recusado** — para testar, use um número de verdade.
+
+**Origem** não vem do corpo do pedido: tudo que entra aqui é DM do Instagram, então o servidor grava `utm_source=instagram`, `utm_medium=instagram_dm` e `utm_campaign=manychat` nas colunas de origem que o projeto já tem. Numa atualização, a origem que já estava na linha é preservada (primeiro toque).
+
+**Sem duplicar.** A mesma pessoa é reconhecida nesta ordem: `manychat_contact_id` (guardado no jsonb `respostas`, sem coluna nova), telefone normalizado e e-mail. Achando, a linha é atualizada (`action: "updated"`); não achando, nasce uma (`action: "created"`). A busca acontece só entre os leads do ManyChat: a linha da pessoa na pesquisa de ICP ou na atualização por WhatsApp é outra coisa e não é sobrescrita.
+
+**Erros:** `400 invalid_payload` (com `campos`, dizendo o que está errado), `401 unauthorized`, `429 too_many_requests`, `503 api_key_not_configured` ou `database_not_configured`, `502 database_unavailable`. Nenhum expõe stack nem dado pessoal.
+
+Esses leads **não** disparam o aviso `perfil_atualizado` ao n8n: a conversa deles continua dentro do ManyChat.
 
 ---
 
