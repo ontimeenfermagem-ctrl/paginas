@@ -176,7 +176,13 @@ const LINKS_GRUPOS = Object.freeze({
 });
 ```
 
-Só vale convite `https://chat.whatsapp.com/...` ou `https://wa.me/...`. Enquanto um link estiver vazio (ou inválido), a página não mostra botão quebrado — avisa que o link chega pelo WhatsApp — e o cartão da página no painel mostra "Link do grupo ainda não configurado". Depois de colar: `npm test`, commit e deploy (não precisa rodar SQL). Textos, rotas e perfis de cada página também são editados só nesse arquivo.
+Valem duas formas: o convite direto do grupo (`https://chat.whatsapp.com/...`, ou `https://wa.me/...`) e o link do **distribuidor** que o cliente usa, o Sendflow (`https://sndflw.com/i/<id>`), que manda cada pessoa para o grupo que ainda tem vaga — é o formato que está em produção hoje. Qualquer outro host é recusado (a lista é ancorada: `http://`, `javascript:` e `sndflw.com.site-de-golpe.com` não passam).
+
+Enquanto um link estiver vazio (ou inválido), a página não mostra botão quebrado — avisa que o link chega pelo WhatsApp — e o cartão da página no painel mostra "Link do grupo ainda não configurado". **Link inválido falha em silêncio na tela**, por isso `tests/config.test.mjs` exige que os três links do arquivo sejam válidos e distintos: link colado errado vira falha de teste, não página sem botão.
+
+Depois de colar: `npm test && npm run test:e2e`, commit e deploy (não precisa rodar SQL) — os testes de navegador das páginas de obrigado e do painel dependem do que está nesse objeto, e o `npm test` sozinho não os roda. Textos, rotas e perfis de cada página também são editados só nesse arquivo.
+
+Um cuidado que o código não pega: **link trocado entre páginas** funciona (o botão abre) e leva a pessoa ao grupo errado. A conferência que vale é abrir cada link e ler o nome do grupo de destino.
 
 ## Deploy
 

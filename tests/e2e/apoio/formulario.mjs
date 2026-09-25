@@ -155,8 +155,9 @@ export async function interceptar(page, modo = {}) {
     }
     return responderRota(route, (r) => r.fulfill({ status: 404, body: "{}" }));
   });
-  // Nada de chamada externa (Pixel) nos testes.
-  await page.route(/facebook\.(net|com)/, (rota) => rota.abort());
+  // Nada de chamada externa nos testes: nem Pixel, nem o link do grupo (que hoje é o distribuidor
+  // Sendflow e, com o config REAL, aparece nas páginas de obrigado que estes fluxos atravessam).
+  await page.route(/facebook\.(net|com)|sndflw\.com|chat\.whatsapp\.com|wa\.me/, (rota) => rota.abort());
   return reg;
 }
 

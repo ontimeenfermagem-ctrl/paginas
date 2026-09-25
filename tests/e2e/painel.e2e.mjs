@@ -960,7 +960,16 @@ cenario("obrigado", async () => {
       const cabeca = await page.textContent(`${cartao} .obr-cabeca`);
       confere(cabeca.includes(pagina.nome) && cabeca.includes(pagina.rota), `${linha.pagina}: nome e rota no cartão`);
       confere(pagina.perfis.every((perfil) => cabeca.includes(EV.PERFIL_CURTO[perfil])), `${linha.pagina}: perfis que caem na página`);
-      confere(cabeca.includes("Link do grupo ainda não configurado") && (await page.$$(`${cartao} .obr-grupo a`)).length === 0, `${linha.pagina}: aviso de link não configurado, sem link quebrado`);
+      // Vale nos dois estados, para o teste não depender de LINKS_GRUPOS estar vazio no arquivo.
+      if (OBR.linkValido(pagina.link)) {
+        confere(
+          (await page.getAttribute(`${cartao} .obr-grupo a`, "href")) === pagina.link &&
+            (await page.getAttribute(`${cartao} .obr-grupo a`, "rel")) === "noopener noreferrer",
+          `${linha.pagina}: link do grupo no cartão, com rel seguro`
+        );
+      } else {
+        confere(cabeca.includes("Link do grupo ainda não configurado") && (await page.$$(`${cartao} .obr-grupo a`)).length === 0, `${linha.pagina}: aviso de link não configurado, sem link quebrado`);
+      }
       const origens = await page.$$eval(`${cartao} [data-divisao='origem'] tbody tr`, (trs) => trs.map((tr) => Array.from(tr.children).map((c) => c.textContent.trim())));
       const primeira = linha.por_origem[0];
       confere(origens.length === linha.por_origem.length && origens[0][0] === primeira.utm_source && origens[0][1] === fmt(primeira.visitantes), `${linha.pagina}: por origem (${origens[0]})`);
@@ -1064,21 +1073,29 @@ cenario("obrigado", async () => {
   await v.page.waitForSelector("[data-obrigado-vazio]");
   confere((await v.page.textContent("[data-obrigado-vazio]")).includes("Ninguém chegou às páginas de obrigado ainda"), "vazio geral");
   confere((await v.page.$$eval("[data-obrigado] .obr-cartao .vazio", (els) => els.length)) === OBR.LISTA.length, "cada cartão diz que ninguém passou por ele");
-  confere((await v.page.$$eval("[data-obrigado] .obr-cartao [data-sem-link]", (els) => els.length)) === OBR.LISTA.length, "vazio ainda mostra o aviso do link");
+  // Uma linha por página: com link, o link; sem link, o aviso. As duas contam como "configuração".
+  const semLinkNoArquivo = OBR.LISTA.filter((pagina) => !OBR.linkValido(pagina.link)).length;
+  confere((await v.page.$$eval("[data-obrigado] .obr-cartao [data-sem-link]", (els) => els.length)) === semLinkNoArquivo, `vazio mostra o aviso nas ${semLinkNoArquivo} páginas sem link`);
+  confere((await v.page.$$eval("[data-obrigado] .obr-cartao .obr-grupo", (els) => els.length)) === OBR.LISTA.length, "todo cartão fala do grupo (link ou aviso)");
   confere(!v.mock.chamadas.some((c) => c.rota === "resumo"), "aberta direto na aba de obrigado, a pesquisa não carrega");
   confere((await v.page.evaluate(() => document.documentElement.scrollWidth)) <= 390, "vazio sem rolagem horizontal em 390px");
   await tela(v.page, "obrigado-vazio-390", { full: true });
   confere(v.erros.length === 0, `vazio sem erros (${v.erros.join(" | ")})`);
   await v.page.context().close();
 
-  // Link do grupo configurado: o config servido é trocado só neste navegador (o arquivo não muda).
-  const LINK = "https://chat.whatsapp.com/AbCdEf123456";
+  // Link do grupo configurado em UMA página só: o config servido é trocado neste navegador (o
+  // arquivo não muda). O bloco LINKS_GRUPOS inteiro é substituído — trocar `afericao: ""` só
+  // funcionava enquanto o arquivo estava vazio, e falhava calado depois.
+  const LINK = "https://sndflw.com/i/AbCdEf123456";
   const c = await novaPagina(browser, {
     url: "/painel?pagina=obrigado",
     antes: (page) =>
       page.route("**/js/obrigado-config.js*", async (route) => {
         const original = await route.fetch();
-        const corpo = (await original.text()).replace('afericao: ""', `afericao: "${LINK}"`);
+        const texto = await original.text();
+        const bloco = /const LINKS_GRUPOS = Object\.freeze\(\{[\s\S]*?\}\);/;
+        confere(bloco.test(texto), "o bloco LINKS_GRUPOS continua no formato que o teste troca");
+        const corpo = texto.replace(bloco, `const LINKS_GRUPOS = Object.freeze(${JSON.stringify({ afericao: LINK, cuidador: "", evento_outubro: "" })});`);
         await route.fulfill({ response: original, body: corpo });
       })
   });

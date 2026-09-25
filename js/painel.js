@@ -2753,7 +2753,7 @@
       const curto = String(pagina.link).replace(/^https:\/\//, "");
       return `<p class="obr-grupo"><span>Grupo:</span> <a href="${escapeHtml(pagina.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(
         curto
-      )}<span class="visualmente-oculto"> (abre o WhatsApp)</span></a></p>`;
+      )}<span class="visualmente-oculto"> (abre o link do grupo)</span></a></p>`;
     }
     return `<p class="obr-grupo obr-sem-link" data-sem-link><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24"><path d="M12 8v5m0 3.5v.5M10.3 3.9 2.6 17.4A2 2 0 0 0 4.3 20.4h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span><strong>Link do grupo ainda não configurado.</strong> A página não mostra botão quebrado: avisa que o link chega pelo WhatsApp. Cole o convite em js/obrigado-config.js.</span></p>`;
   }

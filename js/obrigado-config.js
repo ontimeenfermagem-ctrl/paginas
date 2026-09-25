@@ -2,6 +2,9 @@
  * obrigado-config.js — as 3 páginas de obrigado da pesquisa de ICP, como dado.
  *
  * ESTE É O ÚNICO ARQUIVO PARA MUDAR TEXTO, ROTA OU LINK DE GRUPO DAS PÁGINAS DE OBRIGADO.
+ * (Com uma ressalva: o link de hoje é do distribuidor Sendflow, então PARA QUAL GRUPO ele manda se
+ * troca no painel do Sendflow, sem deploy. E a mensagem do WhatsApp que o n8n dispara leva uma
+ * cópia do link — mudar aqui não muda lá.)
  * A página (obrigado.html + js/obrigado.js), o formulário (redireciona ao terminar), o servidor
  * (rotas, eventos, aviso ao n8n) e o painel leem daqui.
  *
@@ -17,13 +20,20 @@
   const P = root.EVPesquisa;
 
   /*
-   * LINKS DOS GRUPOS DE WHATSAPP. Cole aqui o convite de cada grupo (https://chat.whatsapp.com/...).
+   * LINKS DOS GRUPOS DE WHATSAPP, um por página. Valem duas formas: o convite direto do grupo
+   * (https://chat.whatsapp.com/...) ou o link do DISTRIBUIDOR que o cliente usa, o Sendflow
+   * (https://sndflw.com/i/<id>), que manda cada pessoa para o grupo que ainda tem vaga — é por
+   * isso que a mesma URL serve para todo mundo e o destino pode ser trocado sem novo deploy.
    * Vazio = a página não mostra botão quebrado: avisa que o link chega pelo WhatsApp.
+   *
+   * ATENÇÃO ao colar: link trocado de página falha em SILÊNCIO (o botão funciona e leva a pessoa
+   * ao grupo errado). O nome do grupo de destino é a única conferência que vale — os três de hoje
+   * são "Aula de Aferição", "Cuidador de Valor" e "Nova Era da Enfermagem", na ordem abaixo.
    */
   const LINKS_GRUPOS = Object.freeze({
-    afericao: "",
-    cuidador: "",
-    evento_outubro: ""
+    afericao: "https://sndflw.com/i/VGB8x5AIcIMERWpr2ydB",
+    cuidador: "https://sndflw.com/i/ALkroj4SlIzsy4KJvlwz",
+    evento_outubro: "https://sndflw.com/i/hxQV77EZKwpS62QXVLb8"
   });
 
   const PAGINAS = Object.freeze({
@@ -33,10 +43,10 @@
       nome: "Obrigado — Aula de Aferição",
       perfis: Object.freeze([P.PERFIL.auxiliar]),
       grupo: "afericao",
-      eyebrow: "Aula ao vivo · dia 30 · 19h30 · on-line",
+      eyebrow: "Aula ao vivo · dia 30 · 20h · on-line",
       headline: "Pesquisa concluída! Agora falta só um passo. 💜",
       subheadline:
-        "Entre no grupo da aula ao vivo do dia 30, às 19h30, para receber todas as informações e o acesso ao encontro.",
+        "Entre no grupo da aula ao vivo do dia 30, às 20h, para receber todas as informações e o acesso ao encontro.",
       introducao: "Na aula, a gente vai falar sobre:",
       topicos: Object.freeze([
         "o que é a aferição da profissão por tempo de serviço;",
@@ -77,10 +87,10 @@
       nome: "Obrigado — Evento Gratuito de Outubro",
       perfis: Object.freeze([P.PERFIL.tecnico, P.PERFIL.enfermeiro]),
       grupo: "evento_outubro",
-      eyebrow: "Evento gratuito · 20 de outubro",
+      eyebrow: "Evento gratuito · 26 de outubro",
       headline: "Pesquisa concluída! Seu próximo passo está aqui. 💜",
       subheadline:
-        "Entre no grupo oficial do evento gratuito do dia 20 de outubro para receber todas as informações e conteúdos de preparação.",
+        "Entre no grupo oficial do evento gratuito do dia 26 de outubro para receber todas as informações e conteúdos de preparação.",
       introducao: "O evento poderá abordar temas como:",
       topicos: Object.freeze([
         "prática profissional;",
@@ -116,9 +126,24 @@
     return POR_ROTA.get(limpo) || null;
   }
 
-  /** O link do grupo só vale se for um convite de WhatsApp de verdade. */
+  /*
+   * Convite direto do WhatsApp, ou o distribuidor de grupo do cliente (Sendflow). O portão é a
+   * LISTA DE HOSTS, ancorada em ^...$ e com o ponto escapado: assim `javascript:`, `http://`,
+   * "sndflw.com.site-de-golpe.com", "sndflw.com@golpe.com" e "golpe.com/sndflw.com/i/x" ficam de
+   * fora. Query e fragmento são aceitos porque convite real vem com eles (?text=, #). O host tem
+   * que vir em minúsculas, como as duas ferramentas entregam.
+   */
+  const CONVITE_WHATSAPP = /^https:\/\/(chat\.whatsapp\.com|wa\.me)\/[A-Za-z0-9_-]+\/?(?:[?#][!-~]*)?$/;
+  const DISTRIBUIDOR_GRUPO = /^https:\/\/(?:www\.)?sndflw\.com\/i\/[A-Za-z0-9_-]+\/?(?:[?#][!-~]*)?$/;
+
+  /**
+   * O link do grupo só vale se for uma das duas formas acima. O trim() existe porque link colado
+   * do WhatsApp costuma vir com espaço ou quebra de linha no fim, e sem ele a página esconderia o
+   * botão sem dizer por quê.
+   */
   function linkValido(link) {
-    return /^https:\/\/(chat\.whatsapp\.com|wa\.me)\/[A-Za-z0-9_-]+/.test(String(link || ""));
+    const valor = String(link || "").trim();
+    return valor.length <= 300 && (CONVITE_WHATSAPP.test(valor) || DISTRIBUIDOR_GRUPO.test(valor));
   }
 
   root.EVObrigado = Object.freeze({

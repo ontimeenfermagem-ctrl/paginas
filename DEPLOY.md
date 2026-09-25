@@ -248,7 +248,28 @@ O painel fica em `https://SEU-DOMINIO/painel`.
 
 ## 5.1 Links dos grupos de WhatsApp
 
-Os convites dos três grupos ficam em `js/obrigado-config.js`, no objeto `LINKS_GRUPOS` (`afericao`, `cuidador`, `evento_outubro`). Cole cada convite (`https://chat.whatsapp.com/...`), rode `npm test`, faça commit e deploy — não há variável de ambiente nem SQL para isso. Enquanto um link estiver vazio, a página correspondente avisa que o link chega pelo WhatsApp (sem botão quebrado) e o painel mostra "Link do grupo ainda não configurado" no cartão dela.
+Os links dos três grupos ficam em `js/obrigado-config.js`, no objeto `LINKS_GRUPOS` (`afericao`, `cuidador`, `evento_outubro`). Não há variável de ambiente nem SQL para isso.
+
+Valem duas formas:
+
+| Forma | Exemplo | Quando |
+|---|---|---|
+| Convite direto do grupo | `https://chat.whatsapp.com/<id>` | grupo único, que não vai encher |
+| Distribuidor **Sendflow** | `https://sndflw.com/i/<id>` | é o que está em produção: uma URL só, e o Sendflow reparte as pessoas entre os grupos |
+
+Qualquer outro host é recusado, e a recusa é ancorada: `http://` sem TLS, `javascript:`, `https://sndflw.com/i` (cortado) e `https://sndflw.com.site-de-golpe.com/i/x` não passam. Enquanto um link estiver vazio **ou inválido**, a página avisa que o link chega pelo WhatsApp (sem botão quebrado) e o painel mostra "Link do grupo ainda não configurado" no cartão dela — ou seja, **link errado falha em silêncio na tela**. Por isso `tests/config.test.mjs` exige que os três links do arquivo sejam válidos e distintos.
+
+Depois de colar: **`npm test && npm run test:e2e`**, commit e deploy. O `npm test` sozinho não basta: os testes que dependem desse objeto (`tests/e2e/obrigado.e2e.mjs` e `tests/e2e/painel.e2e.mjs`) só rodam no `test:e2e`.
+
+E duas coisas que não estão neste repositório, então não mudam com deploy: **para qual grupo** cada link do Sendflow manda (isso se troca no painel do Sendflow) e a **cópia do link** que vai na mensagem do WhatsApp disparada pelo n8n.
+
+Os três de hoje, com o nome do grupo de destino — a única conferência que pega link trocado de página:
+
+| Página | Link | Grupo de destino |
+|---|---|---|
+| `/obrigado-afericao` | `https://sndflw.com/i/VGB8x5AIcIMERWpr2ydB` | "Aula de Aferição \| 30/09 às 20h" |
+| `/obrigado-cuidador` | `https://sndflw.com/i/ALkroj4SlIzsy4KJvlwz` | "Cuidador de Valor \| Grupo Oficial" |
+| `/obrigado-evento-outubro` | `https://sndflw.com/i/hxQV77EZKwpS62QXVLb8` | "Nova Era da Enfermagem \| 26/10 às 20h" |
 
 ---
 
@@ -501,7 +522,7 @@ Faça pelo celular, de preferência abrindo o link de dentro do Instagram ou do 
 - [ ] Reabrir o link no mesmo celular: aparece "Que bom te ver de novo" e "Continuar de onde parei" volta para a pergunta certa.
 - [ ] Painel: login com e-mail e senha; senha errada é recusada. O placar mostra 1 acesso, 1 começou, 1 se identificou; a lista de pessoas mostra "Parou na pergunta N". O filtro de período "Hoje" traz a resposta.
 - [ ] Termine a pesquisa: você é levado para a página de obrigado do seu perfil (ex.: Cuidador(a) → `/obrigado-cuidador?utm_source=teste&utm_campaign=deploy`, com as UTMs), que mostra só o grupo daquele perfil. No painel, "Responderam tudo" = 1 e o selo "Respondeu tudo" na lista; no "Ver tudo", "Página de obrigado".
-- [ ] Clique no botão do grupo. Painel > aba **Páginas de obrigado**: no cartão da sua página, "Pesquisas concluídas atribuídas" = 1, "Chegaram à página" = 1 e "Clicaram no grupo" = 1 (as outras duas páginas zeradas). Cartão com link vazio mostra "Link do grupo ainda não configurado".
+- [ ] Clique no botão do grupo. Painel > aba **Páginas de obrigado**: no cartão da sua página, "Pesquisas concluídas atribuídas" = 1, "Chegaram à página" = 1 e "Clicaram no grupo" = 1 (as outras duas páginas zeradas). No cartão da página, o link do grupo aparece embaixo do nome (é o do Sendflow); se algum dia um link for apagado ou colado errado, é ali que aparece "Link do grupo ainda não configurado".
 - [ ] `https://SEU-DOMINIO/obrigado-x` e `https://SEU-DOMINIO/obrigado.html` respondem 404.
 - [ ] **Baixar CSV** abre no Excel/Planilhas com acentos certos, uma coluna por pergunta.
 - [ ] n8n: chegou **um** aviso `pesquisa_concluida` (só no fim, nada no meio), com o lead, as UTMs, todas as perguntas do caminho, `perfil_codigo`, `segmento` e `pagina_obrigado`. No painel, o "Ver tudo" da pessoa mostra "Enviado ao n8n em ..." (e o CSV, a coluna `enviado_n8n_em`).
@@ -581,7 +602,7 @@ Datas ficam gravadas em UTC. Para ver no horário de Brasília: `criado_em at ti
   todas na hora. "Sair" no painel apaga o cookie daquele aparelho, mas não invalida o token.
 - **Derrubar todas as sessões abertas** (perdeu um celular logado, por exemplo): troque `PAINEL_SESSAO_SEGREDO`.
 - **Mudar uma pergunta:** veja "Mudar uma pergunta" no `README.md` (é só `js/pesquisa-config.js` + subir a `VERSAO`).
-- **Trocar link de grupo, texto ou rota de uma página de obrigado:** só `js/obrigado-config.js` (seção 5.1).
+- **Trocar link de grupo, texto ou rota de uma página de obrigado:** só `js/obrigado-config.js` (seção 5.1) — e rode também o `npm run test:e2e`. Se o que você quer é mudar **para qual grupo** as pessoas vão, isso é no painel do Sendflow, sem deploy nenhum.
 - **Trocar o lote da Imersão GPS:** o link novo vai nos botões da página de venda (outro repositório); aqui, opcionalmente, a oferta nova em `hotmart.ofertas` (seção 5.3).
 - **Mudou `js/checkout-config.js` ou `js/lead-rules.js`:** a página de venda da Imersão GPS leva uma cópia dos dois — copie para lá e publique as duas.
 - **Testar a página de venda num preview ou na sua máquina:** cadastre o endereço dela em `INSCRICAO_ORIGENS` do servidor que vai receber o formulário (passo 4); sem isso o navegador bloqueia o envio pelo CORS. O endereço da API fica no `data-api` do formulário da página (`#pf-form`, hoje `https://lp.escolaenfermagemdevalor.com.br/api/inscricao`): para testar contra um servidor daqui na sua máquina, troque-o só na cópia local. Preview apontando para o servidor de produção grava no banco de verdade: apague os testes depois.

@@ -533,7 +533,58 @@ test("obrigado-config: os 4 perfis caem em exatamente uma das 3 páginas; Técni
   assert.notEqual(P.PERFIL_CODIGO[TECNICO], P.PERFIL_CODIGO[ENFERMEIRO]);
   assert.equal(O.paginaDaRota("/obrigado-cuidador/").id, "cuidador");
   assert.equal(O.paginaDaRota("/obrigado-x"), null);
-  assert.equal(O.linkValido("https://chat.whatsapp.com/AbC123"), true);
-  assert.equal(O.linkValido("javascript:alert(1)"), false);
-  assert.equal(O.linkValido(""), false);
+  // Convite direto do WhatsApp e link do distribuidor (Sendflow) são as duas formas aceitas.
+  for (const bom of [
+    "https://chat.whatsapp.com/AbC123",
+    "https://wa.me/5511999999999",
+    "https://wa.me/5545991234567?text=Oi!%20(grupo)",
+    "https://sndflw.com/i/hxQV77EZKwpS62QXVLb8",
+    "https://www.sndflw.com/i/abc12345",
+    "https://sndflw.com/i/abc12345/",
+    "https://sndflw.com/i/abc12345?utm_source=obrigado",
+    "  https://sndflw.com/i/abc12345\n"
+  ]) {
+    assert.equal(O.linkValido(bom), true, bom);
+  }
+  // O portão é a lista de hosts, ancorada: sufixo de domínio, userinfo, subdomínio, http e
+  // esquema estranho não passam — e é isto que impede um link torto de virar botão.
+  for (const ruim of [
+    "javascript:alert(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "",
+    "   ",
+    null,
+    undefined,
+    42,
+    "http://sndflw.com/i/hxQV77EZKwpS62QXVLb8",
+    "https://SNDFLW.com/i/abc12345",
+    "https://sndflw.com.evil.com/i/abc12345",
+    "https://sndflw.com@evil.com/i/abc12345",
+    "https://evil.com/sndflw.com/i/abc12345",
+    "https://chat.whatsapp.com.evil.com/AbC123",
+    "https://sndflw.com",
+    "https://sndflw.com/i",
+    "https://sndflw.com//i/abc12345",
+    "https://sndflw.com/dashboard",
+    "https://exemplo.com/grupo",
+    "https://chat.whatsapp.com/<script>alert(1)</script>",
+    "https://sndflw.com/i/abc12345 https://evil.com",
+    `https://sndflw.com/i/${"a".repeat(400)}`
+  ]) {
+    assert.equal(O.linkValido(ruim), false, String(ruim));
+  }
+});
+
+test("obrigado-config: os 3 links de produção são válidos, distintos e um por página", () => {
+  vm.runInThisContext(readFileSync(new URL("../js/obrigado-config.js", import.meta.url), "utf8"), { filename: "js/obrigado-config.js" });
+  const O = globalThis.EVObrigado;
+  // Este é o teste que transforma "link colado errado" em falha de CI em vez de falha silenciosa
+  // na página (link inválido esconde o botão, e ninguém percebe).
+  for (const pagina of O.LISTA) {
+    assert.notEqual(pagina.link, "", `${pagina.id}: sem link`);
+    assert.equal(O.linkValido(pagina.link), true, `${pagina.id}: link inválido (${pagina.link})`);
+  }
+  const links = O.LISTA.map((pagina) => pagina.link);
+  assert.equal(new Set(links).size, links.length, "duas páginas com o mesmo link do grupo");
+  assert.deepEqual(Object.keys(O.LINKS_GRUPOS), ["afericao", "cuidador", "evento_outubro"]);
 });

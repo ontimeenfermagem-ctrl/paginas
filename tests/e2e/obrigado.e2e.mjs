@@ -32,11 +32,15 @@ after(async () => {
 
 const CONFIG_ORIGINAL = readFileSync(path.join(RAIZ, "js", "obrigado-config.js"), "utf8");
 
-/** Links de teste, um por grupo, para provar que uma página nunca mostra o link de outra. */
+/**
+ * Links de teste, um por grupo, para provar que uma página nunca mostra o link de outra. Dois no
+ * formato do distribuidor (Sendflow), que é o que está em produção, e um convite direto do
+ * WhatsApp, para a outra forma continuar exercida.
+ */
 const LINKS = {
-  afericao: "https://chat.whatsapp.com/TesteAfericao123",
+  afericao: "https://sndflw.com/i/TesteAfericao123",
   cuidador: "https://chat.whatsapp.com/TesteCuidador456",
-  evento_outubro: "https://chat.whatsapp.com/TesteEvento789"
+  evento_outubro: "https://sndflw.com/i/TesteEvento789"
 };
 const VAZIOS = { afericao: "", cuidador: "", evento_outubro: "" };
 
@@ -95,8 +99,8 @@ function caso(nome, fn, opts = {}) {
     const { ctx, page, erros } = await novaPagina(browser, opts);
     const reg = await interceptar(page);
     await servirConfig(page, opts.links || VAZIOS);
-    // Nenhum clique sai para o WhatsApp de verdade.
-    await ctx.route(/chat\.whatsapp\.com|wa\.me/, (rota) =>
+    // Nenhum clique sai para o WhatsApp nem para o distribuidor de verdade.
+    await ctx.route(/chat\.whatsapp\.com|wa\.me|sndflw\.com/, (rota) =>
       rota.fulfill({ status: 200, contentType: "text/html", body: "<title>grupo</title>" })
     );
     try {
@@ -145,7 +149,8 @@ for (const pagina of O.LISTA) {
     assert.equal(await page.isVisible("#ob-aviso"), true);
     assert.equal((await textoDe(page, "#ob-aviso")).trim(), "O link do grupo chega no seu WhatsApp em instantes.");
     assert.equal(await page.locator(".botao-whats:visible").count(), 0);
-    assert.equal(await page.locator('a[href*="whatsapp"], a[href*="wa.me"], a[href="#"]').count(), 0);
+    // Por host não envelhece bem (hoje tem o Sendflow): nenhum link para FORA do nosso domínio.
+    assert.equal(await page.locator('a[href^="http"]:not([href*="escolaenfermagemdevalor"]), a[href="#"]').count(), 0);
 
     const visita = await ate(() => reg.pagina.find((e) => e.evento === "visita"));
     assert.equal(reg.pagina.length, 1);
@@ -311,6 +316,22 @@ caso("link que não é convite do WhatsApp conta como não configurado", async (
   assert.equal(await page.isVisible("#ob-aviso"), true);
   assert.equal(await page.locator(".botao-whats:visible").count(), 0);
 }, { links: { afericao: "", cuidador: "https://exemplo.com/grupo", evento_outubro: "javascript:alert(1)" } });
+
+// Os enganos que vão acontecer de verdade agora que o link é de um distribuidor: http sem TLS,
+// link cortado no meio e sufixo de domínio parecido. Nenhum vira botão.
+caso("link do distribuidor torto também conta como não configurado", async (page) => {
+  for (const rota of ["/obrigado-afericao", "/obrigado-cuidador", "/obrigado-evento-outubro"]) {
+    await abrir(page, rota);
+    assert.equal(await page.isVisible("#ob-aviso"), true, rota);
+    assert.equal(await page.locator(".botao-whats:visible").count(), 0, rota);
+  }
+}, {
+  links: {
+    afericao: "http://sndflw.com/i/hxQV77EZKwpS62QXVLb8",
+    cuidador: "https://sndflw.com/i",
+    evento_outubro: "https://sndflw.com.site-de-golpe.com/i/abc12345"
+  }
+});
 
 /* ------------------------------------------------------------------ rota desconhecida, barra final */
 
