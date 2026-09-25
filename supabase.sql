@@ -1303,8 +1303,14 @@ create table if not exists public.inscricoes (
   compra_valor numeric(12, 2),
   compra_moeda text,
   compra_transacao text,
-  compra_evento_em timestamptz                       -- o momento do evento que gravou o estado atual
+  compra_evento_em timestamptz,                      -- o momento do evento que gravou o estado atual
+  -- Entrega confirmada (2xx) do aviso de inscrição ao n8n, nas páginas que têm webhook (a Imersão
+  -- GPS). null = ainda não entregue: a varredura do servidor reenvia.
+  webhook_enviado_em timestamptz
 );
+
+-- Banco que já tinha a tabela: a coluna entra sem mexer em nada.
+alter table public.inscricoes add column if not exists webhook_enviado_em timestamptz;
 
 -- A chave de verdade: a mesma pessoa na mesma página é UMA inscrição.
 create unique index if not exists inscricoes_chave_idx

@@ -30,6 +30,12 @@ const WEBHOOK_TIMEOUT_MS = 10_000;
 // quintino). PESQUISA_WEBHOOK_URL troca o endereço; "off" desliga. Só o processo de verdade usa
 // este padrão: createServerApp começa com "" para teste nenhum disparar um aviso real.
 const DEFAULT_WEBHOOK_URL = "https://n8n.tecnicadevalor.com.br/webhook/pesquisa-icp";
+// Webhooks do n8n que recebem cada inscrição NOVA, por página de inscrição (id do
+// js/checkout-config.js). Ficam aqui, e não no config, porque o config é público (vai para o
+// navegador e para a cópia da página de venda): endereço de webhook exposto é convite para spam.
+// GPS_WEBHOOK_URL troca o da Imersão GPS; "off" desliga. Como o da pesquisa, só o processo de
+// verdade usa este padrão: createServerApp começa sem nenhum.
+const DEFAULT_WEBHOOKS_INSCRICAO = Object.freeze({ "imersao-gps": "https://n8n.tecnicadevalor.com.br/webhook/gps-outubro" });
 // Três tentativas: na hora, 3 s depois e 10 s depois. Um n8n reiniciando ou um 502 passageiro do
 // proxy não fazem o lead sumir; depois disso fica só no log (e webhook_enviado_em fica null, o
 // que o painel mostra).
@@ -910,6 +916,195 @@ async function marcarEnviado(options, id) {
 }
 
 /* ------------------------------------------------------------------------------------------ */
+/* Aviso de inscrição ao n8n (páginas com webhook: a Imersão GPS)                              */
+/* ------------------------------------------------------------------------------------------ */
+
+/**
+ * O aviso de inscrição nova. Sai da LINHA gravada em inscricoes (ou do mesmo conteúdo, montado na
+ * hora da gravação): contato formatado, UTMs de primeiro toque, o sck que foi para a Hotmart e o
+ * link do checkout que a pessoa abriu.
+ */
+export function montarPayloadInscricao({ linha, agora }) {
+  const l = isPlainObject(linha) ? linha : {};
+  const pagina = checkout.paginaPorId(l.pagina);
+  const digits = textoOuNull(l.whatsapp_digits);
+  const nome = textoOuNull(l.nome);
+  const campoSck = checkout.sckDaPagina(pagina);
+  let sck = null;
+  try {
+    sck = textoOuNull(new URL(String(l.checkout_url || "")).searchParams.get("sck"));
+  } catch {
+    // Sem link gravado: fica a UTM que a página manda como sck.
+  }
+  return {
+    evento: "inscricao",
+    pagina: pagina
+      ? {
+          id: pagina.id,
+          nome: pagina.nome,
+          produto: pagina.produto,
+          rota: pagina.rota,
+          url: pagina.origem ? `${pagina.origem}${pagina.rota}` : pagina.rota
+        }
+      : { id: textoOuNull(l.pagina) },
+    inscricao_id: textoOuNull(l.id),
+    inscrito_em: isoOuNull(l.criado_em) ?? new Date(agora).toISOString(),
+    lead: {
+      nome,
+      primeiro_nome: nome ? pesquisa.primeiroNome(nome) : null,
+      whatsapp: textoOuNull(l.whatsapp),
+      whatsapp_digits: digits,
+      whatsapp_internacional: digits ? `55${digits}` : null,
+      email: textoOuNull(l.email)
+    },
+    utm: {
+      utm_source: textoOuNull(l.utm_source),
+      utm_medium: textoOuNull(l.utm_medium),
+      utm_campaign: textoOuNull(l.utm_campaign),
+      utm_content: textoOuNull(l.utm_content),
+      utm_term: textoOuNull(l.utm_term)
+    },
+    sck: sck ?? textoOuNull(l[campoSck]),
+    rastreio: {
+      fbclid: textoOuNull(l.fbclid),
+      gclid: textoOuNull(l.gclid),
+      page_url: textoOuNull(l.page_url),
+      referrer: textoOuNull(l.referrer),
+      dispositivo: textoOuNull(l.dispositivo)
+    },
+    checkout_url: textoOuNull(l.checkout_url),
+    enviado_em: new Date(agora).toISOString()
+  };
+}
+
+async function marcarInscricaoEnviada(options, id) {
+  try {
+    await supabaseRequest(options, `inscricoes?id=eq.${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: { webhook_enviado_em: new Date(options.now()).toISOString() },
+      headers: { Prefer: "return=minimal" }
+    });
+  } catch (error) {
+    console.error(`Aviso de inscrição entregue, mas falhou ao marcar webhook_enviado_em: ${error?.message || "erro"}`);
+  }
+}
+
+/**
+ * Sem await de quem chama: o aviso nunca atrasa a ida ao checkout. As mesmas três tentativas do
+ * aviso da pesquisa; com 2xx marca webhook_enviado_em. O que não chegar, a varredura reenvia.
+ */
+async function avisarInscricao(options, linha) {
+  const webhookUrl = options.webhooksInscricao[linha.pagina];
+  if (!webhookUrl) return false;
+  const payload = montarPayloadInscricao({ linha, agora: options.now() });
+  const esperas = options.webhookEsperasMs;
+  for (let tentativa = 0; tentativa < esperas.length; tentativa += 1) {
+    if (esperas[tentativa] > 0) await esperar(esperas[tentativa]);
+    try {
+      await forwardToWebhook({ payload, webhookUrl, fetchImpl: options.fetchImpl });
+    } catch (error) {
+      console.error(`Falha ao avisar o webhook da inscrição (tentativa ${tentativa + 1} de ${esperas.length}): ${error?.message || "erro"}`);
+      continue;
+    }
+    await marcarInscricaoEnviada(options, linha.id);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Varredura das inscrições das páginas com webhook que ficaram sem webhook_enviado_em (n8n fora nas
+ * três tentativas, servidor reiniciado no meio): mesma janela e mesmo ritmo da varredura da
+ * pesquisa (de 7 dias a 2 minutos atrás, 25 por vez, 30 s depois de subir e a cada 10 min).
+ */
+function criarReenvioInscricoes(options, { atrasoInicialMs = REENVIO_ATRASO_INICIAL_MS, intervaloMs = REENVIO_INTERVALO_MS } = {}) {
+  let emCurso = null;
+  let parado = false;
+  let inicial = null;
+  let periodico = null;
+
+  async function varrer() {
+    const paginas = Object.keys(options.webhooksInscricao);
+    if (!paginas.length) return { pendentes: 0, entregues: 0 };
+    const agora = options.now();
+    const consulta = [
+      "select=*",
+      `pagina=in.(${paginas.map(encodeURIComponent).join(",")})`,
+      "webhook_enviado_em=is.null",
+      `criado_em=gte.${new Date(agora - REENVIO_JANELA_MAX_MS).toISOString()}`,
+      `criado_em=lte.${new Date(agora - REENVIO_JANELA_MIN_MS).toISOString()}`,
+      "order=criado_em.asc",
+      `limit=${REENVIO_LIMITE}`
+    ].join("&");
+
+    let linhas;
+    try {
+      linhas = await (await supabaseRequest(options, `inscricoes?${consulta}`)).json();
+    } catch (error) {
+      console.error(`Reenvio de inscrições ao n8n: falha ao buscar pendentes: ${error?.message || "erro"}`);
+      return { pendentes: 0, entregues: 0 };
+    }
+    if (!Array.isArray(linhas)) return { pendentes: 0, entregues: 0 };
+
+    let entregues = 0;
+    for (const linha of linhas) {
+      if (parado) break;
+      if (!isPlainObject(linha) || !linha.id || !options.webhooksInscricao[linha.pagina]) continue;
+      try {
+        await forwardToWebhook({
+          payload: montarPayloadInscricao({ linha, agora: options.now() }),
+          webhookUrl: options.webhooksInscricao[linha.pagina],
+          fetchImpl: options.fetchImpl
+        });
+      } catch (error) {
+        console.error(`Reenvio de inscrições ao n8n: falha ao entregar: ${error?.message || "erro"}`);
+        continue;
+      }
+      await marcarInscricaoEnviada(options, linha.id);
+      entregues += 1;
+    }
+    if (linhas.length) console.log(`Reenvio de inscrições ao n8n: ${entregues} de ${linhas.length} pendente(s) entregue(s).`);
+    return { pendentes: linhas.length, entregues };
+  }
+
+  function executar() {
+    if (parado) return Promise.resolve({ pendentes: 0, entregues: 0 });
+    if (emCurso) return emCurso;
+    emCurso = varrer()
+      .catch((error) => {
+        console.error(`Reenvio de inscrições ao n8n: falha inesperada: ${error?.message || "erro"}`);
+        return { pendentes: 0, entregues: 0 };
+      })
+      .finally(() => {
+        emCurso = null;
+      });
+    return emCurso;
+  }
+
+  function iniciar() {
+    if (parado || inicial || periodico) return;
+    inicial = setTimeout(() => {
+      inicial = null;
+      if (parado) return;
+      executar();
+      periodico = setInterval(executar, intervaloMs);
+      periodico.unref?.();
+    }, atrasoInicialMs);
+    inicial.unref?.();
+  }
+
+  function parar() {
+    parado = true;
+    clearTimeout(inicial);
+    clearInterval(periodico);
+    inicial = null;
+    periodico = null;
+  }
+
+  return { executar, iniciar, parar, emCurso: () => emCurso };
+}
+
+/* ------------------------------------------------------------------------------------------ */
 /* Reenvio automático ao n8n                                                                   */
 /* ------------------------------------------------------------------------------------------ */
 
@@ -1287,17 +1482,18 @@ async function handleInscricao(request, response, options) {
   // produto do config (troca de lote sem mexer aqui); qualquer outra coisa usa o link do config.
   const checkoutUrl = checkout.urlDoCheckout(pagina, { base: body.checkout, utm: rastreio, contato });
 
+  const gravada = {
+    id: normalizarUuid(body.id),
+    pagina: pagina.id,
+    visitante_id: normalizarUuid(body.visitante_id),
+    ...contato,
+    checkout_url: checkoutUrl,
+    ...rastreio
+  };
+  let salvo = null;
   try {
-    await callRpc(options, "inscricao_salvar", {
-      p: {
-        id: normalizarUuid(body.id),
-        pagina: pagina.id,
-        visitante_id: normalizarUuid(body.visitante_id),
-        ...contato,
-        checkout_url: checkoutUrl,
-        ...rastreio
-      }
-    });
+    const resposta = await callRpc(options, "inscricao_salvar", { p: gravada });
+    salvo = await resposta.json().catch(() => null);
   } catch (error) {
     console.error(`Falha ao salvar inscrição: ${error?.message || "erro"}`);
     sendJson(response, 502, { ok: false, error: "database_unavailable" });
@@ -1305,6 +1501,15 @@ async function handleInscricao(request, response, options) {
   }
 
   sendJson(response, 200, { ok: true, checkout: checkoutUrl });
+
+  // Inscrição NOVA numa página com webhook (a Imersão GPS): o n8n recebe uma vez por pessoa. Quem
+  // reenvia o formulário (voltou do checkout, mandou de novo) soma clique, não aviso. Depois da
+  // resposta, e sem await: o checkout nunca espera o n8n.
+  if (options.webhooksInscricao[pagina.id] && isPlainObject(salvo) && salvo.novo === true && normalizarUuid(salvo.id)) {
+    avisarInscricao(options, { ...gravada, id: normalizarUuid(salvo.id), criado_em: new Date(options.now()).toISOString() }).catch((error) => {
+      console.error(`Falha inesperada no aviso da inscrição: ${error?.message || "erro"}`);
+    });
+  }
 }
 
 /* ------------------------------------------------------------------------------------------ */
@@ -2473,6 +2678,23 @@ function normalizarSiteUrl(valor) {
   }
 }
 
+/** Só páginas que existem no config, só http(s), e "off"/vazio = sem webhook. */
+function normalizarWebhooksInscricao(fonte) {
+  const saida = {};
+  if (!isPlainObject(fonte)) return saida;
+  for (const pagina of PAGINAS_CHECKOUT) {
+    const valor = typeof fonte[pagina.id] === "string" ? fonte[pagina.id].trim() : "";
+    if (!valor || valor.toLowerCase() === "off") continue;
+    try {
+      const url = new URL(valor);
+      if (url.protocol === "https:" || url.protocol === "http:") saida[pagina.id] = url.toString();
+    } catch {
+      // Endereço torto: sem webhook para esta página (e o aviso de configuração no log do processo).
+    }
+  }
+  return saida;
+}
+
 function normalizarPixelId(valor) {
   const texto = String(valor ?? "").trim();
   if (!texto || texto.toLowerCase() === "off") return "";
@@ -2711,6 +2933,8 @@ export function createServerApp({
   siteUrl = "",
   // Origens extras que podem mandar o POST /api/inscricao (além das `origem` do checkout-config).
   origensInscricao = [],
+  // { id da página: URL do webhook do n8n } — cada inscrição nova daquela página vai para lá.
+  webhooksInscricao = {},
   // Reenvio automático ao n8n: desligado por padrão (teste nenhum dispara varredura sozinho).
   // true liga com 30 s / 10 min; um objeto { atrasoInicialMs, intervaloMs } troca os tempos.
   reenvio = false,
@@ -2737,6 +2961,7 @@ export function createServerApp({
     webhookUrl: String(webhookUrl || "").trim().toLowerCase() === "off" ? "" : webhookUrl,
     webhookEsperasMs: Array.isArray(webhookEsperasMs) && webhookEsperasMs.length ? webhookEsperasMs : WEBHOOK_ESPERAS_MS,
     siteUrl: normalizarSiteUrl(siteUrl),
+    webhooksInscricao: normalizarWebhooksInscricao(webhooksInscricao),
     origensInscricao: new Set(
       [...checkout.ORIGENS, ...(Array.isArray(origensInscricao) ? origensInscricao : [])].map(normalizarOrigem).filter(Boolean)
     ),
@@ -2839,6 +3064,15 @@ export function createServerApp({
   } else {
     server.reenvio = null;
   }
+  // A mesma ideia para as inscrições das páginas com webhook (a Imersão GPS).
+  if (reenvio && Object.keys(options.webhooksInscricao).length && supabaseEnabled(options)) {
+    const varreduraInscricoes = criarReenvioInscricoes(options, reenvio === true ? {} : reenvio);
+    server.reenvioInscricoes = varreduraInscricoes;
+    server.on("listening", () => varreduraInscricoes.iniciar());
+    server.on("close", () => varreduraInscricoes.parar());
+  } else {
+    server.reenvioInscricoes = null;
+  }
   return server;
 }
 
@@ -2893,6 +3127,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (!normalizarSiteUrl(env.SITE_URL)) console.warn("Aviso: SITE_URL ausente — og:url, canonical e a imagem da prévia usam o endereço de cada requisição (Host/X-Forwarded-Host).");
   if (!normalizarPixelId(metaPixelId)) console.warn("Aviso: Meta Pixel desligado (META_PIXEL_ID = off ou inválido).");
 
+  if (String(env.GPS_WEBHOOK_URL || "").trim().toLowerCase() === "off") {
+    console.warn("Aviso: GPS_WEBHOOK_URL=off — as inscrições da Imersão GPS não vão para o n8n (só para o painel).");
+  }
   if (!env.HOTMART_HOTTOK && !env.HOTMART_WEBHOOK_CHAVE) {
     console.warn("Aviso: HOTMART_HOTTOK e HOTMART_WEBHOOK_CHAVE ausentes — o webhook de venda da Hotmart responde 503 e nenhuma compra é registrada.");
   }
@@ -2913,6 +3150,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     webhookUrl,
     siteUrl: env.SITE_URL || "",
     origensInscricao: String(env.INSCRICAO_ORIGENS || "").split(","),
+    webhooksInscricao: {
+      ...DEFAULT_WEBHOOKS_INSCRICAO,
+      ...(env.GPS_WEBHOOK_URL !== undefined && env.GPS_WEBHOOK_URL !== "" ? { "imersao-gps": env.GPS_WEBHOOK_URL } : {})
+    },
     metaPixelId,
     reenvio: true
   });
@@ -2924,6 +3165,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   // O Railway manda SIGTERM no deploy: termina o que está em voo em vez de cortar uma gravação.
   process.on("SIGTERM", () => {
     server.reenvio?.parar();
+    server.reenvioInscricoes?.parar();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 10_000).unref();
   });

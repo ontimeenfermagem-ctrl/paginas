@@ -24,6 +24,7 @@ import {
   calcularPosicao,
   extrairVendaHotmart,
   dataHotmart,
+  montarPayloadInscricao,
   montarPayloadWebhook,
   origemDaRequisicao,
   normalizarOrigem,
@@ -3023,4 +3024,127 @@ test("dataHotmart: epoch em milissegundos, em segundos, ISO e lixo", () => {
   for (const lixo of [null, undefined, "", "   ", "ontem", {}, [], Number.NaN, Infinity]) {
     assert.equal(dataHotmart(lixo), null, String(lixo));
   }
+});
+
+
+/* ================================================================== aviso de inscrição ao n8n */
+
+const WEBHOOK_GPS = "https://n8n.exemplo.com.br/webhook/gps-outubro";
+
+/** O banco falso da inscrição + o n8n do GPS + o PATCH que marca webhook_enviado_em. */
+function backendGpsComN8n({ novo = true, n8n } = {}) {
+  const base = createFakeBackend({ rpc: { inscricao_salvar: { ok: true, novo, id: SESSAO } } });
+  const fetchImpl = async (url, init = {}) => {
+    const endereco = String(url);
+    if (endereco.startsWith(WEBHOOK_GPS)) {
+      base.chamadas.push({ url: endereco, method: init.method, body: JSON.parse(init.body) });
+      return n8n ? n8n() : jsonResponse({ ok: true });
+    }
+    if (/\/rest\/v1\/inscricoes\?id=eq\./.test(endereco)) {
+      base.chamadas.push({ url: endereco, method: init.method, body: init.body ? JSON.parse(init.body) : undefined });
+      return new Response(null, { status: 204 });
+    }
+    return base.fetchImpl(url, init);
+  };
+  return { chamadas: base.chamadas, fetchImpl };
+}
+
+const doN8n = (backend) => backend.chamadas.filter((c) => c.url.startsWith(WEBHOOK_GPS));
+const marcacoes = (backend) => backend.chamadas.filter((c) => /\/rest\/v1\/inscricoes\?id=eq\./.test(c.url));
+
+test("inscrição NOVA do GPS vai uma vez ao n8n com contato, UTMs, sck e checkout, e fica marcada como entregue", async () => {
+  const backend = backendGpsComN8n();
+  const appUrl = await listen(app({ backend, webhooksInscricao: { "imersao-gps": WEBHOOK_GPS }, webhookEsperasMs: [0] }).server);
+
+  const response = await postJson(appUrl, "/api/inscricao", corpoGps());
+  assert.equal(response.status, 200);
+  await aguardar(() => marcacoes(backend).length === 1);
+
+  const [aviso] = doN8n(backend);
+  assert.equal(aviso.method, "POST");
+  const p = aviso.body;
+  assert.equal(p.evento, "inscricao");
+  assert.deepEqual(p.pagina, {
+    id: "imersao-gps",
+    nome: PAGINA_GPS.nome,
+    produto: PAGINA_GPS.produto,
+    rota: PAGINA_GPS.rota,
+    url: `${PAGINA_GPS.origem}${PAGINA_GPS.rota}`
+  });
+  assert.equal(p.inscricao_id, SESSAO);
+  assert.deepEqual(p.lead, {
+    nome: "Ana Souza",
+    primeiro_nome: "Ana",
+    whatsapp: "(21) 99876-5432",
+    whatsapp_digits: "21998765432",
+    whatsapp_internacional: "5521998765432",
+    email: "ana@gmail.com"
+  });
+  assert.deepEqual(p.utm, {
+    utm_source: "facebook",
+    utm_medium: "cpc",
+    utm_campaign: "gps-set",
+    utm_content: "criativo-gps-03",
+    utm_term: "publico-quente"
+  });
+  assert.equal(p.sck, "criativo-gps-03", "o sck do GPS é o utm_content");
+  assert.equal(p.rastreio.fbclid, "IwAR-gps");
+  assert.equal(p.rastreio.dispositivo, "mobile");
+  assert.match(p.checkout_url, /^https:\/\/pay\.hotmart\.com\/R107667362D\?off=l0r77by6/);
+  assert.match(p.checkout_url, /sck=criativo-gps-03/);
+  assert.ok(Date.parse(p.inscrito_em) && Date.parse(p.enviado_em));
+
+  const [marca] = marcacoes(backend);
+  assert.equal(marca.method, "PATCH");
+  assert.match(marca.url, new RegExp(`id=eq\\.${SESSAO}$`));
+  assert.ok(Date.parse(marca.body.webhook_enviado_em));
+});
+
+test("reenvio do formulário (inscrição que já existia) não avisa o n8n de novo", async () => {
+  const backend = backendGpsComN8n({ novo: false });
+  const appUrl = await listen(app({ backend, webhooksInscricao: { "imersao-gps": WEBHOOK_GPS }, webhookEsperasMs: [0] }).server);
+  assert.equal((await postJson(appUrl, "/api/inscricao", corpoGps())).status, 200);
+  await esperar(80);
+  assert.equal(doN8n(backend).length, 0);
+  assert.equal(marcacoes(backend).length, 0);
+});
+
+test("a Viver de Furo não tem webhook: inscrição dela não vai para o n8n do GPS", async () => {
+  const backend = backendGpsComN8n();
+  const appUrl = await listen(app({ backend, webhooksInscricao: { "imersao-gps": WEBHOOK_GPS }, webhookEsperasMs: [0] }).server);
+  assert.equal((await postJson(appUrl, "/api/inscricao", corpoInscricao())).status, 200);
+  await esperar(80);
+  assert.equal(doN8n(backend).length, 0);
+});
+
+test("sem webhook configurado (padrão), com 'off', endereço torto ou página que não existe: nada sai", async () => {
+  for (const webhooksInscricao of [undefined, { "imersao-gps": "off" }, { "imersao-gps": "não é url" }, { "imersao-gps": "ftp://x" }, { "nao-existe": WEBHOOK_GPS }]) {
+    const backend = backendGpsComN8n();
+    const appUrl = await listen(app({ backend, webhookEsperasMs: [0], ...(webhooksInscricao ? { webhooksInscricao } : {}) }).server);
+    assert.equal((await postJson(appUrl, "/api/inscricao", corpoGps())).status, 200);
+    await esperar(60);
+    assert.equal(doN8n(backend).length, 0, JSON.stringify(webhooksInscricao));
+  }
+});
+
+test("n8n fora: a pessoa já recebeu o checkout (200), são 3 tentativas e a inscrição NÃO é marcada (a varredura reenvia)", async () => {
+  const backend = backendGpsComN8n({ n8n: () => jsonResponse({ erro: "fora" }, 503) });
+  const appUrl = await listen(app({ backend, webhooksInscricao: { "imersao-gps": WEBHOOK_GPS }, webhookEsperasMs: [0, 5, 5] }).server);
+  const response = await postJson(appUrl, "/api/inscricao", corpoGps());
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).ok, true);
+  await aguardar(() => doN8n(backend).length === 3);
+  await esperar(40);
+  assert.equal(marcacoes(backend).length, 0);
+});
+
+test("montarPayloadInscricao: sem checkout_url, o sck é a UTM que a página manda (utm_content no GPS)", () => {
+  const p = montarPayloadInscricao({
+    linha: { id: SESSAO, pagina: "imersao-gps", nome: "Rosa Lima", whatsapp_digits: "11977778888", utm_content: "criativo-x", utm_term: "t" },
+    agora: Date.parse("2026-09-24T12:00:00Z")
+  });
+  assert.equal(p.sck, "criativo-x");
+  assert.equal(p.lead.whatsapp_internacional, "5511977778888");
+  assert.equal(p.inscrito_em, "2026-09-24T12:00:00.000Z");
+  assert.equal(p.checkout_url, null);
 });
