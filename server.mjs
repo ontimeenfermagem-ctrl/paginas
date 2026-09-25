@@ -1632,15 +1632,20 @@ async function handleHotmartVenda(request, response, options) {
   if (request.method !== "POST") return methodNotAllowed(response, "POST");
 
   const hottok = String(options.hotmartHottok || "").trim();
-  const chave = String(options.hotmartChave || "").trim();
-  if (!hottok && !chave) {
+  // Uma chave por produto: o endereço que o cliente cola na Hotmart é o mesmo, com ?chave= própria.
+  // Assim dá para desligar (ou trocar) o aviso de um produto sem mexer no dos outros.
+  const chaves = String(options.hotmartChave || "")
+    .split(",")
+    .map((valor) => valor.trim())
+    .filter(Boolean);
+  if (!hottok && !chaves.length) {
     sendJson(response, 503, { ok: false, error: "webhook_not_configured" });
     return;
   }
 
   const recebido = request.headers["x-hotmart-hottok"];
   const chaveDaUrl = new URL(request.url, "http://localhost").searchParams.get("chave");
-  const autorizado = (hottok && segredoIgual(recebido, hottok)) || (chave && segredoIgual(chaveDaUrl, chave));
+  const autorizado = (hottok && segredoIgual(recebido, hottok)) || chaves.some((chave) => segredoIgual(chaveDaUrl, chave));
   if (!autorizado) {
     sendJson(response, 401, { ok: false, error: "unauthorized" });
     return;
@@ -2083,6 +2088,100 @@ function handleInscricoesPainel(request, response, options) {
       resumo,
       itens,
       total: totalFromContentRange(listaResponse, offset + itens.length),
+      gerado_em: new Date(options.now()).toISOString()
+    };
+  });
+}
+
+// Só o que a aba de perfis mostra: a página curta não tem respostas para trazer junto.
+const PERFIS_COLUNAS = [
+  "id",
+  "criado_em",
+  "atualizado_em",
+  "concluido_em",
+  "nome",
+  "whatsapp",
+  "whatsapp_digits",
+  "email",
+  "perfil",
+  "dispositivo",
+  "utm_source",
+  "utm_medium",
+  "utm_campaign",
+  "utm_content",
+  "utm_term",
+  "tentativas"
+].join(",");
+
+/**
+ * Perfis atualizados (/atualizacao-perfil): quem veio do WhatsApp e disse só contato e profissão.
+ *
+ * Mora na MESMA tabela da pesquisa, separado pela coluna `pesquisa` — por isso a lista sai da
+ * mesma view e nada aqui encosta nos números do ICP. Um pedido devolve o recorte inteiro: a lista
+ * paginada, o total e quantos por profissão, todos com os mesmos filtros (período, busca e
+ * profissão mudam TODOS os números, como nas outras abas).
+ */
+function handlePerfisPainel(request, response, options) {
+  return rotaDoPainel(request, response, options, "os perfis atualizados", async (params) => {
+    const { desde, ate } = lerPeriodo(params);
+    const busca = lerBusca(params);
+    const perfilPedido = params.get("perfil") || null;
+    if (perfilPedido !== null && !PERFIS_VALIDOS.has(perfilPedido)) invalido();
+    const limite = lerInteiro(params, "limite", { padrao: PAINEL_LIST_PADRAO, minimo: 1, maximo: PAINEL_LIST_MAX });
+    const offset = lerInteiro(params, "offset", { padrao: 0, minimo: 0 });
+
+    // O recorte comum: cada consulta parte daqui, então um filtro vale para a lista e para as contagens.
+    const recorte = () => {
+      const query = new URLSearchParams();
+      query.set("pesquisa", `eq.${PESQUISA_ATUALIZACAO}`);
+      if (desde) query.append("criado_em", `gte.${desde}`);
+      if (ate) query.append("criado_em", `lt.${ate}`);
+      if (busca) {
+        const filtros = [`nome.ilike.*${busca}*`, `email.ilike.*${busca}*`];
+        const digits = digitosDaBusca(busca);
+        if (digits) filtros.push(`whatsapp_digits.ilike.*${digits}*`);
+        query.set("or", `(${filtros.join(",")})`);
+      }
+      return query;
+    };
+
+    const lista = recorte();
+    lista.set("select", PERFIS_COLUNAS);
+    // id desempata quem entrou no mesmo instante: sem ele, "Carregar mais" repetiria ou pularia gente.
+    lista.set("order", "criado_em.desc,id.desc");
+    lista.set("limit", String(limite));
+    lista.set("offset", String(offset));
+    if (perfilPedido) lista.set("perfil", `eq.${perfilPedido}`);
+
+    // Uma contagem por profissão, sem trazer linha nenhuma (limit=0): o número vem no Content-Range.
+    // A contagem ignora o filtro de profissão de propósito — os quatro cartões continuam visíveis.
+    const profissoes = Array.from(PERFIS_VALIDOS);
+    const contagens = profissoes.map((nome) => {
+      const query = recorte();
+      query.set("select", "id");
+      query.set("perfil", `eq.${nome}`);
+      query.set("limit", "0");
+      return query;
+    });
+
+    const pedir = (query) => supabaseRequest(options, `pesquisa_pessoas?${query.toString()}`, { headers: { Prefer: "count=exact" } });
+    // Tudo junto: os números e a lista chegam no tempo de uma consulta só.
+    const [listaResponse, ...contagemResponses] = await Promise.all([pedir(lista), ...contagens.map(pedir)]);
+
+    const itens = await listaResponse.json();
+    if (!Array.isArray(itens)) throw new Error("supabase_unexpected_shape");
+    const porPerfil = profissoes.map((nome, indice) => ({
+      perfil: nome,
+      codigo: pesquisa.PERFIL_CODIGO[nome] || null,
+      total: totalFromContentRange(contagemResponses[indice], 0)
+    }));
+
+    return {
+      itens,
+      total: totalFromContentRange(listaResponse, offset + itens.length),
+      // Sem filtro de profissão o total é a soma dos quatro; com filtro, `total` é só a fatia.
+      respondentes: porPerfil.reduce((soma, item) => soma + item.total, 0),
+      por_perfil: porPerfil,
       gerado_em: new Date(options.now()).toISOString()
     };
   });
@@ -3002,6 +3101,7 @@ export function createServerApp({
     ["/api/painel/cruzamento", handleCruzamento],
     ["/api/painel/paginas", handlePaginas],
     ["/api/painel/inscricoes", handleInscricoesPainel],
+    ["/api/painel/perfis", handlePerfisPainel],
     ["/api/painel/exportar.csv", handleExportarCsv],
     ["/api/painel/exportar-inscricoes.csv", handleExportarInscricoesCsv]
   ]);
@@ -3145,7 +3245,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     painelSenhaHash: env.PAINEL_SENHA_HASH || "",
     painelSessaoSegredo: env.PAINEL_SESSAO_SEGREDO || "",
     hotmartHottok: env.HOTMART_HOTTOK || "",
-    hotmartChave: env.HOTMART_WEBHOOK_CHAVE || "",
+    // Uma variável por produto, todas aceitas no mesmo endereço (cada uma vira um ?chave= próprio).
+    hotmartChave: [env.HOTMART_WEBHOOK_CHAVE, env.HOTMART_WEBHOOK_CHAVE_2].map((valor) => String(valor || "").trim()).filter(Boolean).join(","),
     unnichatApiKey: env.UNNICHAT_API_KEY || "",
     webhookUrl,
     siteUrl: env.SITE_URL || "",

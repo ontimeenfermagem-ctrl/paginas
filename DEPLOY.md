@@ -213,6 +213,7 @@ A senha em si não é guardada em lugar nenhum, só o hash. Guarde a senha num g
    | `SITE_URL` | opcional, recomendado assim que o domínio existir (ex.: `https://pesquisa.seudominio.com.br`): fixa o endereço do `og:url`, do `canonical` e da imagem da prévia do WhatsApp. Sem ele, o servidor usa o endereço pelo qual a página foi pedida (cabeçalho `X-Forwarded-Host`/`Host`, validado), então a prévia já sai com imagem no domínio do Railway |
    | `HOTMART_HOTTOK` | o *Hottok* da Hotmart (Ferramentas > Webhook/Postback > aba **Autenticação**). Sem ele **e** sem `HOTMART_WEBHOOK_CHAVE`, `POST /api/hotmart/venda` responde 503 |
    | `HOTMART_WEBHOOK_CHAVE` | um segredo **nosso**, que vai na URL do webhook (`?chave=...`). Gere com `node -e "console.log(require('node:crypto').randomBytes(24).toString('base64url'))"` |
+   | `HOTMART_WEBHOOK_CHAVE_2` | opcional: uma segunda chave, para um produto separado. As duas valem no mesmo endereço (cada uma com o seu `?chave=`), e assim dá para trocar ou desligar o aviso de um produto sem mexer no do outro |
    | `META_PIXEL_ID` | opcional: vazio = `538380380948773` (pixel da Enfermagem de Valor); `off` desliga |
    | `INSCRICAO_ORIGENS` | opcional: sites de **fora** que também podem mandar o formulário para o `POST /api/inscricao` (CORS), separados por vírgula, com `https://` e sem barra no fim — por exemplo o preview do Railway da página de venda ou `http://localhost:3001` para testar na sua máquina. A de produção (`https://io.escolaenfermagemdevalor.com.br`) **já vem** do `js/checkout-config.js` e não precisa estar aqui. Vazio = só as do config |
 
@@ -260,6 +261,8 @@ https://SEU-DOMINIO/api/hotmart/venda?chave=O-VALOR-DE-HOTMART_WEBHOOK_CHAVE
 ```
 
 (em produção hoje: `https://lp.escolaenfermagemdevalor.com.br/api/hotmart/venda?chave=...`)
+
+Para um **produto separado**, dá para usar um endereço próprio: cadastre a segunda chave como `HOTMART_WEBHOOK_CHAVE_2` e cole `...?chave=O-VALOR-DE-HOTMART_WEBHOOK_CHAVE_2` no webhook daquele produto. O endpoint é o mesmo e as duas chaves valem ao mesmo tempo; ter uma por produto serve para saber de onde veio cada aviso e para poder trocar (ou desligar) um sem derrubar o outro. Quem separa os números no painel continua sendo o **produto** do aviso, não a chave.
 
 1. Gere a chave e cadastre-a no Railway como `HOTMART_WEBHOOK_CHAVE` (veja o passo 4). Ela existe para o endereço funcionar **no minuto em que for colado**, antes de o hottok estar configurado.
 2. Hotmart > **Ferramentas > Webhook (Postback)** > **Cadastrar webhook**: cole o endereço acima, escolha a **versão 2.0** e marque os eventos de compra — no mínimo **Compra aprovada**, **Compra completa**, **Compra cancelada**, **Reembolso**, **Chargeback** (e **Disputa**, que também desmarca). Boleto gerado e carrinho abandonado também podem ser marcados: eles são gravados, mas não marcam ninguém como comprador. Se o webhook foi cadastrado **por produto** (e não para todos), o produto de cada página precisa estar na lista: hoje o Furo de orelha humanizado (Viver de Furo) **e a Imersão GPS do Plantão Sem Medo** — sem ele, as vendas dos ingressos não chegam aqui.

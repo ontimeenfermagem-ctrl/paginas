@@ -50,6 +50,21 @@ after(async () => {
 });
 
 const DADOS = gerar();
+
+// Perfis atualizados (/atualizacao-perfil): doze pessoas fixas, uma profissão de cada vez, sempre
+// na mesma ordem — a aba mostra contato e profissão, e nada mais.
+const PERFIS_LISTA = Object.values(EV.PERFIL);
+const PERFIS_PESSOAS = Array.from({ length: 12 }, (_, i) => ({
+  id: `aaaaaaaa-aaaa-4aaa-8aaa-${String(i).padStart(12, "0")}`,
+  criado_em: new Date(Date.UTC(2026, 8, 24, 12, 0, 0) - i * 3_600_000).toISOString(),
+  nome: `Pessoa ${i + 1} da Silva`,
+  whatsapp: `(11) 9${String(1000 + i)}-${String(5000 + i)}`,
+  whatsapp_digits: `119${String(1000 + i)}${String(5000 + i)}`,
+  email: `pessoa${i + 1}@gmail.com`,
+  perfil: PERFIS_LISTA[i % PERFIS_LISTA.length],
+  utm_source: i % 2 ? "unnichat" : "",
+  utm_campaign: i % 2 ? "atualizar-perfil" : ""
+}));
 const VAZIO = { visitantes: [], pessoas: [], eventos: [], inscricoes: [], compras: [] };
 
 // Cada checagem é uma asserção (a primeira que falha derruba o cenário) e é contada: o último
@@ -125,6 +140,28 @@ function criarMock(page, { dados = DADOS, logado = true } = {}) {
           if (!chaves.every((c) => EV.chavesTexto().includes(c))) return json(422, { ok: false, error: "invalid_filters" });
           const r = abertas(mock.dados, filtros, chaves, Number(q.limite || 200), Number(q.offset || 0));
           return json(200, { ok: true, ...r });
+        }
+        if (rota === "perfis") {
+          const busca = (q.busca || "").trim().toLowerCase();
+          const doRecorte = PERFIS_PESSOAS.filter(
+            (p) => !busca || p.nome.toLowerCase().includes(busca) || p.email.toLowerCase().includes(busca)
+          );
+          const daLista = q.perfil ? doRecorte.filter((p) => p.perfil === q.perfil) : doRecorte;
+          const offset = Number(q.offset || 0);
+          const limite = Number(q.limite || 100);
+          return json(200, {
+            ok: true,
+            itens: daLista.slice(offset, offset + limite),
+            total: daLista.length,
+            respondentes: doRecorte.length,
+            // As contagens NÃO olham o filtro de profissão: os quatro cartões continuam completos.
+            por_perfil: PERFIS_LISTA.map((perfil) => ({
+              perfil,
+              codigo: EV.PERFIL_CODIGO[perfil],
+              total: doRecorte.filter((p) => p.perfil === perfil).length
+            })),
+            gerado_em: new Date().toISOString()
+          });
         }
         if (rota === "respostas") {
           const r = lista(mock.dados, filtros, { status: q.status, busca: q.busca, limite: Number(q.limite || 100), offset: Number(q.offset || 0) });
@@ -874,7 +911,10 @@ cenario("obrigado", async () => {
 
     const abas = await page.$$eval("[data-paginas] [data-pagina]", (els) => els.map((e) => `${e.dataset.pagina}|${e.textContent}`));
     confere(
-      abas.length === 2 + CHK.LISTA.length && abas[0].startsWith("pesquisa-icp|") && abas[1] === "obrigado|Páginas de obrigadorota /obrigado-*",
+      abas.length === 3 + CHK.LISTA.length &&
+        abas[0].startsWith("pesquisa-icp|") &&
+        abas[1] === "obrigado|Páginas de obrigadorota /obrigado-*" &&
+        abas[2] === "perfis|Perfis atualizadosrota /atualizacao-perfil",
       `faixa de páginas (${abas.join(" / ")})`
     );
     confere(!mock.chamadas.some((c) => c.rota === "paginas"), "a aba de obrigado só busca dados quando é aberta");
@@ -1047,6 +1087,92 @@ cenario("obrigado", async () => {
 
 
 /* ---------------------------------------------------------------- Inscrições e vendas: uma aba por página */
+/* ---------------------------------------------------------------- Perfis atualizados */
+cenario("perfis", async () => {
+  const fmt = (x) => new Intl.NumberFormat("pt-BR").format(x);
+
+  for (const [largura, altura] of [[1280, 800], [390, 844]]) {
+    const { page, mock, erros } = await novaPagina(browser, { largura, altura });
+    await page.waitForSelector("[data-panel-view]:not([hidden])");
+    await esperarCalmo(page);
+    confere(!mock.chamadas.some((c) => c.rota === "perfis"), `${largura}: a aba de perfis só busca dados quando é aberta`);
+
+    mock.chamadas = [];
+    await page.click("[data-paginas] [data-pagina='perfis']");
+    await page.waitForSelector("[data-perfis-corpo] .pessoa");
+    await esperarCalmo(page);
+
+    confere(new URL(page.url()).searchParams.get("pagina") === "perfis", `${largura}: a URL guarda a aba (${page.url()})`);
+    confere((await page.getAttribute("#pagina-perfis", "aria-selected")) === "true", `${largura}: aba de perfis selecionada`);
+    confere(await page.isHidden("[data-pagina-conteudo='pesquisa-icp']"), `${largura}: conteúdo da pesquisa escondido`);
+    confere(!mock.chamadas.some((c) => c.rota === "resumo"), `${largura}: abrir a aba não recarrega a pesquisa`);
+    // A busca vale aqui (é a mesma da barra); profissão e situação da pesquisa, não.
+    confere(await page.isVisible(".filtros-pessoa .busca-global"), `${largura}: a busca continua na barra`);
+    confere((await page.isHidden("[data-perfis]")) && (await page.isHidden(".filtros-pessoa .status-global")), `${largura}: perfil da pesquisa e situação somem`);
+
+    // O número grande e os quatro cartões de profissão, com o total de cada um.
+    confere((await page.textContent("[data-perfis-corpo] .placar li.destaque .valor")).trim() === fmt(PERFIS_PESSOAS.length), `${largura}: total de perfis atualizados`);
+    const abasPerfil = await page.$$eval("[data-perfis-corpo] [data-perfil-aba]", (els) => els.map((e) => `${e.dataset.perfilAba}|${e.querySelector(".n").textContent}`));
+    confere(abasPerfil.length === 1 + PERFIS_LISTA.length && abasPerfil[0] === `|${fmt(PERFIS_PESSOAS.length)}`, `${largura}: abas de profissão (${abasPerfil.join(" / ")})`);
+    for (const perfil of PERFIS_LISTA) {
+      const quantos = PERFIS_PESSOAS.filter((p) => p.perfil === perfil).length;
+      confere(abasPerfil.includes(`${perfil}|${fmt(quantos)}`), `${largura}: ${perfil} = ${quantos}`);
+    }
+
+    // A ficha de cada pessoa: nome, WhatsApp clicável, e-mail e a profissão.
+    const primeira = PERFIS_PESSOAS[0];
+    const ficha = page.locator(`[data-perfil-pessoa='${primeira.id}']`);
+    confere((await ficha.locator(".pessoa-nome").textContent()) === primeira.nome, `${largura}: nome na lista`);
+    confere((await ficha.locator(".pessoa-contato a").getAttribute("href")) === `https://wa.me/55${primeira.whatsapp_digits}`, `${largura}: link do WhatsApp`);
+    confere((await ficha.locator(".pessoa-contato span").last().textContent()) === primeira.email, `${largura}: e-mail na lista`);
+    confere((await ficha.locator(".pessoa-selos .selo").textContent()) === primeira.perfil, `${largura}: profissão na ficha`);
+    // O código interno (o que o UnniChat recebe) fica no title, para conferir sem abrir o banco.
+    confere((await ficha.locator(".pessoa-selos .selo").getAttribute("title")).includes(EV.PERFIL_CODIGO[primeira.perfil]), `${largura}: código interno no title`);
+
+    await tela(page, `perfis-lista-${largura}`, { full: true });
+
+    // Escolher uma profissão filtra a LISTA; os cartões continuam com o número dos quatro.
+    const escolhida = PERFIS_LISTA[1];
+    mock.chamadas = [];
+    await page.click(`[data-perfis-corpo] [data-perfil-aba='${escolhida}']`);
+    await esperarCalmo(page);
+    const pedido = mock.chamadas.find((c) => c.rota === "perfis");
+    confere(pedido && new URLSearchParams(pedido.url.split("?")[1]).get("perfil") === escolhida, `${largura}: a API recebe a profissão escolhida`);
+    const naTela = await page.$$eval("[data-perfis-corpo] .pessoa-selos .selo", (els) => els.map((e) => e.textContent));
+    confere(naTela.length && naTela.every((t) => t === escolhida), `${largura}: só a profissão escolhida na lista (${naTela.length})`);
+    const depois = await page.$$eval("[data-perfis-corpo] [data-perfil-aba]", (els) => els.map((e) => `${e.dataset.perfilAba}|${e.querySelector(".n").textContent}`));
+    confere(JSON.stringify(depois) === JSON.stringify(abasPerfil), `${largura}: os cartões de profissão não encolhem com o filtro`);
+
+    // A busca da barra vale para esta aba (e volta a valer para a pesquisa quando se troca de aba).
+    mock.chamadas = [];
+    await page.fill("[data-busca]", "Pessoa 3 da Silva");
+    await page.press("[data-busca]", "Enter");
+    await esperarCalmo(page);
+    const comBusca = mock.chamadas.filter((c) => c.rota === "perfis");
+    confere(comBusca.length === 1 && new URLSearchParams(comBusca[0].url.split("?")[1]).get("busca") === "Pessoa 3 da Silva", `${largura}: a busca vai para a API dos perfis`);
+    confere(!mock.chamadas.some((c) => c.rota === "resumo"), `${largura}: a busca não recarrega a pesquisa que está fechada`);
+
+    await tela(page, `perfis-${largura}`, { full: true });
+    confere(erros.length === 0, `${largura}: sem erro de JavaScript (${erros.join(" | ")})`);
+    await page.context().close();
+  }
+
+  // Banco fora: a aba mostra o erro com "Tentar de novo", e o botão refaz o pedido.
+  const { page, mock, erros } = await novaPagina(browser, { largura: 1280, altura: 800 });
+  await page.waitForSelector("[data-panel-view]:not([hidden])");
+  mock.forcar.perfis = 502;
+  await page.click("[data-paginas] [data-pagina='perfis']");
+  await page.waitForSelector("[data-perfis-corpo] .erro");
+  confere((await page.textContent("[data-perfis-status]")).length > 0, "a aba avisa que não deu para carregar");
+  delete mock.forcar.perfis;
+  mock.chamadas = [];
+  await page.click("[data-perfis-corpo] [data-repetir='perfis']");
+  await page.waitForSelector("[data-perfis-corpo] .pessoa");
+  confere(mock.chamadas.some((c) => c.rota === "perfis"), "Tentar de novo refaz o pedido");
+  confere(erros.length === 0, `sem erro de JavaScript no estado de erro (${erros.join(" | ")})`);
+  await page.context().close();
+});
+
 cenario("inscricoes", async () => {
   const fmt = (x) => new Intl.NumberFormat("pt-BR").format(x);
   // O real do Intl vem com espaço fino inquebrável: tudo é comparado com os espaços normalizados.
@@ -1230,10 +1356,10 @@ cenario("inscricoes", async () => {
     const abas = await page.$$eval("[data-paginas] [data-pagina]", (els) =>
       els.map((e) => ({ id: e.dataset.pagina, dom: e.id, role: e.getAttribute("role"), controla: e.getAttribute("aria-controls"), nome: e.querySelector(".pagina-nome").textContent, rota: e.querySelector(".pagina-rota").textContent }))
     );
-    confere(JSON.stringify(abas.map((a) => a.id)) === JSON.stringify(["pesquisa-icp", "obrigado", idAba(VDF), idAba(GPS)]), `${largura}: faixa (${abas.map((a) => a.id).join(" / ")})`);
-    confere(abas[2].nome === VDF.nome && abas[2].rota === `rota ${VDF.rota}`, `${largura}: aba Viver de Furo (${abas[2].nome} · ${abas[2].rota})`);
-    confere(abas[3].nome === GPS.nome && abas[3].rota === "rota io.escolaenfermagemdevalor.com.br/igps_set_lp_26-ingresso", `${largura}: aba GPS com o host (${abas[3].rota})`);
-    confere(abas.slice(2).every((a) => a.role === "tab" && a.controla === "pagina-inscricoes-painel" && a.dom === `pagina-${a.id}`), `${largura}: as duas abas controlam o mesmo bloco`);
+    confere(JSON.stringify(abas.map((a) => a.id)) === JSON.stringify(["pesquisa-icp", "obrigado", "perfis", idAba(VDF), idAba(GPS)]), `${largura}: faixa (${abas.map((a) => a.id).join(" / ")})`);
+    confere(abas[3].nome === VDF.nome && abas[3].rota === `rota ${VDF.rota}`, `${largura}: aba Viver de Furo (${abas[3].nome} · ${abas[3].rota})`);
+    confere(abas[4].nome === GPS.nome && abas[4].rota === "rota io.escolaenfermagemdevalor.com.br/igps_set_lp_26-ingresso", `${largura}: aba GPS com o host (${abas[4].rota})`);
+    confere(abas.slice(3).every((a) => a.role === "tab" && a.controla === "pagina-inscricoes-painel" && a.dom === `pagina-${a.id}`), `${largura}: as duas abas controlam o mesmo bloco`);
     confere(!mock.chamadas.some((c) => c.rota === "inscricoes"), `${largura}: a aba de inscrição só busca dados quando é aberta`);
 
     // Viver de Furo.
@@ -1478,8 +1604,8 @@ cenario("inscricoes", async () => {
 });
 
 test("todas as checagens rodaram", () => {
-  // 11 cenários acima; o número exato muda quando um cenário ganha checagem, o piso não.
-  assert.ok(checagens >= 240, `só ${checagens} checagens rodaram`);
+  // 12 cenários acima; o número exato muda quando um cenário ganha checagem, o piso não.
+  assert.ok(checagens >= 280, `só ${checagens} checagens rodaram`);
   assert.ok(todasAsChamadas.length > 100);
   assert.deepEqual(todasAsChamadas.filter((url) => /_outro/.test(url)), [], "o painel nunca pede complemento de Outro");
   // Toda ida à API de inscrições diz de qual página: nenhuma aba pede "todas as páginas".

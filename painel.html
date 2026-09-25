@@ -320,6 +320,22 @@
           </section>
         </div>
 
+        <!-- ============================================================ Perfis atualizados -->
+        <!-- A página curta /atualizacao-perfil: contato e profissão, para o UnniChat saber com quem
+             está falando. Mesma tabela da pesquisa, separada pela coluna `pesquisa`. Aqui valem o
+             período da barra e a busca; a profissão é escolhida nas abas de dentro do bloco. -->
+        <div class="pagina-conteudo" id="pagina-perfis-painel" role="tabpanel" aria-labelledby="pagina-perfis" data-pagina-conteudo="perfis" hidden>
+          <p class="status" data-perfis-status role="status" aria-live="polite"></p>
+          <section class="secao secao-inscricoes" id="sec-perfis" aria-labelledby="perfis-titulo" data-perfis-secao>
+            <div class="secao-cabeca">
+              <p class="eyebrow" data-perfis-periodo>Desde o começo</p>
+              <h2 id="perfis-titulo">Perfis atualizados</h2>
+              <p class="secao-sub">Quem recebeu o convite no WhatsApp, abriu a página curta e disse quem é: nome, WhatsApp, e-mail e profissão. É o que o UnniChat consulta para falar com cada uma pelo perfil dela. Quem responde a pesquisa completa aparece na aba Pesquisa ICP, não aqui.</p>
+            </div>
+            <div data-perfis-corpo></div>
+          </section>
+        </div>
+
         <!-- ============================================================ Inscrições com checkout -->
         <!-- As páginas de js/checkout-config.js (Viver de Furo, Imersão GPS...). Cada uma tem a SUA
              aba na faixa, e todas desenham neste mesmo bloco: o JS pede ?pagina=<id> da aba aberta

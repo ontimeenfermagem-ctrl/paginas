@@ -94,6 +94,7 @@
   const PAGINAS = [
     { id: "pesquisa-icp", conteudo: "pesquisa-icp", nome: "Pesquisa ICP", rota: "/pesquisa-icp", entrar: null, atualizar: null, sair: null, filtrar: null },
     { id: "obrigado", conteudo: "obrigado", nome: "Páginas de obrigado", rota: "/obrigado-*", entrar: null, atualizar: null, sair: null, filtrar: null },
+    { id: "perfis", conteudo: "perfis", nome: "Perfis atualizados", rota: "/atualizacao-perfil", entrar: null, atualizar: null, sair: null, filtrar: null },
     ...(PAGINAS_CHECKOUT.length
       ? PAGINAS_CHECKOUT.map((pagina) => ({
           id: `inscricoes-${pagina.id}`,
@@ -669,7 +670,7 @@
   /* ================================================================== */
 
   // Sequências separadas por bloco: a resposta antiga de um bloco nunca sobrescreve a nova.
-  const seq = { resumo: 0, lista: 0, cruz: 0, abertas: 0, obrigado: 0, inscricoes: 0 };
+  const seq = { resumo: 0, lista: 0, cruz: 0, abertas: 0, obrigado: 0, inscricoes: 0, perfis: 0 };
   let emVoo = 0;
 
   function ocupado(delta) {
@@ -823,7 +824,9 @@
     const gerado =
       paginaAtual.conteudo === "obrigado"
         ? obr.geradoEm
-        : paginaAtual.conteudo === "inscricoes"
+        : paginaAtual.conteudo === "perfis"
+          ? perf.geradoEm
+          : paginaAtual.conteudo === "inscricoes"
           ? ins.pagina === paginaAtual.inscricao
             ? ins.geradoEm
             : ""
@@ -2588,7 +2591,8 @@
       }
       state.busca = valor;
       escreverUrl();
-      carregarTudo();
+      // A busca é da aba aberta: na pesquisa recarrega tudo, na de perfis recarrega os perfis.
+      aplicarPeriodo();
     }, 400);
   });
   $("[data-busca]").addEventListener("keydown", (evento) => {
@@ -2600,7 +2604,7 @@
     if (valor.trim() === state.busca.trim()) return;
     state.busca = valor;
     escreverUrl();
-    carregarTudo();
+    aplicarPeriodo();
   });
   $("[data-status]").addEventListener("change", (evento) => {
     state.status = evento.target.value;
@@ -2631,6 +2635,7 @@
     else if (acao === "abertas") carregarAbertas({ reiniciar: !state.abertas.itens.length });
     else if (acao === "obrigado") carregarObrigado();
     else if (acao === "inscricoes") carregarInscricoes();
+    else if (acao === "perfis") carregarPerfis();
     else if (acao.startsWith("outro:")) carregarOutro(acao.slice(6));
   });
 
@@ -3544,6 +3549,242 @@
   });
 
   /* ================================================================== */
+  /* Perfis atualizados (/atualizacao-perfil)                             */
+  /* ================================================================== */
+
+  // A página curta do WhatsApp: contato e profissão, nada mais. Mora na MESMA tabela da pesquisa
+  // (coluna `pesquisa`), e por isso tem aba própria em vez de se misturar com o ICP.
+  const LIMITE_PERFIS = 100;
+  const perf = {
+    itens: [],
+    total: 0,
+    respondentes: 0,
+    porPerfil: [],
+    perfil: "", // o valor cheio do perfil ("Cuidador(a)"), como está no banco; "" = todas
+    erro: 0,
+    pronto: false,
+    carregando: false,
+    geradoEm: ""
+  };
+
+  function limparPerfis() {
+    perf.itens = [];
+    perf.total = 0;
+    perf.respondentes = 0;
+    perf.porPerfil = [];
+    perf.erro = 0;
+    perf.pronto = false;
+    perf.carregando = false;
+    perf.geradoEm = "";
+    seq.perfis++;
+  }
+
+  function parametrosPerfis() {
+    const params = new URLSearchParams();
+    const { desde, ate } = intervalo();
+    if (desde) params.set("desde", desde);
+    if (ate) params.set("ate", ate);
+    const busca = state.busca.trim();
+    if (busca) params.set("busca", busca);
+    if (perf.perfil) params.set("perfil", perf.perfil);
+    return params;
+  }
+
+  /** As abas de profissão do bloco: "Todas" e uma por profissão, cada uma com o seu número. */
+  function abasPerfilHtml() {
+    const abas = [{ valor: "", curto: "Todas", total: perf.respondentes }].concat(
+      perf.porPerfil.map((item) => ({
+        valor: item.perfil,
+        curto: EV.PERFIL_CURTO[item.perfil] || item.perfil,
+        total: num(item.total)
+      }))
+    );
+    return `<div class="perfis" role="tablist" aria-label="Profissão" data-perfis-abas>${abas
+      .map((aba) => {
+        const ativo = aba.valor === perf.perfil;
+        return `<button type="button" class="perfil-aba" role="tab" aria-selected="${ativo}" tabindex="${ativo ? 0 : -1}" data-perfil-aba="${escapeHtml(
+          aba.valor
+        )}" data-foco="perfil-aba-${escapeHtml(aba.valor || "todas")}">${escapeHtml(aba.curto)}<span class="n" aria-label="${escapeHtml(
+          plural(aba.total, "pessoa", "pessoas")
+        )}">${n(aba.total)}</span></button>`;
+      })
+      .join("")}</div>`;
+  }
+
+  function placarPerfisHtml() {
+    const total = perf.respondentes;
+    const maior = perf.porPerfil.reduce((melhor, item) => (num(item.total) > num(melhor.total) ? item : melhor), { total: 0, perfil: "" });
+    const itens = [
+      `<li class="destaque"><span class="rotulo">Perfis atualizados</span><span class="valor">${n(total)}</span><span class="detalhe">${escapeHtml(
+        state.busca.trim() ? "pessoas encontradas na busca" : "pessoas que disseram quem são"
+      )}</span></li>`,
+      `<li><span class="rotulo">Profissão mais comum</span><span class="valor">${escapeHtml(
+        total && maior.perfil ? EV.PERFIL_CURTO[maior.perfil] || maior.perfil : "—"
+      )}</span><span class="detalhe">${escapeHtml(total && maior.perfil ? `${pct(num(maior.total), total)} de ${n(total)}` : "ninguém ainda")}</span></li>`
+    ];
+    return `<ul class="placar ins-placar" aria-label="Números dos perfis no período">${itens.join("")}</ul>`;
+  }
+
+  function perfilPessoaHtml(item) {
+    const link = whatsappLink(item.whatsapp_digits);
+    const telefone = item.whatsapp
+      ? link
+        ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>${escapeHtml(
+            item.whatsapp
+          )}<span class="visualmente-oculto"> (abre o WhatsApp)</span></a>`
+        : `<span>${escapeHtml(item.whatsapp)}</span>`
+      : "<span>sem WhatsApp</span>";
+    // O código interno é o que vai para o UnniChat e para o CRM: mostrar os dois evita conferência
+    // no banco quando alguém desconfia do que a automação recebeu.
+    const codigo = EV.PERFIL_CODIGO[item.perfil] || "";
+    const profissao = item.perfil
+      ? `<span class="selo rep" title="${escapeHtml(codigo ? `Vai para o UnniChat como ${codigo}` : item.perfil)}">${escapeHtml(item.perfil)}</span>`
+      : `<span class="selo meio">Sem profissão</span>`;
+    return `<article class="pessoa" data-perfil-pessoa="${escapeHtml(item.id)}">
+      <div class="pessoa-cabeca">
+        <div class="pessoa-quem">
+          <span class="pessoa-nome">${escapeHtml(item.nome || "Sem nome")}</span>
+          <span class="pessoa-meta">${escapeHtml(dataHora(item.criado_em))}</span>
+        </div>
+        <div class="pessoa-contato">${telefone}<span>${escapeHtml(item.email || "sem e-mail")}</span></div>
+        <div class="pessoa-selos">${profissao}</div>
+        <div class="pessoa-acoes"><span class="pessoa-origem">${escapeHtml(origemTexto(item))}</span></div>
+      </div>
+    </article>`;
+  }
+
+  function listaPerfisHtml() {
+    const corpo = perf.itens.length
+      ? `${perf.itens.map(perfilPessoaHtml).join("")}${
+          perf.itens.length < perf.total
+            ? `<button type="button" class="botao botao-leve ins-mais" data-perfis-mais data-foco="perfis-mais"${perf.carregando ? " disabled" : ""}>${
+                perf.carregando ? "Carregando..." : `Carregar mais ${n(Math.min(LIMITE_PERFIS, perf.total - perf.itens.length))}`
+              }</button>`
+            : ""
+        }`
+      : vazioHtml(
+          state.busca.trim()
+            ? "Ninguém encontrado com essa busca."
+            : state.periodo === "tudo"
+              ? "Ninguém atualizou o perfil ainda."
+              : "Ninguém atualizou o perfil neste período.",
+          "Cada pessoa que termina a página /atualizacao-perfil aparece aqui, com o WhatsApp pronto para conversar."
+        );
+    return `<article class="cartao ins-pessoas" aria-labelledby="perfis-pessoas-titulo">
+      <div class="cartao-cabeca">
+        <h3 id="perfis-pessoas-titulo">Quem atualizou</h3>
+        <p class="cartao-sub">Mostrando <strong>${n(perf.itens.length)}</strong> de <strong>${n(perf.total)}</strong> ${
+          perf.total === 1 ? "pessoa" : "pessoas"
+        }, das mais recentes para as mais antigas.</p>
+      </div>
+      <div class="ins-pessoas-lista">${corpo}</div>
+    </article>`;
+  }
+
+  function pintarPerfis() {
+    const alvo = $("[data-perfis-corpo]");
+    $("[data-perfis-periodo]").textContent = perf.geradoEm && perf.pronto ? `${rotuloPeriodo()} · atualizado às ${hora(perf.geradoEm)}` : rotuloPeriodo();
+    pintarAtualizado();
+    if (!perf.pronto) {
+      redesenhar(alvo, erroHtml(perf.erro, "perfis", "repetir-perfis"));
+      return;
+    }
+    redesenhar(alvo, `${placarPerfisHtml()}${abasPerfilHtml()}${listaPerfisHtml()}`);
+  }
+
+  async function carregarPerfis({ mais = false } = {}) {
+    const alvo = $("[data-perfis-corpo]");
+    const secao = $("[data-perfis-secao]");
+    const status = $("[data-perfis-status]");
+
+    const minha = ++seq.perfis;
+    const params = parametrosPerfis();
+    params.set("limite", String(LIMITE_PERFIS));
+    params.set("offset", String(mais ? perf.itens.length : 0));
+
+    secao.setAttribute("aria-busy", "true");
+    perf.carregando = true;
+    // Esqueleto só na primeira vez; nas recargas o desenho anterior fica esmaecido.
+    if (!perf.pronto) {
+      $("[data-perfis-periodo]").textContent = rotuloPeriodo();
+      redesenhar(alvo, `<div class="ins-lista"><div class="cartao">${esqueleto(6)}</div></div>`);
+    }
+    status.textContent = "Carregando...";
+    delete status.dataset.estado;
+    ocupado(1);
+    const resposta = await api(`/api/painel/perfis?${params}`);
+    ocupado(-1);
+    if (minha !== seq.perfis) return;
+    secao.removeAttribute("aria-busy");
+    perf.carregando = false;
+
+    if (resposta.status === 401) {
+      sessaoExpirou();
+      return;
+    }
+    if (!resposta.ok || !Array.isArray(resposta.body.itens)) {
+      // Sem dado bom, o número de outro recorte não pode ficar na tela.
+      perf.itens = [];
+      perf.total = 0;
+      perf.respondentes = 0;
+      perf.porPerfil = [];
+      perf.erro = resposta.status || 0;
+      perf.pronto = false;
+      status.dataset.estado = "erro";
+      status.textContent = mensagemErro(perf.erro);
+      pintarPerfis();
+      return;
+    }
+
+    const itens = resposta.body.itens;
+    perf.itens = mais ? perf.itens.concat(itens) : itens;
+    perf.total = num(resposta.body.total);
+    perf.respondentes = num(resposta.body.respondentes);
+    perf.porPerfil = Array.isArray(resposta.body.por_perfil) ? resposta.body.por_perfil : [];
+    perf.erro = 0;
+    perf.pronto = true;
+    perf.geradoEm = resposta.body.gerado_em || "";
+    status.textContent = "";
+    pintarPerfis();
+  }
+
+  function trocarPerfilAba(valor) {
+    if (valor === perf.perfil) return;
+    perf.perfil = valor;
+    perf.itens = [];
+    perf.total = 0;
+    carregarPerfis();
+  }
+
+  $("[data-perfis-corpo]").addEventListener("click", (evento) => {
+    const alvo = evento.target instanceof Element ? evento.target : null;
+    if (!alvo) return;
+    const aba = alvo.closest("[data-perfil-aba]");
+    if (aba) {
+      state.focoDepois = `perfil-aba-${aba.dataset.perfilAba || "todas"}`;
+      trocarPerfilAba(aba.dataset.perfilAba || "");
+      return;
+    }
+    if (alvo.closest("[data-perfis-mais]") && !perf.carregando) {
+      state.focoDepois = "perfis-mais";
+      carregarPerfis({ mais: true });
+    }
+  });
+
+  $("[data-perfis-corpo]").addEventListener("keydown", (evento) => {
+    const passo = evento.key === "ArrowRight" ? 1 : evento.key === "ArrowLeft" ? -1 : 0;
+    if (!passo) return;
+    const abas = $$("[data-perfil-aba]");
+    const atual = abas.indexOf(document.activeElement);
+    if (atual < 0) return;
+    evento.preventDefault();
+    const proxima = abas[(atual + passo + abas.length) % abas.length];
+    state.focoDepois = `perfil-aba-${proxima.dataset.perfilAba || "todas"}`;
+    proxima.focus();
+    trocarPerfilAba(proxima.dataset.perfilAba || "");
+  });
+
+  /* ================================================================== */
   /* Registro da pesquisa na faixa de páginas                             */
   /* ================================================================== */
 
@@ -3559,6 +3800,13 @@
     atualizar: () => carregarObrigado(),
     sair: () => limparObrigado(),
     filtrar: () => carregarObrigado()
+  });
+
+  Object.assign(paginaDoId("perfis"), {
+    entrar: () => carregarPerfis(),
+    atualizar: () => carregarPerfis(),
+    sair: () => limparPerfis(),
+    filtrar: () => carregarPerfis()
   });
 
   // Uma aba por página de inscrição, todas com as mesmas funções: o que muda é a página que elas

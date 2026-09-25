@@ -2635,8 +2635,17 @@ summary.icp-cabeca::after {
 
 /* ------------------------------------------------------------ Páginas de obrigado */
 
-/* O período vale para todas as abas da faixa; perfil, busca e situação só existem na pesquisa. */
-.filtros[data-pagina-ativa]:not([data-pagina-ativa="pesquisa-icp"]) [data-so-pesquisa] {
+/* O período vale para todas as abas da faixa; perfil, busca e situação só existem na pesquisa —
+   com uma exceção: a aba de perfis atualizados também procura por nome, WhatsApp e e-mail. */
+.filtros[data-pagina-ativa]:not([data-pagina-ativa="pesquisa-icp"]):not([data-pagina-ativa="perfis"]) [data-so-pesquisa] {
+  display: none !important;
+}
+
+/* Na aba de perfis, a profissão são as abas de dentro do bloco, e situação não existe (quem
+   aparece lá já terminou): da barra sobra a busca. */
+.filtros[data-pagina-ativa="perfis"] [data-perfis],
+.filtros[data-pagina-ativa="perfis"] .status-global,
+.filtros[data-pagina-ativa="perfis"] [data-filtro-ativo] {
   display: none !important;
 }
 
