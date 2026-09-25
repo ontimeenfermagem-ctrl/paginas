@@ -62,6 +62,8 @@ const PERFIS_PESSOAS = Array.from({ length: 12 }, (_, i) => ({
   whatsapp_digits: `119${String(1000 + i)}${String(5000 + i)}`,
   email: `pessoa${i + 1}@gmail.com`,
   perfil: PERFIS_LISTA[i % PERFIS_LISTA.length],
+  // Uma pessoa com o aviso ainda pendente: é o único caso em que o selo aparece.
+  webhook_enviado_em: i === 2 ? null : "2026-09-24T12:00:05Z",
   utm_source: i % 2 ? "unnichat" : "",
   utm_campaign: i % 2 ? "atualizar-perfil" : ""
 }));
@@ -1128,6 +1130,13 @@ cenario("perfis", async () => {
     confere((await ficha.locator(".pessoa-selos .selo").textContent()) === primeira.perfil, `${largura}: profissão na ficha`);
     // O código interno (o que o UnniChat recebe) fica no title, para conferir sem abrir o banco.
     confere((await ficha.locator(".pessoa-selos .selo").getAttribute("title")).includes(EV.PERFIL_CODIGO[primeira.perfil]), `${largura}: código interno no title`);
+
+    // O aviso que inicia a sequência no WhatsApp: selo só em quem ainda não foi avisado.
+    const pendente = PERFIS_PESSOAS.find((p) => !p.webhook_enviado_em);
+    const selosPendente = await page.$$eval(`[data-perfil-pessoa='${pendente.id}'] .pessoa-selos .selo`, (els) => els.map((e) => e.textContent));
+    confere(selosPendente.includes("Aviso pendente"), `${largura}: quem não foi avisado tem o selo (${selosPendente.join(" / ")})`);
+    const selosOk = await page.$$eval(`[data-perfil-pessoa='${PERFIS_PESSOAS[0].id}'] .pessoa-selos .selo`, (els) => els.map((e) => e.textContent));
+    confere(!selosOk.includes("Aviso pendente"), `${largura}: quem já foi avisado não tem selo (${selosOk.join(" / ")})`);
 
     await tela(page, `perfis-lista-${largura}`, { full: true });
 

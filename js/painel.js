@@ -3640,6 +3640,11 @@
     const profissao = item.perfil
       ? `<span class="selo rep" title="${escapeHtml(codigo ? `Vai para o UnniChat como ${codigo}` : item.perfil)}">${escapeHtml(item.perfil)}</span>`
       : `<span class="selo meio">Sem profissão</span>`;
+    // O aviso que inicia a sequência no WhatsApp. Só aparece quando ainda NÃO saiu: o normal é
+    // sair em segundos, então um selo em cada linha seria ruído.
+    const aviso = item.webhook_enviado_em
+      ? ""
+      : `<span class="selo meio" title="O aviso que inicia a sequência no WhatsApp ainda não foi entregue. O servidor tenta de novo sozinho, de 10 em 10 minutos, por até 7 dias.">Aviso pendente</span>`;
     return `<article class="pessoa" data-perfil-pessoa="${escapeHtml(item.id)}">
       <div class="pessoa-cabeca">
         <div class="pessoa-quem">
@@ -3647,7 +3652,7 @@
           <span class="pessoa-meta">${escapeHtml(dataHora(item.criado_em))}</span>
         </div>
         <div class="pessoa-contato">${telefone}<span>${escapeHtml(item.email || "sem e-mail")}</span></div>
-        <div class="pessoa-selos">${profissao}</div>
+        <div class="pessoa-selos">${profissao}${aviso}</div>
         <div class="pessoa-acoes"><span class="pessoa-origem">${escapeHtml(origemTexto(item))}</span></div>
       </div>
     </article>`;

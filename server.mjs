@@ -2197,6 +2197,8 @@ const PERFIS_COLUNAS = [
   "whatsapp_digits",
   "email",
   "perfil",
+  // Se a sequência do WhatsApp já foi disparada para esta pessoa (o aviso perfil_atualizado).
+  "webhook_enviado_em",
   "dispositivo",
   "utm_source",
   "utm_medium",

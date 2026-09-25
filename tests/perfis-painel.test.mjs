@@ -156,7 +156,7 @@ test("lê só a pesquisa da página curta, com a lista e uma contagem por profis
   assert.equal(lista.params.get("limit"), "100");
   assert.equal(lista.params.get("offset"), "0");
   // A lista traz o contato e a profissão; respostas da pesquisa grande, não.
-  assert.match(lista.params.get("select"), /nome,whatsapp,whatsapp_digits,email,perfil/);
+  assert.match(lista.params.get("select"), /nome,whatsapp,whatsapp_digits,email,perfil,webhook_enviado_em/);
   assert.doesNotMatch(lista.params.get("select"), /respostas/);
   // As contagens não trazem linha nenhuma: só o número do Content-Range.
   for (const contagem of pedidas.slice(1)) assert.equal(contagem.params.get("limit"), "0");
