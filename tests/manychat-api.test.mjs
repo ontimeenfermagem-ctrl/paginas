@@ -310,7 +310,8 @@ test("sem manychat_contact_id, a pessoa é reconhecida pelo telefone", async () 
 test("contato inválido é 400 invalid_payload com o campo, e nada é gravado", async () => {
   const { base, chamadas } = await subir();
   const casos = [
-    { ...CORPO, nome: "Maria" },
+    // Nome sem sobrenome NÃO entra aqui: nesta rota ele é aceito de propósito (ver o teste abaixo).
+    { ...CORPO, nome: "123" },
     { ...CORPO, telefone: "(11) 3123-4567" },
     { ...CORPO, telefone: "" },
     { ...CORPO, email: "maria@" },
@@ -396,4 +397,61 @@ test("método errado é 405; corpo torto é 400; sem banco é 503; banco fora é
   assert.equal(r2.json.success, false);
   // Nada de stack nem de dado pessoal na resposta de erro.
   assert.deepEqual(Object.keys(r2.json).sort(), ["error", "success"]);
+});
+
+/* ------------------------------------------------------------------ armadilhas de quem monta a DM */
+
+test("variável não substituída ({{cuf_...}}) vira um erro que se explica sozinho", async () => {
+  const { base, chamadas } = await subir();
+  const { status, json } = await enviar(base, {
+    manychat_contact_id: "1742416631",
+    nome: "{{cuf_10976209}}",
+    email: "{{cuf_10976216}}",
+    telefone: "{{cuf_10976208}}",
+    profissao: "{{cuf_15004723}}",
+    origem_detalhe: "dm-instagram"
+  });
+  assert.equal(status, 400);
+  assert.equal(json.error, "unsubstituted_variable");
+  assert.deepEqual(json.campos_crus, ["nome", "email", "telefone", "profissao"]);
+  assert.match(json.dica, /contato de teste/);
+  assert.deepEqual(chamadas, [], "nada é gravado");
+});
+
+test("uma variável crua no meio de campos bons também é pega", async () => {
+  const { base } = await subir();
+  const { status, json } = await enviar(base, { ...CORPO, telefone: "{{cuf_10976208}}" });
+  assert.equal(status, 400);
+  assert.equal(json.error, "unsubstituted_variable");
+  assert.deepEqual(json.campos_crus, ["telefone"]);
+});
+
+test("nome sem sobrenome é aceito aqui (na DM não existe segunda chance)", async () => {
+  const { base, gravacao } = await subir();
+  const { status, json } = await enviar(base, { ...CORPO, nome: "maria" });
+  assert.equal(status, 200);
+  assert.equal(json.success, true);
+  assert.equal(gravacao().corpo.p.nome, "Maria");
+});
+
+test("nome que não é nome continua recusado", async () => {
+  const { base, chamadas } = await subir();
+  for (const nome of ["", "   ", "M", "123", "maria@gmail.com", "a".repeat(200)]) {
+    const { status, json } = await enviar(base, { ...CORPO, nome });
+    assert.equal(status, 400, JSON.stringify(nome));
+    assert.equal(json.error, "invalid_payload", JSON.stringify(nome));
+    assert.ok(json.campos.nome, JSON.stringify(nome));
+  }
+  assert.deepEqual(chamadas, []);
+});
+
+test("telefone com +55, como o ManyChat salva no campo do sistema", async () => {
+  const { base, gravacao, chamadas } = await subir();
+  for (const telefone of ["+5545998112233", "+55 (45) 99811-2233", "5545998112233"]) {
+    chamadas.length = 0;
+    const { status, json } = await enviar(base, { ...CORPO, telefone });
+    assert.equal(status, 200, telefone);
+    assert.equal(json.phone, "5545998112233", telefone);
+    assert.equal(gravacao().corpo.p.whatsapp, "(45) 99811-2233", telefone);
+  }
 });

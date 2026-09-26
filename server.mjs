@@ -696,7 +696,10 @@ export function validarContato(fonte, opcoes = {}) {
 
   const nome = leadRules.normalizeName(typeof c.nome === "string" ? c.nome : "");
   // Um nome de 150 letras não é nome: é colagem errada, e a coluna não precisa guardar isso.
-  const erroNome = nome.length > 150 ? "invalid" : leadRules.nameError(nome);
+  let erroNome = nome.length > 150 ? "invalid" : leadRules.nameError(nome);
+  // `nomeSimples`: aceita nome sem sobrenome. Vale só para integração de fora (ManyChat), onde a
+  // pessoa não vê o erro nem tem como corrigir — o resto do projeto continua exigindo o sobrenome.
+  if (erroNome === "surname" && opcoes && opcoes.nomeSimples === true) erroNome = "";
   if (erroNome) campos.nome = leadRules.message("name", erroNome);
 
   const whatsappBruto = typeof c.whatsapp === "string" ? c.whatsapp.slice(0, 40) : "";
@@ -3163,9 +3166,26 @@ async function handleManychatLead(request, response, options) {
   }
   if (!isPlainObject(body)) return recusar(400, "invalid_payload");
 
-  // O contato passa pela régua de sempre: nome com sobrenome e maiúsculas certas, telefone em
-  // (DD) 9xxxx-xxxx + dígitos, e-mail minúsculo e com formato válido.
-  const validacao = validarContato({ nome: body.nome, whatsapp: body.telefone ?? body.whatsapp ?? body.phone, email: body.email });
+  // Erro nº 1 de quem monta a automação: a variável chega CRUA ("{{cuf_10976209}}") porque o campo
+  // está vazio para aquele contato, ou porque o teste rodou sem contato de teste. Sem esta checagem
+  // a resposta seria "Confere o nome: use só letras", que não ajuda ninguém a achar o problema.
+  const cru = ["nome", "email", "telefone", "whatsapp", "phone", "profissao", "perfil", "profession", "origem_detalhe", "anuncio"]
+    .filter((campo) => typeof body[campo] === "string" && /\{\{.*\}\}/.test(body[campo]));
+  if (cru.length) {
+    console.warn(`manychat/lead: variável não substituída em ${cru.join(", ")}`);
+    return recusar(400, "unsubstituted_variable", {
+      campos_crus: cru,
+      dica: "O ManyChat mandou a variável no lugar do valor. Esse campo está vazio para o contato de teste — escolha um contato que já respondeu a DM, ou preencha os campos dele antes de testar."
+    });
+  }
+
+  // O contato passa pela régua de sempre: maiúsculas certas, telefone em (DD) 9xxxx-xxxx + dígitos,
+  // e-mail minúsculo e com formato válido. Só o sobrenome não é exigido aqui: na DM não existe
+  // segunda chance — quem responde "Maria" perderia a vaga em vez de virar lead.
+  const validacao = validarContato(
+    { nome: body.nome, whatsapp: body.telefone ?? body.whatsapp ?? body.phone, email: body.email },
+    { nomeSimples: true }
+  );
   if (validacao.campos) return recusar(400, "invalid_payload", { campos: validacao.campos });
   const { contato } = validacao;
 

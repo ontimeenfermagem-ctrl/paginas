@@ -499,7 +499,9 @@ O que o ManyChat **pode** acrescentar é o detalhe de onde a pessoa veio, em doi
 
 **Sem duplicar.** A mesma pessoa é reconhecida nesta ordem: `manychat_contact_id` (guardado no jsonb `respostas`, sem coluna nova), telefone normalizado e e-mail. Achando, a linha é atualizada (`action: "updated"`); não achando, nasce uma (`action: "created"`). A busca acontece só entre os leads do ManyChat: a linha da pessoa na pesquisa de ICP ou na atualização por WhatsApp é outra coisa e não é sobrescrita.
 
-**Erros:** `400 invalid_payload` (com `campos`, dizendo o que está errado), `401 unauthorized`, `429 too_many_requests`, `503 api_key_not_configured` ou `database_not_configured`, `502 database_unavailable`. Nenhum expõe stack nem dado pessoal.
+**Erros:** `400 invalid_payload` (com `campos`, dizendo o que está errado), `400 unsubstituted_variable` (o ManyChat mandou `{{cuf_...}}` cru: o campo está vazio para aquele contato, ou o teste rodou sem contato de teste — é o erro nº 1 ao montar a automação), `401 unauthorized`, `429 too_many_requests`, `503 api_key_not_configured` ou `database_not_configured`, `502 database_unavailable`. Nenhum expõe stack nem dado pessoal.
+
+**Nome sem sobrenome é aceito aqui**, ao contrário dos formulários do site: na DM a pessoa não vê o erro nem tem como corrigir, então "Maria" vira lead em vez de virar recusa. O que continua recusado é o que não é nome (vazio, uma letra só, números, e-mail).
 
 Esses leads **não** disparam o aviso `perfil_atualizado` ao n8n: a conversa deles continua dentro do ManyChat.
 
