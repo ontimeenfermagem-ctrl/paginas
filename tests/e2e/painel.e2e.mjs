@@ -167,6 +167,7 @@ function criarMock(page, { dados = DADOS, logado = true } = {}) {
               ...(EV.grupoDoRotulo(perfil) ? { curto: EV.grupoDoRotulo(perfil).curto } : {}),
               total: doRecorte.filter((p) => p.perfil === perfil).length
             })),
+            aviso_ativo: true,
             gerado_em: new Date().toISOString()
           });
         }

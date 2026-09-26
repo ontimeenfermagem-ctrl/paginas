@@ -145,6 +145,8 @@ test("lê só a pesquisa da página curta, com a lista e uma contagem por profis
     { perfil: GRUPO.rotulo, codigo: GRUPO.codigo, curto: GRUPO.curto, total: totais[GRUPO.rotulo] ?? 0 }
   ]);
   assert.ok(corpo.gerado_em);
+  // Sem PERFIL_WEBHOOK_URL configurada, o painel não pendura "aviso pendente" em ninguém.
+  assert.equal(corpo.aviso_ativo, false);
 
   // Seis consultas: a lista, as quatro profissões e o grupo "enfermagem" — nenhuma no ICP.
   const pedidas = consultas();
@@ -290,4 +292,10 @@ test("cada produto tem a sua chave: as duas valem no mesmo endereço, e só elas
 test("sem chave nenhuma e sem hottok: 503 (a Hotmart retém e reenvia)", async () => {
   const avisar = await subirHotmart("");
   assert.equal((await avisar("qualquer")).status, 503);
+});
+
+test("com webhook de perfil configurado, o painel sabe que existe aviso para cobrar", async () => {
+  const { get } = await logado({ contar: () => 0, perfilWebhookUrl: "https://n8n-de-teste.invalid/webhook/perfil-atualizado" });
+  const corpo = await (await get("/api/painel/perfis")).json();
+  assert.equal(corpo.aviso_ativo, true);
 });

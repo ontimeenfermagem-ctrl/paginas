@@ -31,11 +31,14 @@ const WEBHOOK_TIMEOUT_MS = 10_000;
 // este padrão: createServerApp começa com "" para teste nenhum disparar um aviso real.
 const DEFAULT_WEBHOOK_URL = "https://n8n.tecnicadevalor.com.br/webhook/pesquisa-icp";
 // Aviso de PERFIL ATUALIZADO (/atualizacao-perfil): sai no instante em que a pessoa escolhe a
-// profissão, para a conversa no WhatsApp continuar sabendo com quem está falando — sem ninguém
-// ficar perguntando "já respondeu?" de tempos em tempos. PERFIL_WEBHOOK_URL troca o endereço (pode
-// apontar direto para o gatilho do UnniChat); "off" desliga. Como o da pesquisa, só o processo de
-// verdade usa este padrão: createServerApp começa com "".
-const DEFAULT_PERFIL_WEBHOOK_URL = "https://n8n.tecnicadevalor.com.br/webhook/perfil-atualizado";
+// profissão. Serve para UMA coisa só — fazer a conversa continuar sozinha depois que a pessoa sai
+// da conversa e preenche a página. Quem pergunta "quem é essa pessoa?" (o UnniChat, o ManyChat)
+// já tem o GET /api/leads/perfil, e quem coleta tudo dentro da própria conversa (o ManyChat) não
+// precisa de nada disso.
+//
+// Por isso nasce DESLIGADO: sem PERFIL_WEBHOOK_URL, nenhum aviso sai e nada fica pendente. Para
+// ligar, é só pôr o endereço (o webhook do n8n ou o gatilho do UnniChat) na variável.
+const EXEMPLO_PERFIL_WEBHOOK_URL = "https://n8n.tecnicadevalor.com.br/webhook/perfil-atualizado";
 // Webhooks do n8n que recebem cada inscrição NOVA, por página de inscrição (id do
 // js/checkout-config.js). Ficam aqui, e não no config, porque o config é público (vai para o
 // navegador e para a cópia da página de venda): endereço de webhook exposto é convite para spam.
@@ -2355,6 +2358,9 @@ function handlePerfisPainel(request, response, options) {
 
     return {
       itens,
+      // Sem webhook configurado não existe "aviso pendente" — a lista não pode acusar uma entrega
+      // que ninguém pediu.
+      aviso_ativo: Boolean(options.perfilWebhookUrl),
       total: totalFromContentRange(listaResponse, offset + itens.length),
       // Sem filtro de profissão o total é a soma dos quatro; com filtro, `total` é só a fatia.
       respondentes: porPerfil.reduce((soma, item) => soma + item.total, 0),
@@ -3622,8 +3628,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const webhookUrl = webhookEnv.toLowerCase() === "off" ? "" : webhookEnv || DEFAULT_WEBHOOK_URL;
   if (!webhookUrl) console.warn("Aviso: PESQUISA_WEBHOOK_URL=off — nenhuma pesquisa concluída será enviada ao n8n.");
   const perfilEnv = String(env.PERFIL_WEBHOOK_URL || "").trim();
-  const perfilWebhookUrl = perfilEnv.toLowerCase() === "off" ? "" : perfilEnv || DEFAULT_PERFIL_WEBHOOK_URL;
-  if (!perfilWebhookUrl) console.warn("Aviso: PERFIL_WEBHOOK_URL=off — quem atualizar o perfil não dispara a sequência no WhatsApp.");
+  const perfilWebhookUrl = perfilEnv.toLowerCase() === "off" ? "" : perfilEnv;
+  if (!perfilWebhookUrl) {
+    console.log(`PERFIL_WEBHOOK_URL não configurada: quem atualizar o perfil é gravado normalmente, e nenhum aviso é disparado (exemplo de endereço: ${EXEMPLO_PERFIL_WEBHOOK_URL}).`);
+  }
   if (!normalizarSiteUrl(env.SITE_URL)) console.warn("Aviso: SITE_URL ausente — og:url, canonical e a imagem da prévia usam o endereço de cada requisição (Host/X-Forwarded-Host).");
   if (!normalizarPixelId(metaPixelId)) console.warn("Aviso: Meta Pixel desligado (META_PIXEL_ID = off ou inválido).");
 

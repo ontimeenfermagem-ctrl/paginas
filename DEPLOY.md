@@ -209,7 +209,7 @@ A senha em si não é guardada em lugar nenhum, só o hash. Guarde a senha num g
    | `PAINEL_SENHA_HASH` | a linha do passo 3 (cole como está, sem aspas) |
    | `PAINEL_SESSAO_SEGREDO` | a linha do passo 3 |
    | `PESQUISA_WEBHOOK_URL` | opcional: vazio = `https://n8n.tecnicadevalor.com.br/webhook/pesquisa-icp`; outro endereço troca; `off` desliga. Recebe **um** aviso `pesquisa_concluida` por pessoa, quando ela chega à tela de fim. Se o n8n estiver fora, o servidor reenvia sozinho (varredura 30 s depois de subir e a cada 10 min, até 7 dias). A varredura também manda quem respondeu todas as obrigatórias e fechou antes da tela de fim, depois de 30 min parada |
-   | `PERFIL_WEBHOOK_URL` | opcional: vazio = `https://n8n.tecnicadevalor.com.br/webhook/perfil-atualizado`; outro endereço troca (pode ser o gatilho do UnniChat); `off` desliga. Recebe **um** aviso `perfil_atualizado` por pessoa, no instante em que ela escolhe a profissão na `/atualizacao-perfil`. Se o destino estiver fora, a varredura reenvia |
+   | `PERFIL_WEBHOOK_URL` | opcional, **desligada por padrão**: um endereço aqui (webhook do n8n, ou o gatilho do UnniChat) faz sair **um** aviso `perfil_atualizado` por pessoa, no instante em que ela escolhe a profissão na `/atualizacao-perfil`. Só é preciso quando a conversa tem que continuar sozinha depois que a pessoa preenche a página; para saber "quem é essa pessoa" existe o `GET /api/leads/perfil`. Vazia = nada sai e nada fica pendente |
    | `GPS_WEBHOOK_URL` | opcional: vazio = `https://n8n.tecnicadevalor.com.br/webhook/gps-outubro`; outro endereço troca; `off` desliga. Recebe **um** aviso `inscricao` por pessoa inscrita na página da Imersão GPS (contato, as 5 UTMs, sck, rastreio e o link do checkout). Se o n8n estiver fora, a varredura reenvia (marca em `inscricoes.webhook_enviado_em`) |
    | `SITE_URL` | opcional, recomendado assim que o domínio existir (ex.: `https://pesquisa.seudominio.com.br`): fixa o endereço do `og:url`, do `canonical` e da imagem da prévia do WhatsApp. Sem ele, o servidor usa o endereço pelo qual a página foi pedida (cabeçalho `X-Forwarded-Host`/`Host`, validado), então a prévia já sai com imagem no domínio do Railway |
    | `HOTMART_HOTTOK` | o *Hottok* da Hotmart (Ferramentas > Webhook/Postback > aba **Autenticação**). Sem ele **e** sem `HOTMART_WEBHOOK_CHAVE`, `POST /api/hotmart/venda` responde 503 |
@@ -409,7 +409,9 @@ https://SEU-DOMINIO/api/leads/perfil?telefone={{telefone_do_contato}}&chave=<UNN
 
 Para o fluxo, **falha e `responded: false` são a mesma decisão**: ainda não sabemos quem é, então manda (ou remanda) o convite.
 
-**O aviso de quem acabou de responder.** Quando a pessoa escolhe a profissão, o servidor manda na hora um `POST` para `PERFIL_WEBHOOK_URL` (padrão: o n8n em `/webhook/perfil-atualizado`; pode apontar direto para o gatilho do UnniChat). É ele que inicia a sequência — ninguém precisa ficar perguntando "já respondeu?".
+**O aviso de quem acabou de responder — opcional, e desligado por padrão.** Com um endereço em `PERFIL_WEBHOOK_URL` (o webhook do n8n, ou o gatilho do UnniChat), o servidor manda na hora um `POST` quando a pessoa escolhe a profissão. É ele que inicia a sequência sem ninguém ficar perguntando "já respondeu?".
+
+Vale a pena quando a conversa **precisa continuar sozinha** depois que a pessoa sai do WhatsApp, preenche a página e volta. Não é preciso quando a automação coleta tudo dentro da própria conversa (é o caso do ManyChat na DM do Instagram, que já manda o lead pronto) nem quando basta perguntar "quem é essa pessoa?" — para isso existe o `GET /api/leads/perfil`. E também não é preciso se a própria página de obrigado já resolve o próximo passo: ela leva a pessoa direto para o grupo de WhatsApp do perfil dela.
 
 ```json
 {

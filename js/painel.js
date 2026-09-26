@@ -3561,6 +3561,7 @@
     respondentes: 0,
     porPerfil: [],
     perfil: "", // o valor cheio do perfil ("Cuidador(a)"), como está no banco; "" = todas
+    avisoAtivo: false, // existe webhook de perfil configurado? sem ele, ninguém fica "pendente"
     erro: 0,
     pronto: false,
     carregando: false,
@@ -3646,7 +3647,7 @@
     // quem veio da página curta: o lead da DM do Instagram não tem esse aviso (quem continua a
     // conversa dele é o ManyChat).
     const aviso =
-      item.webhook_enviado_em || (item.pesquisa && item.pesquisa !== "atualizacao-perfil")
+      !perf.avisoAtivo || item.webhook_enviado_em || (item.pesquisa && item.pesquisa !== "atualizacao-perfil")
         ? ""
         : `<span class="selo meio" title="O aviso que inicia a sequência no WhatsApp ainda não foi entregue. O servidor tenta de novo sozinho, de 10 em 10 minutos, por até 7 dias.">Aviso pendente</span>`;
     return `<article class="pessoa" data-perfil-pessoa="${escapeHtml(item.id)}">
@@ -3750,6 +3751,7 @@
     perf.total = num(resposta.body.total);
     perf.respondentes = num(resposta.body.respondentes);
     perf.porPerfil = Array.isArray(resposta.body.por_perfil) ? resposta.body.por_perfil : [];
+    perf.avisoAtivo = resposta.body.aviso_ativo === true;
     perf.erro = 0;
     perf.pronto = true;
     perf.geradoEm = resposta.body.gerado_em || "";
