@@ -184,6 +184,14 @@ Depois de colar: `npm test && npm run test:e2e`, commit e deploy (não precisa r
 
 Um cuidado que o código não pega: **link trocado entre páginas** funciona (o botão abre) e leva a pessoa ao grupo errado. A conferência que vale é abrir cada link e ler o nome do grupo de destino.
 
+## Sala de aula (replay)
+
+`/replay-afericao` é a sala da Aula de Aferição: a pessoa preenche o formulário de acesso (nome, WhatsApp, e-mail e as MESMAS quatro profissões da pergunta 1 da pesquisa) e a aula libera na hora, com o material do lado. O acesso fica lembrado no aparelho por 90 dias, então quem volta pelo link não preenche de novo.
+
+A página é dado: texto, aula, material e certificado moram em `js/replay-config.js`, e `replay-afericao.html` é só o esqueleto que `js/replay.js` preenche. A inscrição vai para `POST /api/replay/inscricao` → o mesmo `pesquisa_salvar` de todo lead, com o id de pesquisa da sala (`replay-afericao`), as UTMs de primeiro toque e a profissão — e aparece no painel, na aba da sala. Ela **não** dispara aviso ao n8n: o próximo passo da pessoa é a própria aula, que abre na tela.
+
+Dois detalhes de segurança: o player de terceiro só é montado no clique do play (nada de fora carrega antes), e a sala é a única página do site com `frame-src` — fechada nos três provedores que o config aceita (YouTube nocookie, Vimeo e Panda). O certificado nasce escondido e só aparece com `ativo: true` **e** link de emissão.
+
 ## Deploy
 
 Passo a passo em [DEPLOY.md](DEPLOY.md).

@@ -509,6 +509,30 @@ Esses leads **não** disparam o aviso `perfil_atualizado` ao n8n: a conversa del
 
 ---
 
+## 5.6 Sala de aula (replay)
+
+A sala é `https://SEU-DOMINIO/replay-afericao`. A pessoa cai na página, preenche **uma vez** o formulário de acesso (nome, WhatsApp, e-mail e profissão) e a aula libera; voltando pelo link depois, a sala já está aberta (fica lembrada no aparelho por 90 dias). A inscrição vai para o mesmo lugar de todo lead do projeto e aparece no painel, na aba **Replay — Aula de Aferição**, com as UTMs de primeiro toque.
+
+**Tudo o que se muda fica em `js/replay-config.js`** — texto, aula, material e certificado. Não há variável de ambiente nem SQL para isso: é editar, rodar `npm test && npm run test:e2e`, commit e deploy.
+
+**Para publicar o vídeo**, preencha `aulas[0].video` com o provedor e o id:
+
+| Provedor | `provedor` | `id` |
+|---|---|---|
+| YouTube | `youtube` | só o id (`dQw4w9WgXcQ`), não a URL inteira |
+| Vimeo | `vimeo` | o número (`123456789`) |
+| Panda Video | `panda` | o endereço inteiro do player (`https://player-vz-….tv.pandavideo.com.br/…/embed`) |
+
+Enquanto o id estiver vazio, a página mostra "estamos preparando o replay desta aula" em vez de um quadro preto. O player é montado **no clique do play**: antes disso nada de terceiro carrega, e a `frame-src` da sala (a única página do site que tem uma) aceita só esses três hosts.
+
+**Para publicar o material**, preencha o `link` de cada item de `material.itens` (Drive, site, onde for — só `https`). Item sem link não é desenhado; lista inteira sem link e a seção não aparece.
+
+**O certificado nasce escondido**, como o cliente pediu: a seção existe no HTML com `hidden`, e a imagem do modelo (`/img/certificado-afericao.svg`, 3 horas, com o nome como lugar) já está pronta. Para ligar: `certificado.ativo: true` **e** o `link` do formulário de emissão — as duas coisas, senão continua escondida.
+
+**Sala nova** (outra aula, outro evento): uma entrada em `PAGINAS` do `js/replay-config.js`, com `rota`, `pesquisa` (um id que não seja de outra gravação) e `nome`, mais o arquivo `<rota>.html` — a rota, a CSP, o endpoint de inscrição e a aba do painel nascem sozinhos.
+
+---
+
 ## 6. Checklist depois do deploy
 
 Faça pelo celular, de preferência abrindo o link de dentro do Instagram ou do WhatsApp (é onde o público vai estar).

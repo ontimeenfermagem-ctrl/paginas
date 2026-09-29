@@ -120,6 +120,26 @@ const CSP_PESQUISA = [
   "form-action 'self'"
 ].join("; ");
 
+/*
+ * A sala de aula precisa de UMA coisa a mais que o resto do site: deixar o player do vídeo entrar
+ * num iframe. Por isso ela tem CSP própria, com frame-src fechado nos três provedores que o
+ * js/replay-config.js aceita — e só neles. O iframe é montado no clique do play, então nada de
+ * terceiro carrega antes de a pessoa pedir.
+ */
+const CSP_REPLAY = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' https://connect.facebook.net",
+  // As capas: i.ytimg (YouTube) e i.vimeocdn (Vimeo).
+  "img-src 'self' data: https://www.facebook.com https://i.ytimg.com https://i.vimeocdn.com",
+  "connect-src 'self' https://www.facebook.com https://connect.facebook.net",
+  "style-src 'self' 'unsafe-inline'",
+  "font-src 'self'",
+  "frame-src https://www.youtube-nocookie.com https://www.youtube.com https://player.vimeo.com https://*.tv.pandavideo.com.br",
+  "frame-ancestors 'none'",
+  "base-uri 'self'",
+  "form-action 'self'"
+].join("; ");
+
 // O painel não carrega nada de fora nem roda script inline: mesmo que um texto vindo do banco
 // escapasse do escapeHtml, o navegador não o executaria.
 const CSP_PAINEL = [
@@ -216,6 +236,7 @@ const leadRules = loadBrowserScript("js/lead-rules.js", "EVLeadRules", contextoN
 const pesquisa = loadBrowserScript("js/pesquisa-config.js", "EVPesquisa", contextoNavegador);
 const obrigado = loadBrowserScript("js/obrigado-config.js", "EVObrigado", contextoNavegador);
 const checkout = loadBrowserScript("js/checkout-config.js", "EVCheckout", contextoNavegador);
+const replay = loadBrowserScript("js/replay-config.js", "EVReplay", contextoNavegador);
 
 const PERGUNTAS = pesquisa.PERGUNTAS;
 const POSICAO_FIM = PERGUNTAS.length + 1;
@@ -252,6 +273,32 @@ const ARQUIVO_INSCRICAO = new Map(PAGINAS_CHECKOUT_LOCAIS.map((pagina) => [pagin
 // O caminho do arquivo → a rota pública dele (para og:url, canonical e o cache do estático).
 const ROTA_DA_INSCRICAO = new Map(PAGINAS_CHECKOUT_LOCAIS.map((pagina) => [`${pagina.rota}.html`, pagina.rota]));
 
+// Salas de aula (js/replay-config.js): cada rota serve o arquivo de mesmo nome
+// (/replay-afericao → replay-afericao.html), e a inscrição do formulário de acesso é gravada com o
+// id de pesquisa da página.
+const PAGINAS_REPLAY = Array.from(replay.LISTA);
+const ARQUIVO_REPLAY = new Map(PAGINAS_REPLAY.map((pagina) => [pagina.rota, `${pagina.rota}.html`]));
+const ROTA_DO_REPLAY = new Map(PAGINAS_REPLAY.map((pagina) => [`${pagina.rota}.html`, pagina.rota]));
+const PESQUISAS_REPLAY = new Set(PAGINAS_REPLAY.map((pagina) => pagina.pesquisa));
+
+/*
+ * LISTAS DE "CONTATO + PROFISSÃO" do painel. São as gravações curtas: a página do WhatsApp junto do
+ * lead do Instagram (as duas são "quem disse quem é sem responder a pesquisa"), e uma por sala de
+ * aula. Cada entrada é uma ABA no painel, todas desenhadas pelo mesmo bloco — o que muda é quais
+ * ids de pesquisa entram na conta.
+ */
+const LISTAS_CONTATO = Object.freeze([
+  Object.freeze({
+    id: "perfis",
+    nome: "Perfis atualizados",
+    pesquisas: Object.freeze([PESQUISA_ATUALIZACAO, PESQUISA_MANYCHAT])
+  }),
+  ...PAGINAS_REPLAY.map((pagina) =>
+    Object.freeze({ id: `replay-${pagina.id}`, nome: pagina.nome, pesquisas: Object.freeze([pagina.pesquisa]) })
+  )
+]);
+const LISTA_CONTATO_POR_ID = new Map(LISTAS_CONTATO.map((lista) => [lista.id, lista]));
+
 const routeAliases = new Map([
   [PESQUISA_ROTA, PESQUISA_PAGE],
   [`${PESQUISA_ROTA}/`, PESQUISA_PAGE],
@@ -265,6 +312,10 @@ const routeAliases = new Map([
   ]),
   [PERFIL_ROTA, PERFIL_PAGE],
   [`${PERFIL_ROTA}/`, PERFIL_PAGE],
+  ...Array.from(ARQUIVO_REPLAY).flatMap(([rota, arquivo]) => [
+    [rota, arquivo],
+    [`${rota}/`, arquivo]
+  ]),
   ["/painel", PAINEL_PAGE],
   ["/painel/", PAINEL_PAGE],
   ["/favicon.ico", "/img/favicon-32.png"]
@@ -2296,6 +2347,11 @@ const PERFIS_COLUNAS = [
  */
 function handlePerfisPainel(request, response, options) {
   return rotaDoPainel(request, response, options, "os perfis atualizados", async (params) => {
+    // Qual aba está aberta. Sem ?lista=, a primeira (os perfis) — é o link antigo, de quando havia
+    // uma aba só. Id que não existe é 422, nunca uma consulta com pesquisa inventada.
+    const pedida = safeString(params.get("lista"), 60);
+    const lista = pedida ? LISTA_CONTATO_POR_ID.get(pedida) : LISTAS_CONTATO[0];
+    if (!lista) invalido();
     const { desde, ate } = lerPeriodo(params);
     const busca = lerBusca(params);
     const perfilPedido = params.get("perfil") || null;
@@ -2306,9 +2362,9 @@ function handlePerfisPainel(request, response, options) {
     // O recorte comum: cada consulta parte daqui, então um filtro vale para a lista e para as contagens.
     const recorte = () => {
       const query = new URLSearchParams();
-      // As duas origens de "contato + profissão": a página curta do WhatsApp e a DM do Instagram.
-      // A coluna de origem da lista (utm_source) diz qual é qual, linha por linha.
-      query.set("pesquisa", `in.(${PESQUISA_ATUALIZACAO},${PESQUISA_MANYCHAT})`);
+      // As pesquisas desta aba. Na dos perfis são duas (a página curta do WhatsApp e a DM do
+      // Instagram, separadas pela coluna de origem); numa sala de aula, uma só.
+      query.set("pesquisa", `in.(${lista.pesquisas.join(",")})`);
       if (desde) query.append("criado_em", `gte.${desde}`);
       if (ate) query.append("criado_em", `lt.${ate}`);
       if (busca) {
@@ -2320,13 +2376,13 @@ function handlePerfisPainel(request, response, options) {
       return query;
     };
 
-    const lista = recorte();
-    lista.set("select", PERFIS_COLUNAS);
+    const consultaDaLista = recorte();
+    consultaDaLista.set("select", PERFIS_COLUNAS);
     // id desempata quem entrou no mesmo instante: sem ele, "Carregar mais" repetiria ou pularia gente.
-    lista.set("order", "criado_em.desc,id.desc");
-    lista.set("limit", String(limite));
-    lista.set("offset", String(offset));
-    if (perfilPedido) lista.set("perfil", `eq.${perfilPedido}`);
+    consultaDaLista.set("order", "criado_em.desc,id.desc");
+    consultaDaLista.set("limit", String(limite));
+    consultaDaLista.set("offset", String(offset));
+    if (perfilPedido) consultaDaLista.set("perfil", `eq.${perfilPedido}`);
 
     // Uma contagem por profissão, sem trazer linha nenhuma (limit=0): o número vem no Content-Range.
     // A contagem ignora o filtro de profissão de propósito — os quatro cartões continuam visíveis.
@@ -2341,7 +2397,7 @@ function handlePerfisPainel(request, response, options) {
 
     const pedir = (query) => supabaseRequest(options, `pesquisa_pessoas?${query.toString()}`, { headers: { Prefer: "count=exact" } });
     // Tudo junto: os números e a lista chegam no tempo de uma consulta só.
-    const [listaResponse, ...contagemResponses] = await Promise.all([pedir(lista), ...contagens.map(pedir)]);
+    const [listaResponse, ...contagemResponses] = await Promise.all([pedir(consultaDaLista), ...contagens.map(pedir)]);
 
     const itens = await listaResponse.json();
     if (!Array.isArray(itens)) throw new Error("supabase_unexpected_shape");
@@ -2357,10 +2413,11 @@ function handlePerfisPainel(request, response, options) {
     });
 
     return {
+      lista: lista.id,
       itens,
       // Sem webhook configurado não existe "aviso pendente" — a lista não pode acusar uma entrega
-      // que ninguém pediu.
-      aviso_ativo: Boolean(options.perfilWebhookUrl),
+      // que ninguém pediu. E ele só vale para a página curta do WhatsApp.
+      aviso_ativo: Boolean(options.perfilWebhookUrl) && lista.pesquisas.includes(PESQUISA_ATUALIZACAO),
       total: totalFromContentRange(listaResponse, offset + itens.length),
       // Sem filtro de profissão o total é a soma dos quatro; com filtro, `total` é só a fatia.
       respondentes: porPerfil.reduce((soma, item) => soma + item.total, 0),
@@ -2760,9 +2817,10 @@ export function origemDaRequisicao(headers = {}) {
 // de terceiros ali. `rota` é o endereço público (as 3 páginas de obrigado são o mesmo arquivo).
 function transformPage(source, pathname, pixelId, siteUrl, rota) {
   const inscricao = ROTA_DA_INSCRICAO.get(pathname) || "";
-  if (pathname !== PESQUISA_PAGE && pathname !== OBRIGADO_PAGE && pathname !== PERFIL_PAGE && !inscricao) return source;
+  const sala = ROTA_DO_REPLAY.get(pathname) || "";
+  if (pathname !== PESQUISA_PAGE && pathname !== OBRIGADO_PAGE && pathname !== PERFIL_PAGE && !inscricao && !sala) return source;
   const rotaDaPagina =
-    pathname === OBRIGADO_PAGE ? rota : pathname === PERFIL_PAGE ? PERFIL_ROTA : inscricao || PESQUISA_ROTA;
+    pathname === OBRIGADO_PAGE ? rota : pathname === PERFIL_PAGE ? PERFIL_ROTA : inscricao || sala || PESQUISA_ROTA;
   let saida = metaDoSite(source, siteUrl, rotaDaPagina);
   if (pixelId && !saida.includes("fbq('init'")) saida = saida.replace("</head>", `${metaPixelCode(pixelId)}</head>`);
   return saida;
@@ -2811,8 +2869,11 @@ function staticHeaders(pathname, extension) {
   };
 
   const doPainel = PAINEL_PATHS.has(pathname);
-  // Página de obrigado não é porta de entrada: sem índice de busca (quem chega é quem terminou).
-  if (pathname === OBRIGADO_PAGE || pathname === PERFIL_PAGE) headers["X-Robots-Tag"] = "noindex, nofollow, noarchive";
+  // Página de obrigado e sala de aula não são porta de entrada: sem índice de busca (quem chega é
+  // quem terminou a pesquisa, ou quem recebeu o link da aula).
+  if (pathname === OBRIGADO_PAGE || pathname === PERFIL_PAGE || ROTA_DO_REPLAY.has(pathname)) {
+    headers["X-Robots-Tag"] = "noindex, nofollow, noarchive";
+  }
   if (doPainel) {
     // O X-Robots-Tag repete no cabeçalho o que a meta tag diz no HTML. O no-referrer impede que o
     // endereço do painel vaze quando alguém clica, de dentro dele, no WhatsApp de um lead.
@@ -2822,7 +2883,7 @@ function staticHeaders(pathname, extension) {
   }
 
   if (extension === ".html") {
-    headers["Content-Security-Policy"] = doPainel ? CSP_PAINEL : CSP_PESQUISA;
+    headers["Content-Security-Policy"] = doPainel ? CSP_PAINEL : ROTA_DO_REPLAY.has(pathname) ? CSP_REPLAY : CSP_PESQUISA;
     if (!doPainel) headers["X-Frame-Options"] = "DENY";
   }
 
@@ -2907,7 +2968,8 @@ async function serveStatic(request, response, config) {
     // requisição, e por isso ENTRA NA CHAVE do cache: um Host forjado só muda a página de quem o
     // forjou, nunca a de outra pessoa. A rota também entra: as 3 páginas de obrigado são o mesmo
     // arquivo com og:url/canonical diferentes.
-    const comOrigem = pathname === PESQUISA_PAGE || pathname === OBRIGADO_PAGE || ROTA_DA_INSCRICAO.has(pathname);
+    const comOrigem =
+      pathname === PESQUISA_PAGE || pathname === OBRIGADO_PAGE || ROTA_DA_INSCRICAO.has(pathname) || ROTA_DO_REPLAY.has(pathname);
     const origem = comOrigem ? config.siteUrl || origemDaRequisicao(request.headers) : "";
     const rota = pathname === OBRIGADO_PAGE ? requestedPath.replace(/\/+$/, "") : "";
     // Cada arquivo é transformado e comprimido uma única vez por versão (mtime + tamanho).
@@ -2993,6 +3055,40 @@ function normalizarPixelId(valor) {
 /* contaminados por quem respondeu só uma pergunta.                                             */
 /* ------------------------------------------------------------------------------------------ */
 
+/**
+ * A linha de "contato + profissão", como as três gravações curtas do projeto a montam: a página do
+ * WhatsApp (/atualizacao-perfil), o lead da DM do Instagram (ManyChat) e a inscrição da sala de
+ * aula (/replay-*). Muda o id da pesquisa, o seq, o que vai no jsonb e se dispara aviso; o resto é
+ * igual — uma pergunta só, respondida, 100%.
+ */
+function linhaDeContato({ pesquisaId, id, visitanteId, contato, perfil, respostas, rastreio, seq = 1, finalizou = false }) {
+  return {
+    id,
+    pesquisa: pesquisaId,
+    pesquisa_versao: pesquisa.VERSAO,
+    visitante_id: visitanteId,
+    // seq 1 e fixo nas gravações de uma resposta só: um reenvio nunca "volta no tempo".
+    seq,
+    ...contato,
+    perfil,
+    respostas: respostas || { perfil },
+    pergunta_atual: "fim",
+    etapa_atual: 1,
+    posicao: 1,
+    pergunta_posicao: "fim",
+    etapa_posicao: 1,
+    respondidas: 1,
+    obrigatorias: 1,
+    obrigatorias_respondidas: 1,
+    total_perguntas: 1,
+    progresso_percentual: 100,
+    completa: true,
+    finalizou,
+    tempos: {},
+    ...(rastreio || {})
+  };
+}
+
 async function handleAtualizacaoPerfil(request, response, options) {
   if (request.method !== "POST") return methodNotAllowed(response, "POST");
   if (!acceptsJsonBody(request, response)) return;
@@ -3033,31 +3129,16 @@ async function handleAtualizacaoPerfil(request, response, options) {
   const rastreio = normalizarRastreio(body.rastreio);
   const paginaObrigado = paginaObrigadoDoPerfil(perfil);
 
-  const p = {
+  const p = linhaDeContato({
+    pesquisaId: PESQUISA_ATUALIZACAO,
     id: normalizarUuid(body.id) || randomUUID(),
-    pesquisa: PESQUISA_ATUALIZACAO,
-    pesquisa_versao: pesquisa.VERSAO,
-    visitante_id: normalizarUuid(body.visitante_id),
-    // seq alto e fixo: esta pesquisa tem uma resposta só, e um reenvio nunca "volta no tempo".
-    seq: 1,
-    ...contato,
+    visitanteId: normalizarUuid(body.visitante_id),
+    contato,
     perfil,
-    respostas: { perfil },
-    pergunta_atual: "fim",
-    etapa_atual: 1,
-    posicao: 1,
-    pergunta_posicao: "fim",
-    etapa_posicao: 1,
-    respondidas: 1,
-    obrigatorias: 1,
-    obrigatorias_respondidas: 1,
-    total_perguntas: 1,
-    progresso_percentual: 100,
-    completa: true,
-    finalizou: true,
-    tempos: {},
-    ...rastreio
-  };
+    rastreio,
+    // Esta é a única das três que dispara aviso ao n8n (quando a variável estiver configurada).
+    finalizou: true
+  });
 
   let resultado;
   try {
@@ -3078,6 +3159,78 @@ async function handleAtualizacaoPerfil(request, response, options) {
 
   console.log(`atualizacao-perfil: perfil ${profession} gravado`);
   sendJson(response, 200, { ok: true, profession, obrigado: paginaObrigado ? paginaObrigado.rota : null });
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* POST /api/replay/inscricao — o formulário que libera a sala de aula (/replay-*)             */
+/*                                                                                              */
+/* Mesma régua de contato e MESMA gravação das outras duas páginas curtas; o que muda é o id de   */
+/* pesquisa (um por sala, do js/replay-config.js) e que aqui não sai aviso ao n8n: o próximo      */
+/* passo da pessoa é a própria aula, que abre na hora.                                           */
+/* ------------------------------------------------------------------------------------------ */
+
+async function handleReplayInscricao(request, response, options) {
+  if (request.method !== "POST") return methodNotAllowed(response, "POST");
+  if (!acceptsJsonBody(request, response)) return;
+
+  if (!options.allowSalvar(request)) {
+    sendJson(response, 429, { ok: false, error: "too_many_requests" });
+    return;
+  }
+
+  const body = await readObjectBody(request, response);
+  if (!body) return;
+
+  // Qual sala. Página que não existe no config é 422: nada de gravar pesquisa com id inventado.
+  const sala = replay.paginaPorId(typeof body.pagina === "string" ? body.pagina : "");
+  if (!sala) {
+    sendJson(response, 422, { ok: false, error: "invalid_page" });
+    return;
+  }
+
+  const validacao = validarContato(body.contato);
+  if (validacao.campos) {
+    sendJson(response, 422, { ok: false, error: "invalid_contact", campos: validacao.campos });
+    return;
+  }
+  const { contato } = validacao;
+  if ((await options.checkEmailDomain(leadRules.emailDomain(contato.email))) === "missing") {
+    sendJson(response, 422, { ok: false, error: "invalid_contact", campos: { email: leadRules.MESSAGES.email.domain } });
+    return;
+  }
+
+  // A profissão é conferida contra a pergunta 1 da pesquisa: uma lista só no projeto.
+  const perfil = typeof body.perfil === "string" ? body.perfil.trim() : "";
+  const profession = valorDoPerfil(pesquisa.PERFIL_CODIGO, perfil);
+  if (!profession) {
+    sendJson(response, 422, { ok: false, error: "invalid_perfil" });
+    return;
+  }
+
+  if (!supabaseEnabled(options)) {
+    sendJson(response, 503, { ok: false, error: "database_not_configured" });
+    return;
+  }
+
+  const p = linhaDeContato({
+    pesquisaId: sala.pesquisa,
+    id: normalizarUuid(body.id) || randomUUID(),
+    visitanteId: normalizarUuid(body.visitante_id),
+    contato,
+    perfil,
+    rastreio: normalizarRastreio(body.rastreio)
+  });
+
+  try {
+    await callRpc(options, "pesquisa_salvar", { p });
+  } catch (error) {
+    console.error(`Falha ao salvar a inscrição da sala: ${error?.message || "erro"}`);
+    sendJson(response, 502, { ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  console.log(`replay/inscricao: ${sala.id} · perfil ${profession}`);
+  sendJson(response, 200, { ok: true, pagina: sala.id, profession, acesso: true });
 }
 
 /* ------------------------------------------------------------------------------------------ */
@@ -3217,30 +3370,20 @@ async function handleManychatLead(request, response, options) {
 
   const id = existente ? existente.id : randomUUID();
   const p = {
-    id,
-    pesquisa: PESQUISA_MANYCHAT,
-    pesquisa_versao: pesquisa.VERSAO,
-    // seq sempre maior que o da linha: é o que faz pesquisa_salvar aplicar a atualização.
-    seq: existente ? Number(existente.seq || 0) + 1 : 1,
-    ...contato,
-    perfil,
-    // O id do ManyChat mora no jsonb que já existe (respostas), junto da profissão: nada de coluna
-    // nem migration para guardar um identificador externo.
-    respostas: contactId ? { perfil, manychat_contact_id: contactId } : { perfil },
-    pergunta_atual: "fim",
-    etapa_atual: 1,
-    posicao: 1,
-    pergunta_posicao: "fim",
-    etapa_posicao: 1,
-    respondidas: 1,
-    obrigatorias: 1,
-    obrigatorias_respondidas: 1,
-    total_perguntas: 1,
-    progresso_percentual: 100,
-    completa: true,
-    // Sem finalizou: este lead não dispara aviso ao n8n — o ManyChat já continua a conversa dele.
-    finalizou: false,
-    tempos: {},
+    ...linhaDeContato({
+      pesquisaId: PESQUISA_MANYCHAT,
+      id,
+      visitanteId: null,
+      contato,
+      perfil,
+      // O id do ManyChat mora no jsonb que já existe (respostas), junto da profissão: nada de
+      // coluna nem migration para guardar um identificador externo.
+      respostas: contactId ? { perfil, manychat_contact_id: contactId } : { perfil },
+      // seq sempre maior que o da linha: é o que faz pesquisa_salvar aplicar a atualização.
+      seq: existente ? Number(existente.seq || 0) + 1 : 1,
+      // Sem finalizou: este lead não dispara aviso ao n8n — o ManyChat já continua a conversa dele.
+      finalizou: false
+    }),
     // Origem decidida AQUI, nunca pelo corpo do pedido. São colunas de primeiro toque: numa
     // atualização, o pesquisa_salvar guarda a origem que já estava lá.
     ...ORIGEM_MANYCHAT,
@@ -3486,6 +3629,7 @@ export function createServerApp({
     ["/api/inscricao", handleInscricao],
     ["/api/hotmart/venda", handleHotmartVenda],
     ["/api/integrations/manychat/lead", handleManychatLead],
+    ["/api/replay/inscricao", handleReplayInscricao],
     ["/api/atualizacao-perfil", handleAtualizacaoPerfil],
     ["/api/leads/perfil", handleLeadPerfil],
     ["/api/painel/login", handleLogin],

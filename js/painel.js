@@ -27,6 +27,7 @@
   const OBR = window.EVObrigado || null;
   // As páginas de inscrição com checkout na Hotmart (js/checkout-config.js). Mesma regra.
   const CHK = window.EVCheckout || null;
+  const RPL = window.EVReplay || null;
   const FUSO = "America/Sao_Paulo";
   const LIMITE_LISTA = 50;
   const LIMITE_ABERTAS = 30;
@@ -94,7 +95,35 @@
   const PAGINAS = [
     { id: "pesquisa-icp", conteudo: "pesquisa-icp", nome: "Pesquisa ICP", rota: "/pesquisa-icp", entrar: null, atualizar: null, sair: null, filtrar: null },
     { id: "obrigado", conteudo: "obrigado", nome: "Páginas de obrigado", rota: "/obrigado-*", entrar: null, atualizar: null, sair: null, filtrar: null },
-    { id: "perfis", conteudo: "perfis", nome: "Perfis atualizados", rota: "/atualizacao-perfil", entrar: null, atualizar: null, sair: null, filtrar: null },
+    // Uma aba por LISTA de "contato + profissão": os perfis (página curta do WhatsApp + DM do
+    // Instagram) e uma por sala de aula do js/replay-config.js. Todas desenham no MESMO bloco; o
+    // que muda é o ?lista= que a aba pede e o texto do cabeçalho.
+    {
+      id: "perfis",
+      conteudo: "perfis",
+      nome: "Perfis atualizados",
+      rota: "/atualizacao-perfil",
+      lista: "perfis",
+      sub: "Quem disse quem é sem passar pela pesquisa completa: nome, WhatsApp, e-mail e profissão. Vem de dois caminhos, e a coluna de origem diz qual é cada um — a página curta /atualizacao-perfil, do convite no WhatsApp, e a DM do Instagram, coletada pelo ManyChat (origem instagram · manychat).",
+      entrar: null,
+      atualizar: null,
+      sair: null,
+      filtrar: null
+    },
+    ...(RPL
+      ? Array.from(RPL.LISTA, (sala) => ({
+          id: `replay-${sala.id}`,
+          conteudo: "perfis",
+          nome: sala.nome,
+          rota: sala.rota,
+          lista: `replay-${sala.id}`,
+          sub: "Quem preencheu o formulário para liberar a sala de aula: nome, WhatsApp, e-mail, profissão e a origem de primeiro toque. Cada pessoa entra uma vez, mesmo voltando à página depois.",
+          entrar: null,
+          atualizar: null,
+          sair: null,
+          filtrar: null
+        }))
+      : []),
     ...(PAGINAS_CHECKOUT.length
       ? PAGINAS_CHECKOUT.map((pagina) => ({
           id: `inscricoes-${pagina.id}`,
@@ -3580,8 +3609,16 @@
     seq.perfis++;
   }
 
+  /** A aba de contatos aberta agora (ou a primeira, quando a aberta é outra coisa). */
+  function abaDeContatos() {
+    if (paginaAtual && paginaAtual.conteudo === "perfis") return paginaAtual;
+    return PAGINAS.find((item) => item.conteudo === "perfis") || null;
+  }
+
   function parametrosPerfis() {
     const params = new URLSearchParams();
+    const aba = abaDeContatos();
+    if (aba && aba.lista) params.set("lista", aba.lista);
     const { desde, ate } = intervalo();
     if (desde) params.set("desde", desde);
     if (ate) params.set("ate", ate);
@@ -3693,6 +3730,14 @@
 
   function pintarPerfis() {
     const alvo = $("[data-perfis-corpo]");
+    // O bloco é um só para todas as abas de contato: o título e o apoio vêm do registro.
+    const aba = abaDeContatos();
+    if (aba) {
+      const h2 = $("[data-perfis-h2]");
+      const sub = $("[data-perfis-sub]");
+      if (h2) h2.textContent = aba.nome;
+      if (sub) sub.textContent = aba.sub || "";
+    }
     $("[data-perfis-periodo]").textContent = perf.geradoEm && perf.pronto ? `${rotuloPeriodo()} · atualizado às ${hora(perf.geradoEm)}` : rotuloPeriodo();
     pintarAtualizado();
     if (!perf.pronto) {
@@ -3813,12 +3858,20 @@
     filtrar: () => carregarObrigado()
   });
 
-  Object.assign(paginaDoId("perfis"), {
-    entrar: () => carregarPerfis(),
-    atualizar: () => carregarPerfis(),
-    sair: () => limparPerfis(),
-    filtrar: () => carregarPerfis()
-  });
+  // Todas as abas de contato usam as mesmas funções: quem manda é a aba aberta (abaDeContatos).
+  // Entrar numa aba limpa o que era da outra — número de uma lista não aparece na outra.
+  for (const aba of PAGINAS.filter((item) => item.conteudo === "perfis")) {
+    Object.assign(aba, {
+      entrar: () => {
+        limparPerfis();
+        perf.perfil = "";
+        carregarPerfis();
+      },
+      atualizar: () => carregarPerfis(),
+      sair: () => limparPerfis(),
+      filtrar: () => carregarPerfis()
+    });
+  }
 
   // Uma aba por página de inscrição, todas com as mesmas funções: o que muda é a página que elas
   // entregam a abrirInscricao (null quando o config não carregou; aí a aba só avisa).

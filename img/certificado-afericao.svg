@@ -1,0 +1,150 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 1123 794"
+  width="1123"
+  height="794"
+  role="img"
+  aria-label="Modelo do certificado de participação da Aula de Aferição, com carga horária de 3 horas"
+>
+  <!--
+    certificado-afericao.svg — o MODELO que a seção de certificado mostra na sala de aula.
+
+    É desenho, não documento: o nome é um lugar ("NOME DA PARTICIPANTE"), e quem emite o
+    certificado de verdade é o formulário do link no js/replay-config.js. Fica em SVG, e não em
+    imagem gerada, por três motivos: pesa 4 KB, fica nítido em qualquer tela, e as cores saem dos
+    mesmos valores da identidade (ver css/inscricao.css).
+
+    Fontes: a família aqui é a do sistema de propósito. SVG carregado por <img> não busca fonte de
+    fora, então pedir Parkinsans daria fallback silencioso e alinhamento torto.
+  -->
+  <defs>
+    <linearGradient id="papel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#faf5eb" />
+      <stop offset="1" stop-color="#f4ebdd" />
+    </linearGradient>
+    <linearGradient id="fita" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#704c63" />
+      <stop offset="0.55" stop-color="#b49a67" />
+      <stop offset="1" stop-color="#704c63" />
+    </linearGradient>
+    <linearGradient id="selo" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e2d3b4" />
+      <stop offset="1" stop-color="#b49a67" />
+    </linearGradient>
+  </defs>
+
+  <rect width="1123" height="794" fill="url(#papel)" />
+
+  <!-- Moldura dupla: a de fora em ouro, a de dentro em ameixa clara. -->
+  <rect x="26" y="26" width="1071" height="742" fill="none" stroke="#b49a67" stroke-width="2" rx="10" />
+  <rect x="40" y="40" width="1043" height="714" fill="none" stroke="#e3d5c4" stroke-width="1.5" rx="6" />
+
+  <!-- Fita do topo -->
+  <rect x="40" y="40" width="1043" height="7" fill="url(#fita)" rx="3.5" />
+
+  <!-- Marca: o laço de duas voltas do ícone da escola, redesenhado em traço. -->
+  <g transform="translate(561.5 122)" stroke="#704c63" fill="none" stroke-width="5.5" stroke-linecap="round">
+    <path d="M-34 -6c-10-12-28-10-32 4-4 15 12 26 32 40 20-14 36-25 32-40-4-14-22-16-32-4Z" />
+    <path d="M34 -6c-10-12-28-10-32 4-4 15 12 26 32 40 20-14 36-25 32-40-4-14-22-16-32-4Z" opacity="0.55" />
+  </g>
+
+  <text
+    x="561.5"
+    y="212"
+    text-anchor="middle"
+    font-family="Georgia, 'Times New Roman', serif"
+    font-size="19"
+    letter-spacing="6.5"
+    fill="#6b5768"
+  >
+    ESCOLA ENFERMAGEM DE VALOR
+  </text>
+
+  <text
+    x="561.5"
+    y="288"
+    text-anchor="middle"
+    font-family="Georgia, 'Times New Roman', serif"
+    font-size="52"
+    font-weight="700"
+    letter-spacing="2"
+    fill="#392b38"
+  >
+    CERTIFICADO DE PARTICIPAÇÃO
+  </text>
+
+  <line x1="411.5" y1="316" x2="711.5" y2="316" stroke="#b49a67" stroke-width="1.5" />
+
+  <text
+    x="561.5"
+    y="376"
+    text-anchor="middle"
+    font-family="Georgia, 'Times New Roman', serif"
+    font-size="22"
+    fill="#6b5768"
+  >
+    Certificamos que
+  </text>
+
+  <!-- O nome é um lugar: quem emite preenche. -->
+  <text
+    x="561.5"
+    y="448"
+    text-anchor="middle"
+    font-family="Georgia, 'Times New Roman', serif"
+    font-size="44"
+    font-weight="700"
+    letter-spacing="1.5"
+    fill="#704c63"
+  >
+    NOME DA PARTICIPANTE
+  </text>
+  <line x1="231.5" y1="470" x2="891.5" y2="470" stroke="#e3d5c4" stroke-width="1.5" />
+
+  <text text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="21" fill="#392b38">
+    <tspan x="561.5" y="524">participou da</tspan>
+    <tspan x="561.5" y="558" font-weight="700">Aula de Aferição da profissão por tempo de serviço</tspan>
+    <tspan x="561.5" y="592">com carga horária de 3 (três) horas.</tspan>
+  </text>
+
+  <!-- Selo de carga horária -->
+  <g transform="translate(561.5 648)">
+    <circle r="46" fill="url(#selo)" />
+    <circle r="38" fill="none" stroke="#faf5eb" stroke-width="1.6" />
+    <text
+      text-anchor="middle"
+      font-family="Georgia, 'Times New Roman', serif"
+      font-weight="700"
+      fill="#5d3e52"
+    >
+      <tspan x="0" y="-2" font-size="30">3h</tspan>
+      <tspan x="0" y="22" font-size="11.5" letter-spacing="1.6">DE AULA</tspan>
+    </text>
+  </g>
+
+  <!-- Assinatura -->
+  <g transform="translate(0 678)">
+    <path
+      d="M180 26c14-16 24-22 32-18 9 5-6 24 2 28 9 5 24-16 36-20 9-3 14 4 22 4 9 0 16-6 24-12"
+      fill="none"
+      stroke="#392b38"
+      stroke-width="2.2"
+      stroke-linecap="round"
+    />
+    <line x1="150" y1="46" x2="360" y2="46" stroke="#6b5768" stroke-width="1.2" />
+    <text x="255" y="66" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="15" fill="#392b38">
+      Izabel Gonçalves
+    </text>
+    <text x="255" y="83" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="12.5" fill="#6b5768">
+      Escola Enfermagem de Valor
+    </text>
+
+    <line x1="763" y1="46" x2="973" y2="46" stroke="#6b5768" stroke-width="1.2" />
+    <text x="868" y="66" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="15" fill="#392b38">
+      Data de emissão
+    </text>
+    <text x="868" y="83" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="12.5" fill="#6b5768">
+      dia / mês / ano
+    </text>
+  </g>
+</svg>

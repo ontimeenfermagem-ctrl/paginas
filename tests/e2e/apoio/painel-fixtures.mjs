@@ -24,9 +24,11 @@ vm.runInContext(fs.readFileSync(path.join(RAIZ, "js", "pesquisa-config.js"), "ut
 vm.runInContext(fs.readFileSync(path.join(RAIZ, "js", "obrigado-config.js"), "utf8"), ctx);
 vm.runInContext(fs.readFileSync(path.join(RAIZ, "js", "lead-rules.js"), "utf8"), ctx);
 vm.runInContext(fs.readFileSync(path.join(RAIZ, "js", "checkout-config.js"), "utf8"), ctx);
+vm.runInContext(fs.readFileSync(path.join(RAIZ, "js", "replay-config.js"), "utf8"), ctx);
 export const EV = ctx.EVPesquisa;
 export const OBR = ctx.EVObrigado;
 export const CHK = ctx.EVCheckout;
+export const RPL = ctx.EVReplay;
 
 function rng(seed) {
   let s = seed >>> 0;

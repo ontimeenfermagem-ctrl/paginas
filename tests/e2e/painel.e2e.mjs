@@ -23,7 +23,17 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 import { createServerApp } from "../../server.mjs";
-import { abertas, CHK, comoSqlAntigo, cruzamento, EV, gerar, inscricoesResumo, lista, listaInscricoes, OBR, paginas, painel } from "./apoio/painel-fixtures.mjs";
+import { abertas, CHK, comoSqlAntigo, cruzamento, EV, gerar, inscricoesResumo, lista, listaInscricoes, OBR, paginas, painel, RPL } from "./apoio/painel-fixtures.mjs";
+
+// A faixa de abas, na ordem: a pesquisa, o obrigado, as listas de contato (perfis + uma por sala
+// de aula) e uma por página de inscrição. Sai dos configs, para uma sala nova não quebrar o teste.
+const ABAS_ESPERADAS = [
+  "pesquisa-icp",
+  "obrigado",
+  "perfis",
+  ...RPL.LISTA.map((sala) => `replay-${sala.id}`),
+  ...CHK.LISTA.map((pagina) => `inscricoes-${pagina.id}`)
+];
 
 const RAIZ = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const TELAS = process.env.E2E_SCREENS ? path.join(process.env.E2E_SCREENS, "painel") : "";
@@ -148,6 +158,24 @@ function criarMock(page, { dados = DADOS, logado = true } = {}) {
           return json(200, { ok: true, ...r });
         }
         if (rota === "perfis") {
+          // Uma aba por lista de contato: a dos perfis e uma por sala de aula. O mock devolve
+          // gente só na primeira, para o teste provar que a aba da sala troca o recorte.
+          const lista = q.lista || "perfis";
+          if (!["perfis", ...RPL.LISTA.map((sala) => `replay-${sala.id}`)].includes(lista)) {
+            return json(422, { ok: false, error: "invalid_filters" });
+          }
+          if (lista !== "perfis") {
+            return json(200, {
+              ok: true,
+              lista,
+              itens: [],
+              total: 0,
+              respondentes: 0,
+              aviso_ativo: false,
+              por_perfil: PERFIS_LISTA.map((perfil) => ({ perfil, codigo: EV.codigoDoPerfil(perfil), total: 0 })),
+              gerado_em: new Date().toISOString()
+            });
+          }
           const busca = (q.busca || "").trim().toLowerCase();
           const doRecorte = PERFIS_PESSOAS.filter(
             (p) => !busca || p.nome.toLowerCase().includes(busca) || p.email.toLowerCase().includes(busca)
@@ -919,7 +947,7 @@ cenario("obrigado", async () => {
 
     const abas = await page.$$eval("[data-paginas] [data-pagina]", (els) => els.map((e) => `${e.dataset.pagina}|${e.textContent}`));
     confere(
-      abas.length === 3 + CHK.LISTA.length &&
+      abas.length === ABAS_ESPERADAS.length &&
         abas[0].startsWith("pesquisa-icp|") &&
         abas[1] === "obrigado|Páginas de obrigadorota /obrigado-*" &&
         abas[2] === "perfis|Perfis atualizadosrota /atualizacao-perfil",
@@ -1199,6 +1227,28 @@ cenario("perfis", async () => {
     await page.context().close();
   }
 
+  // A aba de cada sala de aula: mesmo bloco, outro recorte. O título vem do config da sala.
+  {
+    const sala = RPL.LISTA[0];
+    const { page, mock, erros } = await novaPagina(browser, { largura: 1280, altura: 900 });
+    await page.waitForSelector("[data-panel-view]:not([hidden])");
+    await page.click(`[data-paginas] [data-pagina='replay-${sala.id}']`);
+    await esperarCalmo(page);
+    const pedido = mock.chamadas.filter((c) => c.rota === "perfis").pop();
+    confere(
+      pedido && new URLSearchParams(pedido.url.split("?")[1]).get("lista") === `replay-${sala.id}`,
+      `a aba da sala pede a lista dela (${pedido ? pedido.url : "sem pedido"})`
+    );
+    confere((await page.textContent("[data-perfis-h2]")) === sala.nome, `título da aba vem do config (${await page.textContent("[data-perfis-h2]")})`);
+    confere((await page.textContent("[data-perfis-sub]")).includes("sala de aula"), "apoio da aba fala da sala");
+    confere((await page.$$("[data-perfis-corpo] .pessoa")).length === 0, "sala sem ninguém ainda: lista vazia");
+    confere((await page.textContent("[data-perfis-corpo] .vazio")).length > 0, "e o estado vazio aparece");
+    confere((await page.getAttribute(`#pagina-replay-${sala.id}`, "aria-selected")) === "true", "aba da sala selecionada");
+    confere(new URL(page.url()).searchParams.get("pagina") === `replay-${sala.id}`, "a URL guarda a aba da sala");
+    confere(erros.length === 0, `aba da sala sem erro de JS (${erros.join(" | ")})`);
+    await page.context().close();
+  }
+
   // Banco fora: a aba mostra o erro com "Tentar de novo", e o botão refaz o pedido.
   const { page, mock, erros } = await novaPagina(browser, { largura: 1280, altura: 800 });
   await page.waitForSelector("[data-panel-view]:not([hidden])");
@@ -1398,10 +1448,15 @@ cenario("inscricoes", async () => {
     const abas = await page.$$eval("[data-paginas] [data-pagina]", (els) =>
       els.map((e) => ({ id: e.dataset.pagina, dom: e.id, role: e.getAttribute("role"), controla: e.getAttribute("aria-controls"), nome: e.querySelector(".pagina-nome").textContent, rota: e.querySelector(".pagina-rota").textContent }))
     );
-    confere(JSON.stringify(abas.map((a) => a.id)) === JSON.stringify(["pesquisa-icp", "obrigado", "perfis", idAba(VDF), idAba(GPS)]), `${largura}: faixa (${abas.map((a) => a.id).join(" / ")})`);
-    confere(abas[3].nome === VDF.nome && abas[3].rota === `rota ${VDF.rota}`, `${largura}: aba Viver de Furo (${abas[3].nome} · ${abas[3].rota})`);
-    confere(abas[4].nome === GPS.nome && abas[4].rota === "rota io.escolaenfermagemdevalor.com.br/igps_set_lp_26-ingresso", `${largura}: aba GPS com o host (${abas[4].rota})`);
-    confere(abas.slice(3).every((a) => a.role === "tab" && a.controla === "pagina-inscricoes-painel" && a.dom === `pagina-${a.id}`), `${largura}: as duas abas controlam o mesmo bloco`);
+    confere(JSON.stringify(abas.map((a) => a.id)) === JSON.stringify(ABAS_ESPERADAS), `${largura}: faixa (${abas.map((a) => a.id).join(" / ")})`);
+    const daVdf = abas.find((a) => a.id === idAba(VDF));
+    const daGps = abas.find((a) => a.id === idAba(GPS));
+    confere(daVdf.nome === VDF.nome && daVdf.rota === `rota ${VDF.rota}`, `${largura}: aba Viver de Furo (${daVdf.nome} · ${daVdf.rota})`);
+    confere(daGps.nome === GPS.nome && daGps.rota === "rota io.escolaenfermagemdevalor.com.br/igps_set_lp_26-ingresso", `${largura}: aba GPS com o host (${daGps.rota})`);
+    confere(
+      [daVdf, daGps].every((a) => a.role === "tab" && a.controla === "pagina-inscricoes-painel" && a.dom === `pagina-${a.id}`),
+      `${largura}: as duas abas controlam o mesmo bloco`
+    );
     confere(!mock.chamadas.some((c) => c.rota === "inscricoes"), `${largura}: a aba de inscrição só busca dados quando é aberta`);
 
     // Viver de Furo.

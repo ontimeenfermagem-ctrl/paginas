@@ -299,3 +299,43 @@ test("com webhook de perfil configurado, o painel sabe que existe aviso para cob
   const corpo = await (await get("/api/painel/perfis")).json();
   assert.equal(corpo.aviso_ativo, true);
 });
+
+/* ------------------------------------------------------------------ uma aba por lista de contato */
+
+test("?lista= escolhe de qual gravação a aba lê — e a da sala de aula lê só a dela", async () => {
+  const { get, consultas } = await logado({ contar: () => 3 });
+  const corpo = await (await get("/api/painel/perfis?lista=replay-afericao")).json();
+
+  assert.equal(corpo.lista, "replay-afericao");
+  for (const chamada of consultas()) {
+    assert.equal(chamada.params.get("pesquisa"), "in.(replay-afericao)", "só a pesquisa da sala");
+  }
+  // O selo de "aviso pendente" é da página curta do WhatsApp: numa sala ele nunca aparece.
+  assert.equal(corpo.aviso_ativo, false);
+});
+
+test("a aba da sala não acusa aviso pendente nem com o webhook configurado", async () => {
+  const { get } = await logado({ contar: () => 1, perfilWebhookUrl: "https://n8n-de-teste.invalid/webhook/perfil-atualizado" });
+  const daSala = await (await get("/api/painel/perfis?lista=replay-afericao")).json();
+  const dosPerfis = await (await get("/api/painel/perfis?lista=perfis")).json();
+  assert.equal(daSala.aviso_ativo, false, "a sala não dispara aviso nenhum");
+  assert.equal(dosPerfis.aviso_ativo, true);
+});
+
+test("sem ?lista=, responde a primeira aba (o link antigo continua valendo)", async () => {
+  const { get, consultas } = await logado({ contar: () => 0 });
+  const corpo = await (await get("/api/painel/perfis")).json();
+  assert.equal(corpo.lista, "perfis");
+  assert.equal(consultas()[0].params.get("pesquisa"), "in.(atualizacao-perfil,manychat-instagram)");
+});
+
+test("lista que não existe: 422, e nada é consultado", async () => {
+  const { get, consultas } = await logado();
+  // "perfis " com espaço NÃO entra aqui: o safeString apara a borda, e id aparado que existe vale.
+  for (const lista of ["replay-outra", "icp-escola-ev", "toString", "atualizacao-perfil"]) {
+    const resposta = await get(`/api/painel/perfis?lista=${encodeURIComponent(lista)}`);
+    assert.equal(resposta.status, 422, lista);
+    assert.equal((await resposta.json()).error, "invalid_filters", lista);
+  }
+  assert.deepEqual(consultas(), []);
+});

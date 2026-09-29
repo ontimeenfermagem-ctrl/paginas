@@ -1,0 +1,630 @@
+/*
+ * replay.css — só o que a sala de aula (/replay-afericao) acrescenta.
+ *
+ * A base vem de css/inscricao.css (tokens, fundo de papel com grão, campos, erro, sugestão de
+ * e-mail, botão) e de css/atualizacao.css (os cartões de profissão), carregadas antes desta. Aqui
+ * ficam o topo, o hero, o cartão da aula com o player, o material e o certificado.
+ *
+ * A página é mais larga que os formulários do projeto: o vídeo pede espaço. O formulário de acesso
+ * continua numa coluna estreita, que é o que faz ele parecer curto de preencher.
+ */
+
+:root {
+  --sala: 980px;
+  --sala-estreita: 460px;
+}
+
+/* ================================================================== */
+/* Estrutura                                                           */
+/* ================================================================== */
+
+.sala {
+  width: 100%;
+  max-width: calc(var(--sala) + 2 * var(--gutter));
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+.sala-secao {
+  margin: 0 auto;
+  padding: 40px 0 8px;
+  scroll-margin-top: 84px;
+}
+
+.sala-secao + .sala-secao {
+  padding-top: 8px;
+}
+
+.sala-cabeca {
+  margin-bottom: 18px;
+}
+
+.sala-cabeca h2 {
+  margin: 4px 0 6px;
+  color: var(--ink);
+  font-size: clamp(22px, 5.4vw, 30px);
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+
+.sala-cabeca p {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--ink-soft);
+  font-size: 15.5px;
+  line-height: 1.5;
+}
+
+/* ================================================================== */
+/* Topo                                                               */
+/* ================================================================== */
+
+.sala-topo {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  padding-top: var(--seguro-topo);
+  background: color-mix(in oklab, var(--parchment) 88%, transparent);
+  backdrop-filter: saturate(140%) blur(10px);
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+}
+
+.sala-topo-linha {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 62px;
+}
+
+.sala-marca {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.sala-marca img {
+  width: auto;
+  height: 34px;
+}
+
+.sala-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sala-nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  color: var(--ink-soft);
+  font-size: 14.5px;
+  font-weight: 600;
+  text-decoration: none;
+  transition:
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.sala-nav a:hover {
+  background: color-mix(in oklab, var(--ember-glow) 60%, transparent);
+  color: var(--ember-deep);
+}
+
+.sala-nav a:focus-visible {
+  outline: none;
+  box-shadow: var(--anel-foco);
+}
+
+@media (max-width: 520px) {
+  .sala-nav a {
+    padding: 8px 10px;
+    font-size: 14px;
+  }
+  .sala-marca img {
+    height: 28px;
+  }
+}
+
+/* ================================================================== */
+/* Hero                                                              */
+/* ================================================================== */
+
+.sala-hero {
+  padding: 30px 0 6px;
+  text-align: center;
+}
+
+.sala-hero h1 {
+  margin: 6px auto 10px;
+  max-width: 22ch;
+  color: var(--ink);
+  font-size: clamp(28px, 7.4vw, 46px);
+  font-weight: 800;
+  letter-spacing: -0.022em;
+  line-height: 1.08;
+}
+
+.sala-hero h1 b {
+  color: var(--ember);
+  font-weight: 800;
+}
+
+.sala-hero-sub {
+  margin: 0 auto;
+  max-width: 54ch;
+  color: var(--ink-soft);
+  font-size: clamp(15.5px, 3.8vw, 17.5px);
+  line-height: 1.55;
+}
+
+/* Os números: pílulas de papel, uma linha no celular. */
+/* Três colunas iguais, sempre: em 390px as pílulas quebravam 2+1 e a última ficava sozinha. */
+.sala-numeros {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  max-width: 520px;
+  margin: 22px auto 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.sala-numeros li {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 12px 10px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--parchment-soft);
+  box-shadow: var(--sombra-cartao);
+}
+
+.sala-numeros b {
+  color: var(--ember);
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+}
+
+.sala-numeros span {
+  color: var(--ink-soft);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+/* ================================================================== */
+/* Formulário de acesso                                              */
+/* ================================================================== */
+
+.sala-acesso {
+  max-width: calc(var(--sala-estreita) + 2 * var(--gutter));
+  margin: 26px auto 0;
+  padding: 24px 20px 26px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: var(--parchment-soft);
+  box-shadow: var(--sombra-cartao);
+  text-align: left;
+}
+
+.sala-acesso h2 {
+  margin: 0 0 6px;
+  color: var(--ink);
+  font-size: 21px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  text-align: center;
+}
+
+.sala-acesso-apoio {
+  margin: 0 0 18px;
+  color: var(--ink-soft);
+  font-size: 14.5px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+/* O grupo de profissão dentro do formulário. */
+.sala-acesso .opcoes-titulo {
+  margin: 4px 0 8px;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.sala-acesso .opcao {
+  min-height: 52px;
+  padding: 11px 14px;
+  font-size: 15px;
+}
+
+.sala-cadeado {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin: 14px 0 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.sala-cadeado svg {
+  flex: 0 0 auto;
+  color: var(--gold);
+}
+
+/*
+ * O botão da sala é AMEIXA, não verde. Verde, neste projeto, é o botão de entrar no grupo do
+ * WhatsApp (css/obrigado.css) — usar o mesmo aqui prometeria outra coisa. A forma, o tamanho e o
+ * estado de carregando continuam os do css/inscricao.css.
+ */
+.sala .botao-checkout {
+  background: linear-gradient(180deg, var(--ember) 0%, var(--ember-deep) 100%);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.25) inset,
+    0 14px 30px -18px color-mix(in oklab, var(--ember-deep) 75%, transparent);
+}
+
+.sala .botao-checkout:hover {
+  background: linear-gradient(180deg, var(--ember-deep) 0%, #4c3243 100%);
+}
+
+.sala .botao-checkout:focus-visible {
+  box-shadow: var(--anel-foco);
+}
+
+/* ================================================================== */
+/* Aulas                                                              */
+/* ================================================================== */
+
+.sala-aulas {
+  display: grid;
+  gap: 18px;
+}
+
+.sala-aula {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: var(--parchment-soft);
+  box-shadow: var(--sombra-cartao);
+}
+
+/* O quadro do vídeo: 16:9 sem depender de JS para a altura. */
+.sala-quadro {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background:
+    radial-gradient(120% 120% at 50% 0%, color-mix(in oklab, var(--ember) 22%, var(--ink)) 0%, var(--ink) 70%);
+  color: var(--parchment);
+  display: block;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.sala-quadro iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.sala-quadro-capa {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.55;
+}
+
+.sala-quadro-centro {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  gap: 12px;
+  align-content: center;
+  padding: 20px;
+  text-align: center;
+}
+
+.sala-play {
+  display: grid;
+  place-items: center;
+  width: 78px;
+  height: 78px;
+  border-radius: 999px;
+  background: var(--parchment-soft);
+  box-shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.6);
+  transition:
+    transform 160ms ease,
+    background 160ms ease;
+}
+
+.sala-play svg {
+  margin-left: 4px;
+  color: var(--ember);
+}
+
+.sala-quadro:hover .sala-play {
+  transform: scale(1.06);
+  background: #fff;
+}
+
+.sala-quadro:focus-visible {
+  outline: 3px solid var(--ember-glow);
+  outline-offset: -5px;
+}
+
+.sala-quadro-texto {
+  margin: 0;
+  color: color-mix(in oklab, var(--parchment) 88%, transparent);
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* Sem vídeo configurado: nada de quadro clicável, só o aviso honesto. */
+.sala-quadro[aria-disabled="true"] {
+  cursor: default;
+}
+
+.sala-aula-corpo {
+  padding: 18px 20px 20px;
+}
+
+.sala-aula-topo {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.sala-etiqueta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ember-glow) 75%, var(--parchment-soft));
+  color: var(--ember-deep);
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.sala-etiqueta.ouro {
+  background: color-mix(in oklab, var(--gold-soft) 62%, var(--parchment-soft));
+  color: #6b5622;
+}
+
+.sala-aula h3 {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-size: clamp(19px, 4.6vw, 24px);
+  font-weight: 800;
+  letter-spacing: -0.012em;
+  line-height: 1.2;
+}
+
+.sala-aula p {
+  margin: 0;
+  max-width: 68ch;
+  color: var(--ink-soft);
+  font-size: 15.5px;
+  line-height: 1.55;
+}
+
+/* ================================================================== */
+/* Material                                                            */
+/* ================================================================== */
+
+.sala-material {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.sala-baixar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--parchment-soft);
+  box-shadow: var(--sombra-cartao);
+  color: var(--ink);
+  text-decoration: none;
+  transition:
+    transform 140ms ease,
+    border-color 140ms ease;
+}
+
+.sala-baixar:hover {
+  border-color: color-mix(in oklab, var(--ember) 38%, var(--border));
+  transform: translateY(-1px);
+}
+
+.sala-baixar:focus-visible {
+  outline: none;
+  box-shadow: var(--anel-foco);
+}
+
+.sala-baixar-icone {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--ember-glow) 70%, var(--parchment));
+  color: var(--ember-deep);
+}
+
+.sala-baixar-texto {
+  min-width: 0;
+}
+
+.sala-baixar strong {
+  display: block;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.sala-baixar span {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-soft);
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+
+.sala-baixar-tipo {
+  color: var(--gold);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* ================================================================== */
+/* Certificado (escondido por padrão — ver replay-config.js)           */
+/* ================================================================== */
+
+.sala-certificado {
+  display: grid;
+  align-items: center;
+  gap: 22px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: linear-gradient(180deg, var(--parchment-soft), color-mix(in oklab, var(--gold-soft) 22%, var(--parchment-soft)));
+  box-shadow: var(--sombra-cartao);
+}
+
+@media (min-width: 720px) {
+  .sala-certificado {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.sala-certificado img {
+  width: 100%;
+  height: auto;
+  border: 1px solid color-mix(in oklab, var(--gold) 40%, var(--border));
+  border-radius: 12px;
+  background: #fff;
+}
+
+.sala-certificado h2 {
+  margin: 0 0 8px;
+  font-size: clamp(21px, 5vw, 28px);
+}
+
+.sala-certificado p {
+  margin: 0 0 16px;
+  color: var(--ink-soft);
+  font-size: 15.5px;
+  line-height: 1.5;
+}
+
+/* ================================================================== */
+/* Rodapé                                                             */
+/* ================================================================== */
+
+.sala-rodape {
+  margin-top: 40px;
+  padding: 26px var(--gutter) calc(28px + var(--seguro-baixo));
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+
+.sala-rodape img {
+  width: auto;
+  height: 46px;
+  margin-bottom: 8px;
+}
+
+.sala-rodape p {
+  margin: 0 auto;
+  max-width: 60ch;
+  color: var(--ink-soft);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+/* ================================================================== */
+/* Estados                                                            */
+/* ================================================================== */
+
+/* Enquanto a sala está trancada, o que vem depois do formulário não existe para ninguém —
+   nem para o leitor de tela, nem para o Ctrl+F. */
+[hidden] {
+  display: none !important;
+}
+
+.sala-aviso {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px dashed color-mix(in oklab, var(--gold) 55%, var(--border));
+  border-radius: 16px;
+  background: color-mix(in oklab, var(--gold-soft) 26%, var(--parchment-soft));
+  color: var(--ink);
+  font-size: 14.5px;
+  line-height: 1.45;
+}
+
+.sala-aviso svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--gold);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sala-baixar,
+  .sala-play {
+    transition: none;
+  }
+  .sala-baixar:hover {
+    transform: none;
+  }
+  .sala-quadro:hover .sala-play {
+    transform: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .sala-aula,
+  .sala-acesso,
+  .sala-baixar,
+  .sala-numeros li {
+    border-color: var(--ink-soft);
+  }
+}
