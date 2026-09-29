@@ -2019,3 +2019,295 @@ grant execute on function public.inscricoes_resumo(timestamptz, timestamptz, tex
 -- responde 404 até o PostgREST reler o esquema sozinho — e a página passaria os primeiros minutos
 -- sem gravar inscrição nenhuma.
 notify pgrst, 'reload schema';
+
+
+-- ============================================================================================
+-- 7. Comentários das salas de aula (/replay-*)
+--
+-- Um mural por sala: quem liberou a aula escreve, a Iza responde do perfil dela (com selo) e a
+-- moderação esconde ou exclui. Hospedado aqui, sem serviço de terceiro — o texto é nosso, a
+-- remoção é nossa, e a página continua sem carregar nada de fora.
+--
+-- Três decisões que carregam o resto:
+--
+--   1. O ID É DO SERVIDOR (identity), e não do navegador. É o contrário do pesquisa_salvar de
+--      propósito: aqui a linha é PÚBLICA, e chave escolhida pelo cliente entregaria a ele o espaço
+--      de chaves e um oráculo de existência. A paginação do mural é keyset por esse id.
+--   2. A RESPOSTA DA IZA É LINHA FILHA da mesma tabela (resposta_a), com admin = true. Só
+--      replay_comentario_responder escreve true, e ela exige o e-mail da sessão do painel: a rota
+--      pública não tem como forjar o selo.
+--   3. MODERAÇÃO POR ESTADO, não por delete. `oculto` é reversível (o texto continua no painel);
+--      `excluido` é definitivo e APAGA o texto, mantendo a linha para a resposta da Iza não virar
+--      órfã. `delete from` fica reservado a pedido de titular (LGPD), e a self-FK leva a resposta.
+--
+-- Mesmas barreiras das outras seções: RLS ligado e SEM política, revoke de public/anon/
+-- authenticated, grant só para service_role, funções security invoker com search_path fixo.
+--
+-- Este bloco é autossuficiente: pode ser colado sozinho num banco que já tem as seções 1 a 6.
+-- ============================================================================================
+
+create table if not exists public.replay_comentarios (
+  id bigint generated always as identity primary key,
+  criado_em timestamptz not null default now(),
+  -- O id de PESQUISA da sala ('replay-afericao'), que é a mesma chave que separa as salas em
+  -- pesquisa_respostas.pesquisa e nas abas do painel.
+  sala text not null check (sala ~ '^[a-z0-9_-]{1,60}$'),
+  -- Quem escreveu: a linha de pesquisa_respostas que liberou a sala. Não é credencial (o id vem do
+  -- navegador), é rastro — serve para o painel saber com quem falar e para juntar comentário e lead.
+  sessao_id uuid,
+  visitante_id uuid,
+  -- O nome COMPLETO fica aqui para o painel; o público lê só o abreviado da view.
+  autor_nome text not null,
+  autor_exibicao text not null,
+  autor_perfil text,
+  resposta_a bigint references public.replay_comentarios (id) on delete cascade,
+  admin boolean not null default false,
+  admin_email text,
+  texto text not null,
+  estado text not null default 'visivel' check (estado in ('visivel', 'em_revisao', 'oculto', 'excluido')),
+  moderado_em timestamptz,
+  moderado_por text
+);
+
+-- Banco que já tinha a tabela: nada a alterar hoje (a seção nasceu completa).
+
+-- O mural público: comentários de topo visíveis de uma sala, os mais novos primeiro. Parcial
+-- porque é exatamente o recorte que a página lê — respostas e escondidos não pesam no índice.
+create index if not exists replay_comentarios_mural_idx
+  on public.replay_comentarios (sala, id desc)
+  where resposta_a is null and estado = 'visivel';
+-- A moderação: a mesma sala com TODOS os estados.
+create index if not exists replay_comentarios_sala_idx
+  on public.replay_comentarios (sala, id desc);
+-- As respostas de cada comentário de topo.
+create index if not exists replay_comentarios_resposta_idx
+  on public.replay_comentarios (resposta_a)
+  where resposta_a is not null;
+-- "quantos comentários esta pessoa escreveu": o freio de repetição e a ficha do lead no painel.
+create index if not exists replay_comentarios_sessao_idx
+  on public.replay_comentarios (sessao_id, criado_em desc)
+  where sessao_id is not null;
+
+alter table public.replay_comentarios enable row level security;
+-- Tabela criada em public nasce com grant para anon e authenticated no Supabase. O RLS sem
+-- política já bloqueia as linhas; o revoke tira até a possibilidade de tentar.
+revoke all on table public.replay_comentarios from public, anon, authenticated;
+revoke all on sequence public.replay_comentarios_id_seq from public, anon, authenticated;
+grant select, insert, update, delete on table public.replay_comentarios to service_role;
+grant usage, select on sequence public.replay_comentarios_id_seq to service_role;
+
+-- --------------------------------------------------------------------------------------------
+-- replay_comentarios_publicos — o que a página pode ver.
+--
+-- Só 'visivel', e só as colunas que a tela desenha: sem sessao_id, sem visitante_id, sem
+-- admin_email, sem o nome completo. A listagem pública lê SÓ esta view e a do painel lê a tabela —
+-- dois caminhos diferentes para que o filtro de estado seja impossível de esquecer no Node.
+--
+-- security_invoker = true: a view consulta a tabela com a permissão de QUEM consulta, e não do
+-- dono dela. Sem isto, um grant esquecido em anon vazaria o mural inteiro.
+-- --------------------------------------------------------------------------------------------
+drop view if exists public.replay_comentarios_publicos;
+
+create view public.replay_comentarios_publicos
+with (security_invoker = true)
+as
+select
+  id,
+  criado_em,
+  sala,
+  resposta_a,
+  admin,
+  autor_exibicao,
+  autor_perfil,
+  texto
+from public.replay_comentarios
+where estado = 'visivel';
+
+revoke all on table public.replay_comentarios_publicos from public, anon, authenticated;
+grant select on table public.replay_comentarios_publicos to service_role;
+
+-- --------------------------------------------------------------------------------------------
+-- replay_comentario_publicar(p jsonb) — o comentário de quem liberou a sala.
+--
+-- A função IGNORA `admin` e `resposta_a` do payload de propósito: por aqui não se forja selo nem
+-- se responde como a Iza. O nome vem de pesquisa_respostas (que o Node já conferiu), não do corpo.
+--
+-- Freio de repetição por sessão: 20 segundos entre comentários e o mesmo texto recusado em 24h. Não
+-- é segurança (o id de sessão vem do navegador) — é o que impede toque duplo e martelada de F5. O
+-- freio que vale é o limitador por IP do servidor.
+-- --------------------------------------------------------------------------------------------
+create or replace function public.replay_comentario_publicar(p jsonb)
+returns json
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  v_sala text := nullif(btrim(p ->> 'sala'), '');
+  v_sessao uuid := (p ->> 'sessao_id')::uuid;
+  v_texto text := btrim(p ->> 'texto');
+  v_estado text := coalesce(nullif(p ->> 'estado', ''), 'visivel');
+  v_ultimo timestamptz;
+  v_id bigint;
+begin
+  if v_sala is null or v_texto is null or char_length(v_texto) < 2 then
+    raise exception 'comentario_invalido' using errcode = '22023';
+  end if;
+  if v_estado not in ('visivel', 'em_revisao') then
+    raise exception 'estado_invalido' using errcode = '22023';
+  end if;
+
+  if v_sessao is not null then
+    select max(criado_em) into v_ultimo
+    from public.replay_comentarios
+    where sessao_id = v_sessao and sala = v_sala and not admin;
+
+    if v_ultimo is not null and now() - v_ultimo < interval '20 seconds' then
+      raise exception 'muito_rapido' using errcode = '22023';
+    end if;
+
+    if exists (
+      select 1 from public.replay_comentarios
+      where sessao_id = v_sessao and sala = v_sala and texto = v_texto and criado_em > now() - interval '24 hours'
+    ) then
+      raise exception 'repetido' using errcode = '22023';
+    end if;
+  end if;
+
+  insert into public.replay_comentarios (
+    sala, sessao_id, visitante_id, autor_nome, autor_exibicao, autor_perfil, texto, estado
+  ) values (
+    v_sala,
+    v_sessao,
+    (p ->> 'visitante_id')::uuid,
+    p ->> 'autor_nome',
+    p ->> 'autor_exibicao',
+    nullif(p ->> 'autor_perfil', ''),
+    v_texto,
+    v_estado
+  )
+  returning id into v_id;
+
+  return json_build_object('id', v_id, 'estado', v_estado);
+end;
+$$;
+
+-- --------------------------------------------------------------------------------------------
+-- replay_comentario_responder(p jsonb) — a resposta da Iza.
+--
+-- Só esta função escreve admin = true, e ela exige o e-mail da sessão do painel (o Node só chama
+-- depois de validar o cookie). Responde a uma RAIZ: resposta de resposta é recusada, então o mural
+-- tem um nível e não uma árvore.
+-- --------------------------------------------------------------------------------------------
+create or replace function public.replay_comentario_responder(p jsonb)
+returns json
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  v_sala text := nullif(btrim(p ->> 'sala'), '');
+  v_alvo bigint := (p ->> 'resposta_a')::bigint;
+  v_texto text := btrim(p ->> 'texto');
+  v_email text := nullif(btrim(p ->> 'admin_email'), '');
+  v_raiz record;
+  v_id bigint;
+begin
+  if v_sala is null or v_alvo is null or v_texto is null or char_length(v_texto) < 2 then
+    raise exception 'comentario_invalido' using errcode = '22023';
+  end if;
+  if v_email is null then
+    raise exception 'sem_admin' using errcode = '22023';
+  end if;
+
+  select id, resposta_a, estado into v_raiz
+  from public.replay_comentarios
+  where id = v_alvo and sala = v_sala;
+
+  if not found then
+    raise exception 'comentario_nao_encontrado' using errcode = '22023';
+  end if;
+  if v_raiz.resposta_a is not null then
+    raise exception 'resposta_de_resposta' using errcode = '22023';
+  end if;
+
+  insert into public.replay_comentarios (
+    sala, resposta_a, admin, admin_email, autor_nome, autor_exibicao, autor_perfil, texto, estado
+  ) values (
+    v_sala,
+    v_alvo,
+    true,
+    v_email,
+    p ->> 'autor_nome',
+    p ->> 'autor_exibicao',
+    nullif(p ->> 'autor_perfil', ''),
+    v_texto,
+    'visivel'
+  )
+  returning id into v_id;
+
+  return json_build_object('id', v_id, 'resposta_a', v_alvo);
+end;
+$$;
+
+-- --------------------------------------------------------------------------------------------
+-- replay_comentario_moderar(p jsonb) — esconder, mostrar de novo e excluir.
+--
+-- Esconder um comentário de topo esconde as RESPOSTAS dele no mesmo update: senão a resposta da
+-- Iza continuaria no ar sozinha, sem a pergunta. Excluir apaga o texto e mantém a linha.
+-- --------------------------------------------------------------------------------------------
+create or replace function public.replay_comentario_moderar(p jsonb)
+returns json
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  v_sala text := nullif(btrim(p ->> 'sala'), '');
+  v_id bigint := (p ->> 'id')::bigint;
+  v_acao text := nullif(btrim(p ->> 'acao'), '');
+  v_por text := nullif(btrim(p ->> 'por'), '');
+  v_estado text;
+  v_afetadas int;
+begin
+  if v_sala is null or v_id is null then
+    raise exception 'comentario_invalido' using errcode = '22023';
+  end if;
+  v_estado := case v_acao
+    when 'esconder' then 'oculto'
+    when 'mostrar' then 'visivel'
+    when 'excluir' then 'excluido'
+    else null
+  end;
+  if v_estado is null then
+    raise exception 'acao_invalida' using errcode = '22023';
+  end if;
+
+  if not exists (select 1 from public.replay_comentarios where id = v_id and sala = v_sala) then
+    raise exception 'comentario_nao_encontrado' using errcode = '22023';
+  end if;
+
+  update public.replay_comentarios
+     set estado = v_estado,
+         -- Excluir é definitivo: o texto sai do banco, e a linha fica para a resposta da Iza não
+         -- virar órfã e para o painel continuar sabendo que houve moderação.
+         texto = case when v_acao = 'excluir' then '' else texto end,
+         moderado_em = now(),
+         moderado_por = v_por
+   where (id = v_id or resposta_a = v_id)
+     and sala = v_sala;
+
+  get diagnostics v_afetadas = row_count;
+  return json_build_object('id', v_id, 'estado', v_estado, 'linhas', v_afetadas);
+end;
+$$;
+
+revoke all on function public.replay_comentario_publicar(jsonb) from public, anon, authenticated;
+revoke all on function public.replay_comentario_responder(jsonb) from public, anon, authenticated;
+revoke all on function public.replay_comentario_moderar(jsonb) from public, anon, authenticated;
+grant execute on function public.replay_comentario_publicar(jsonb) to service_role;
+grant execute on function public.replay_comentario_responder(jsonb) to service_role;
+grant execute on function public.replay_comentario_moderar(jsonb) to service_role;
+
+-- De novo, porque este bloco pode ser colado sozinho.
+notify pgrst, 'reload schema';

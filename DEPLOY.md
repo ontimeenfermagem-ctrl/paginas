@@ -529,6 +529,19 @@ Enquanto o id estiver vazio, a página mostra "estamos preparando o replay desta
 
 **O certificado nasce escondido**, como o cliente pediu: a seção existe no HTML com `hidden`, e a imagem do modelo (`/img/certificado-afericao.svg`, 3 horas, com o nome como lugar) já está pronta. Para ligar: `certificado.ativo: true` **e** o `link` do formulário de emissão — as duas coisas, senão continua escondida.
 
+### O mural de comentários
+
+Hospedado por nós: o texto fica no nosso banco (`replay_comentarios`, seção 7 do `supabase.sql`, **já aplicada**), a remoção é nossa e a página continua sem carregar nada de fora.
+
+- **Quem escreve:** só quem liberou a sala. O nome que aparece é o do cadastro, abreviado pelo servidor (“Maria da Silva” → “Maria S.”); o nome completo e o WhatsApp ficam guardados para o painel.
+- **Quem está de fora** vê apenas a contagem (“já são N comentários”), nunca o texto de ninguém.
+- **A moderação** aparece para quem está logado no `/painel`: os três pontinhos em cada comentário abrem **Responder como Izabel**, **Esconder do público** e **Excluir** (este pede dois toques, porque menu de três pontinhos apaga por engano). Esconder um comentário esconde as respostas dele junto; excluir apaga o texto e mantém a linha, para a resposta da Iza não virar órfã.
+- **A resposta da Iza** sai com a foto dela, o selo azul de verificado e o papel — tudo vindo do `js/replay-config.js`, nunca da API: forjar o selo exigiria um deploy. O e-mail de quem respondeu fica registrado na linha.
+- **Comentário com link** entra em conferência em vez de ir ao ar (`comentarios.moderarLinks`), e aparece no mural só para o admin, marcado. Aprovar é o “Publicar de novo” do mesmo menu.
+- **Limites:** 10 comentários por minuto por IP, 120 leituras por minuto, 20 segundos entre comentários da mesma pessoa, mesmo texto recusado em 24 h e teto de 1.200 caracteres.
+
+Para desligar o mural de uma sala: `comentarios.ativo: false` no config.
+
 **Sala nova** (outra aula, outro evento): uma entrada em `PAGINAS` do `js/replay-config.js`, com `rota`, `pesquisa` (um id que não seja de outra gravação) e `nome`, mais o arquivo `<rota>.html` — a rota, a CSP, o endpoint de inscrição e a aba do painel nascem sozinhos.
 
 ---

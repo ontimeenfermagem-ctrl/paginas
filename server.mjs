@@ -563,7 +563,7 @@ function supabaseEnabled(config) {
   return Boolean(config.supabaseUrl && config.supabaseKey);
 }
 
-async function supabaseRequest(config, restPath, { method = "GET", body, headers = {} } = {}) {
+async function supabaseRequest(config, restPath, { method = "GET", body, headers = {}, errosConhecidos } = {}) {
   const url = new URL(`/rest/v1/${restPath}`, config.supabaseUrl);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SUPABASE_TIMEOUT_MS);
@@ -582,17 +582,31 @@ async function supabaseRequest(config, restPath, { method = "GET", body, headers
       signal: controller.signal
     });
 
-    // Só o status vai para o erro (e dali para o log): o corpo de erro do PostgREST pode citar
-    // valores da linha, e dado pessoal não entra em log.
-    if (!response.ok) throw new Error(`supabase_${response.status}`);
+    if (!response.ok) {
+      /*
+       * Só o status vai para a mensagem do erro (e dali para o log): o corpo do PostgREST pode
+       * citar valores da linha, e dado pessoal não entra em log.
+       *
+       * `errosConhecidos` é a exceção estreita: quem chama passa uma lista de nomes que as NOSSAS
+       * funções levantam de propósito ('muito_rapido', 'resposta_de_resposta'...) e, se um deles
+       * aparecer no corpo, ele volta em `error.motivo`. Nada mais do corpo é lido, e o corpo
+       * continua fora do log — é assim que o handler consegue responder 429 em vez de 502.
+       */
+      let motivo = "";
+      if (Array.isArray(errosConhecidos) && errosConhecidos.length) {
+        const texto = await response.text().catch(() => "");
+        motivo = errosConhecidos.find((nome) => texto.includes(nome)) || "";
+      }
+      throw Object.assign(new Error(`supabase_${response.status}`), motivo ? { motivo } : {});
+    }
     return response;
   } finally {
     clearTimeout(timeout);
   }
 }
 
-async function callRpc(config, name, args) {
-  return await supabaseRequest(config, `rpc/${name}`, { method: "POST", body: args });
+async function callRpc(config, name, args, { errosConhecidos } = {}) {
+  return await supabaseRequest(config, `rpc/${name}`, { method: "POST", body: args, errosConhecidos });
 }
 
 // A função devolve um objeto. Qualquer outra coisa é banco fora do esperado, e é melhor dizer
@@ -3188,6 +3202,430 @@ async function handleAtualizacaoPerfil(request, response, options) {
 }
 
 /* ------------------------------------------------------------------------------------------ */
+/* O mural das salas de aula: comentários, resposta da Iza e moderação                         */
+/*                                                                                              */
+/* Três regras carregam a segurança disto:                                                      */
+/*                                                                                              */
+/*  1. O NOME de quem comenta nunca vem do corpo do pedido: é lido no banco pelo id de sessão   */
+/*     que o formulário de acesso gravou. Ninguém se apresenta como "Izabel Gonçalves".         */
+/*  2. A página pública NÃO decide nada sobre admin: ela pergunta no mesmo GET, e o servidor só  */
+/*     responde `admin: true` quando o cookie do painel chega válido.                           */
+/*  3. O selo e a resposta da Iza nascem da coluna `admin`, que só a função de responder escreve */
+/*     — e ela exige o e-mail da sessão. Forjar selo exigiria um deploy.                         */
+/* ------------------------------------------------------------------------------------------ */
+
+/** A sessão do painel, sem responder 401: serve para saber se quem olha é admin. */
+function sessaoOpcional(request, options) {
+  if (!painelConfigured(options)) return null;
+  return readSession(parseCookies(request.headers.cookie).get(PAINEL_COOKIE), options.painelSessaoSegredo, options.now());
+}
+
+/**
+ * Origin de outro site é recusado nos POSTs destrutivos do painel. O cookie já é SameSite=Strict e
+ * o corpo é JSON (que formulário de outro site não manda), mas esta é a terceira camada e custa
+ * três linhas. Requisição sem Origin (ferramenta, navegação) passa.
+ */
+function mesmaOrigem(request) {
+  const origem = normalizarOrigem(primeiroValor(request.headers.origin));
+  if (!origem) return true;
+  return origem === normalizarOrigem(origemDaRequisicao(request.headers));
+}
+
+/** "Maria da Silva" -> "Maria S." É isto que aparece no público; o nome inteiro fica para o painel. */
+function nomeDeExibicao(nome) {
+  const partes = String(nome || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!partes.length) return "Aluna";
+  if (partes.length === 1) return partes[0];
+  return `${partes[0]} ${partes[partes.length - 1][0].toUpperCase()}.`;
+}
+
+// Controles e invisíveis: o que some do texto antes de gravar.
+const COMENTARIO_CONTROLES = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
+const COMENTARIO_INVISIVEIS = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g;
+
+/**
+ * A régua do texto do comentário. Tira controles, zero-width e overrides de bidi (o truque de
+ * inverter a direção do texto para fingir outro conteúdo), colapsa quebras, corta em 12 linhas e
+ * recusa texto que é quase só marca combinante — o "zalgo" que estoura a altura da linha.
+ * Devolve "" para o que não presta.
+ */
+function normalizarComentario(valor) {
+  if (typeof valor !== "string") return "";
+  let texto = valor.normalize("NFC").replace(COMENTARIO_CONTROLES, "").replace(COMENTARIO_INVISIVEIS, "");
+  texto = texto.replace(/\r\n?/g, "\n").replace(/\n{3,}/g, "\n\n").split("\n").slice(0, 12).join("\n").trim();
+  if (texto.length > COMENTARIO_TEXTO_MAX) texto = texto.slice(0, COMENTARIO_TEXTO_MAX).trim();
+  if (!texto) return "";
+  const marcas = (texto.match(/\p{M}/gu) || []).length;
+  if (marcas / texto.length > 0.2) return "";
+  return texto;
+}
+
+/** Link no texto vai para conferência em vez de ir ao ar: é o vetor de spam. */
+function temLink(texto) {
+  return /(https?:\/\/|www\.)/i.test(String(texto || ""));
+}
+
+/** A sala pedida no corpo ou na query. null = não existe no config. */
+function salaPedida(valor) {
+  return replay.paginaPorId(typeof valor === "string" ? valor : "");
+}
+
+/**
+ * Os nomes que as funções do mural levantam de propósito. A lista é passada ao callRpc, que é o
+ * único jeito de um pedaço do corpo de erro do PostgREST chegar até aqui — e chega só o nome.
+ */
+const ERROS_DO_MURAL = Object.freeze([
+  "muito_rapido",
+  "repetido",
+  "comentario_invalido",
+  "comentario_nao_encontrado",
+  "resposta_de_resposta",
+  "acao_invalida",
+  "sem_admin",
+  "estado_invalido"
+]);
+
+/** O nome do erro que a função do banco levantou, ou "" quando foi outra coisa (502). */
+function erroDoBanco(error) {
+  const motivo = error && typeof error.motivo === "string" ? error.motivo : "";
+  return ERROS_DO_MURAL.includes(motivo) ? motivo : "";
+}
+
+/**
+ * GET /api/replay/comentarios?pagina=&sessao_id=&antes=&limite=
+ *
+ * Sem sessão do painel e sem acesso conferido, devolve SÓ a contagem: nenhum texto de terceiro sai
+ * para quem não liberou a sala. Com o cookie do painel, devolve também o que está escondido e em
+ * conferência, com o estado de cada linha — é o que faz os três pontinhos aparecerem.
+ */
+async function handleReplayComentarios(request, response, options) {
+  if (request.method !== "GET") return methodNotAllowed(response, "GET");
+
+  const vazio = (extra = {}) =>
+    sendJson(response, 200, { ok: true, total: 0, admin: false, itens: [], proximo: null, ...extra }, { Vary: "Cookie" });
+
+  const params = new URL(request.url, "http://localhost").searchParams;
+  const sala = salaPedida(params.get("pagina"));
+  if (!sala) {
+    sendJson(response, 422, { ok: false, error: "invalid_page" });
+    return;
+  }
+  if (!options.allowComentarios(request)) {
+    sendJson(response, 429, { ok: false, error: "too_many_requests" });
+    return;
+  }
+  // Banco fora do ar num GET público não grita erro: a seção simplesmente não aparece.
+  if (!supabaseEnabled(options)) return vazio();
+
+  const admin = Boolean(sessaoOpcional(request, options));
+  const sessaoId = normalizarUuid(params.get("sessao_id"));
+  const limite = lerInteiro(params, "limite", { padrao: 10, minimo: 1, maximo: COMENTARIOS_POR_PAGINA_MAX });
+  const antes = lerInteiro(params, "antes", { padrao: 0, minimo: 0 });
+
+  const alvo = admin ? "replay_comentarios" : "replay_comentarios_publicos";
+  const colunas = admin
+    ? "id,criado_em,resposta_a,admin,autor_exibicao,autor_perfil,texto,estado"
+    : "id,criado_em,resposta_a,admin,autor_exibicao,autor_perfil,texto";
+
+  try {
+    // A contagem sai do PÚBLICO mesmo para o admin: é o número que a página mostra de fora.
+    const contagem = new URLSearchParams({ select: "id", sala: `eq.${sala.pesquisa}`, resposta_a: "is.null", limit: "0" });
+    const raizes = new URLSearchParams({ select: colunas, sala: `eq.${sala.pesquisa}`, resposta_a: "is.null", order: "id.desc", limit: String(limite) });
+    if (antes) raizes.set("id", `lt.${antes}`);
+
+    const [contagemResposta, raizesResposta] = await Promise.all([
+      supabaseRequest(options, `replay_comentarios_publicos?${contagem}`, { headers: { Prefer: "count=exact" } }),
+      // Quem não tem acesso nem chega a pedir as linhas.
+      admin || sessaoId ? supabaseRequest(options, `${alvo}?${raizes}`) : Promise.resolve(null)
+    ]);
+    const total = totalFromContentRange(contagemResposta, 0);
+
+    // Acesso conferido: a linha da sala com aquele id de sessão existe? (É rastro, não credencial:
+    // serve para não servir o mural a quem nunca preencheu a porta.)
+    let podeLer = admin;
+    if (!podeLer && sessaoId) {
+      const linha = await primeiraLinha(
+        options,
+        `pesquisa_respostas?id=eq.${encodeURIComponent(sessaoId)}&pesquisa=eq.${encodeURIComponent(sala.pesquisa)}&select=id&limit=1`
+      );
+      podeLer = Boolean(linha);
+    }
+    if (!podeLer || !raizesResposta) return vazio({ total });
+
+    const itens = await raizesResposta.json();
+    if (!Array.isArray(itens)) throw new Error("supabase_unexpected_shape");
+
+    // As respostas das raízes desta página, numa consulta só.
+    let respostas = [];
+    if (itens.length) {
+      const ids = itens.map((item) => item.id).join(",");
+      const consulta = new URLSearchParams({ select: colunas, sala: `eq.${sala.pesquisa}`, resposta_a: `in.(${ids})`, order: "id.asc" });
+      respostas = await (await supabaseRequest(options, `${alvo}?${consulta}`)).json();
+      if (!Array.isArray(respostas)) respostas = [];
+    }
+
+    const porRaiz = new Map();
+    for (const resposta of respostas) {
+      const lista = porRaiz.get(resposta.resposta_a) || [];
+      lista.push(comentarioPublico(resposta));
+      porRaiz.set(resposta.resposta_a, lista);
+    }
+
+    sendJson(
+      response,
+      200,
+      {
+        ok: true,
+        pagina: sala.id,
+        total,
+        admin,
+        itens: itens.map((item) => ({ ...comentarioPublico(item), respostas: porRaiz.get(item.id) || [] })),
+        proximo: itens.length === limite ? itens[itens.length - 1].id : null,
+        gerado_em: new Date(options.now()).toISOString()
+      },
+      { Vary: "Cookie" }
+    );
+  } catch (error) {
+    console.error(`Falha ao listar o mural: ${error?.message || "erro"}`);
+    // De novo: página de lead não mostra erro de infraestrutura.
+    vazio();
+  }
+}
+
+/** A linha como a página recebe: nome abreviado, sem sessão, sem e-mail, sem nome completo. */
+function comentarioPublico(linha) {
+  return {
+    id: linha.id,
+    criado_em: linha.criado_em,
+    admin: linha.admin === true,
+    autor: { nome: linha.autor_exibicao, perfil: linha.autor_perfil || null },
+    texto: linha.texto || "",
+    ...(linha.estado ? { estado: linha.estado } : {})
+  };
+}
+
+/**
+ * POST /api/replay/comentario — quem liberou a sala escreve.
+ *
+ * O nome NÃO vem do corpo: sai da linha de pesquisa_respostas daquele id de sessão. Comentário com
+ * link entra em conferência em vez de ir ao ar.
+ */
+async function handleReplayComentario(request, response, options) {
+  if (request.method !== "POST") return methodNotAllowed(response, "POST");
+  if (!acceptsJsonBody(request, response)) return;
+  if (!options.allowComentario(request)) {
+    sendJson(response, 429, { ok: false, error: "too_many_requests" });
+    return;
+  }
+
+  const body = await readObjectBody(request, response);
+  if (!body) return;
+
+  const sala = salaPedida(body.pagina);
+  if (!sala) {
+    sendJson(response, 422, { ok: false, error: "invalid_page" });
+    return;
+  }
+
+  const texto = normalizarComentario(body.texto);
+  if (!texto || texto.length < 2) {
+    sendJson(response, 422, { ok: false, error: "invalid_text", campos: { texto: "Escreva pelo menos duas letras." } });
+    return;
+  }
+
+  if (!supabaseEnabled(options)) {
+    sendJson(response, 503, { ok: false, error: "database_not_configured" });
+    return;
+  }
+
+  const sessaoId = normalizarUuid(body.sessao_id);
+  if (!sessaoId) {
+    sendJson(response, 403, { ok: false, error: "acesso_nao_liberado" });
+    return;
+  }
+
+  let autor;
+  try {
+    autor = await primeiraLinha(
+      options,
+      `pesquisa_respostas?id=eq.${encodeURIComponent(sessaoId)}&pesquisa=eq.${encodeURIComponent(sala.pesquisa)}&select=id,nome,perfil&limit=1`
+    );
+  } catch (error) {
+    console.error(`Falha ao conferir o acesso do comentário: ${error?.message || "erro"}`);
+    sendJson(response, 502, { ok: false, error: "database_unavailable" });
+    return;
+  }
+  if (!autor) {
+    sendJson(response, 403, { ok: false, error: "acesso_nao_liberado" });
+    return;
+  }
+
+  const emConferencia = temLink(texto) && (sala.comentarios || {}).moderarLinks !== false;
+
+  let resultado;
+  try {
+    resultado = await readObjectResponse(
+      await callRpc(
+        options,
+        "replay_comentario_publicar",
+        {
+          p: {
+          sala: sala.pesquisa,
+          sessao_id: sessaoId,
+          visitante_id: normalizarUuid(body.visitante_id),
+          autor_nome: autor.nome,
+          autor_exibicao: nomeDeExibicao(autor.nome),
+          autor_perfil: autor.perfil || null,
+          texto,
+            estado: emConferencia ? "em_revisao" : "visivel"
+          }
+        },
+        { errosConhecidos: ERROS_DO_MURAL }
+      )
+    );
+  } catch (error) {
+    const nome = erroDoBanco(error);
+    if (nome === "muito_rapido" || nome === "repetido") {
+      sendJson(response, 429, { ok: false, error: nome });
+      return;
+    }
+    if (nome) {
+      sendJson(response, 422, { ok: false, error: "invalid_text", campos: { texto: "Confere o texto do comentário." } });
+      return;
+    }
+    console.error(`Falha ao publicar comentário: ${error?.message || "erro"}`);
+    sendJson(response, 502, { ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  console.log(`replay/comentario: ${sala.id} · ${emConferencia ? "em conferência" : "publicado"}`);
+  sendJson(response, 201, {
+    ok: true,
+    comentario: { id: resultado.id, estado: resultado.estado },
+    ...(emConferencia ? { aviso: "em_conferencia" } : {})
+  });
+}
+
+/** O molde dos dois POSTs de admin: método, Origin, sessão do painel e banco. */
+async function rotaDeAdmin(request, response, options, executar) {
+  if (request.method !== "POST") return methodNotAllowed(response, "POST");
+  if (!mesmaOrigem(request)) {
+    sendJson(response, 403, { ok: false, error: "origin_not_allowed" });
+    return;
+  }
+  if (!acceptsJsonBody(request, response)) return;
+  // requirePainel já responde 503 sem painel configurado e 401 sem sessão válida.
+  const sessao = requirePainel(request, response, options);
+  if (!sessao) return;
+  if (!options.allowPainelAcao(request)) {
+    sendJson(response, 429, { ok: false, error: "too_many_requests" });
+    return;
+  }
+  if (!supabaseEnabled(options)) {
+    sendJson(response, 503, { ok: false, error: "database_not_configured" });
+    return;
+  }
+  const body = await readObjectBody(request, response);
+  if (!body) return;
+  const sala = salaPedida(body.pagina);
+  if (!sala) {
+    sendJson(response, 422, { ok: false, error: "invalid_page" });
+    return;
+  }
+  await executar({ sala, body, sessao });
+}
+
+/** POST /api/painel/replay/comentario — esconder, mostrar de novo, excluir. */
+function handleReplayModerar(request, response, options) {
+  return rotaDeAdmin(request, response, options, async ({ sala, body, sessao }) => {
+    const id = Number(body.id);
+    const acao = typeof body.acao === "string" ? body.acao : "";
+    if (!Number.isSafeInteger(id) || id <= 0 || !["esconder", "mostrar", "excluir"].includes(acao)) {
+      sendJson(response, 422, { ok: false, error: "invalid_acao" });
+      return;
+    }
+    try {
+      const resultado = await readObjectResponse(
+        await callRpc(
+          options,
+          "replay_comentario_moderar",
+          { p: { sala: sala.pesquisa, id, acao, por: sessao.email || "painel" } },
+          { errosConhecidos: ERROS_DO_MURAL }
+        )
+      );
+      console.log(`replay/moderar: ${sala.id} · ${acao} · comentário ${id}`);
+      sendJson(response, 200, { ok: true, id, estado: resultado.estado, linhas: resultado.linhas });
+    } catch (error) {
+      const nome = erroDoBanco(error);
+      if (nome === "comentario_nao_encontrado") {
+        sendJson(response, 404, { ok: false, error: nome });
+        return;
+      }
+      if (nome) {
+        sendJson(response, 422, { ok: false, error: nome });
+        return;
+      }
+      console.error(`Falha ao moderar comentário: ${error?.message || "erro"}`);
+      sendJson(response, 502, { ok: false, error: "database_unavailable" });
+    }
+  });
+}
+
+/** POST /api/painel/replay/resposta — a resposta da Iza, com selo. */
+function handleReplayResponder(request, response, options) {
+  return rotaDeAdmin(request, response, options, async ({ sala, body, sessao }) => {
+    const alvo = Number(body.respondendo_id);
+    const texto = normalizarComentario(body.texto);
+    if (!Number.isSafeInteger(alvo) || alvo <= 0) {
+      sendJson(response, 422, { ok: false, error: "invalid_acao" });
+      return;
+    }
+    if (!texto || texto.length < 2) {
+      sendJson(response, 422, { ok: false, error: "invalid_text", campos: { texto: "Escreva pelo menos duas letras." } });
+      return;
+    }
+    try {
+      const resultado = await readObjectResponse(
+        await callRpc(
+          options,
+          "replay_comentario_responder",
+          {
+            p: {
+            sala: sala.pesquisa,
+            resposta_a: alvo,
+            texto,
+            // O nome e o papel saem do CONFIG, não do corpo: a identidade da Iza mora no código.
+            autor_nome: replay.ADMIN.nome,
+            autor_exibicao: replay.ADMIN.nome,
+            autor_perfil: replay.ADMIN.papel,
+              admin_email: sessao.email || "painel"
+            }
+          },
+          { errosConhecidos: ERROS_DO_MURAL }
+        )
+      );
+      console.log(`replay/resposta: ${sala.id} · resposta ao comentário ${alvo}`);
+      sendJson(response, 201, { ok: true, comentario: { id: resultado.id, resposta_a: alvo, admin: true } });
+    } catch (error) {
+      const nome = erroDoBanco(error);
+      if (nome === "comentario_nao_encontrado") {
+        sendJson(response, 404, { ok: false, error: nome });
+        return;
+      }
+      if (nome) {
+        sendJson(response, 422, { ok: false, error: nome });
+        return;
+      }
+      console.error(`Falha ao responder comentário: ${error?.message || "erro"}`);
+      sendJson(response, 502, { ok: false, error: "database_unavailable" });
+    }
+  });
+}
+
+/* ------------------------------------------------------------------------------------------ */
 /* POST /api/replay/inscricao — o formulário que libera a sala de aula (/replay-*)             */
 /*                                                                                              */
 /* Mesma régua de contato e MESMA gravação das outras duas páginas curtas; o que muda é o id de   */
@@ -3462,6 +3900,17 @@ const PALAVRA_DO_ERRO = Object.freeze({
   database_unavailable: "erro"
 });
 
+/*
+ * O mural das salas. Os tetos são apertados de propósito: o allowSalvar (600/min) foi calibrado
+ * para autosave de formulário, não para texto público — e o id de sessão que a página manda NÃO é
+ * credencial (o navegador escolhe), então o freio que vale de verdade é este, por IP.
+ */
+const COMENTARIO_RATE_LIMIT_MAX = 10;
+const COMENTARIOS_RATE_LIMIT_MAX = 120;
+const COMENTARIO_RATE_LIMIT_WINDOW_MS = 60_000;
+const COMENTARIO_TEXTO_MAX = 1200;
+const COMENTARIOS_POR_PAGINA_MAX = 50;
+
 const LEADS_RATE_LIMIT_MAX = 1200;
 const LEADS_RATE_LIMIT_WINDOW_MS = 60_000;
 
@@ -3643,6 +4092,9 @@ export function createServerApp({
     allowEvento: createRateLimiter({ windowMs: EVENTO_RATE_LIMIT_WINDOW_MS, max: EVENTO_RATE_LIMIT_MAX, now: agora }),
     allowPaginaEvento: createRateLimiter({ windowMs: EVENTO_RATE_LIMIT_WINDOW_MS, max: EVENTO_RATE_LIMIT_MAX, now: agora }),
     allowSalvar: createRateLimiter({ windowMs: SALVAR_RATE_LIMIT_WINDOW_MS, max: SALVAR_RATE_LIMIT_MAX, now: agora }),
+    allowComentario: createRateLimiter({ windowMs: COMENTARIO_RATE_LIMIT_WINDOW_MS, max: COMENTARIO_RATE_LIMIT_MAX, now: agora }),
+    allowComentarios: createRateLimiter({ windowMs: COMENTARIO_RATE_LIMIT_WINDOW_MS, max: COMENTARIOS_RATE_LIMIT_MAX, now: agora }),
+    allowPainelAcao: createRateLimiter({ windowMs: COMENTARIO_RATE_LIMIT_WINDOW_MS, max: 60, now: agora }),
     allowInscricao: createRateLimiter({ windowMs: INSCRICAO_RATE_LIMIT_WINDOW_MS, max: INSCRICAO_RATE_LIMIT_MAX, now: agora }),
     allowLogin: createRateLimiter({ windowMs: PAINEL_LOGIN_WINDOW_MS, max: PAINEL_LOGIN_MAX, now: agora }),
     allowLeads: createRateLimiter({ windowMs: LEADS_RATE_LIMIT_WINDOW_MS, max: LEADS_RATE_LIMIT_MAX, now: agora })
@@ -3656,6 +4108,10 @@ export function createServerApp({
     ["/api/hotmart/venda", handleHotmartVenda],
     ["/api/integrations/manychat/lead", handleManychatLead],
     ["/api/replay/inscricao", handleReplayInscricao],
+    ["/api/replay/comentarios", handleReplayComentarios],
+    ["/api/replay/comentario", handleReplayComentario],
+    ["/api/painel/replay/comentario", handleReplayModerar],
+    ["/api/painel/replay/resposta", handleReplayResponder],
     ["/api/atualizacao-perfil", handleAtualizacaoPerfil],
     ["/api/leads/perfil", handleLeadPerfil],
     ["/api/painel/login", handleLogin],

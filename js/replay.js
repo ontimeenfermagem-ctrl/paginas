@@ -957,6 +957,9 @@
     mural.carregando = true;
 
     const params = new URLSearchParams({ pagina: pagina.id, limite: String(POR_PAGINA) });
+    // O id de sessão é o que prova ao servidor que esta pessoa liberou a sala. Sem ele (ou com a
+    // sala trancada), a resposta vem só com a contagem.
+    if (liberada) params.set("sessao_id", sessaoId);
     if (mais && mural.proximo) params.set("antes", String(mural.proximo));
 
     let corpo = null;

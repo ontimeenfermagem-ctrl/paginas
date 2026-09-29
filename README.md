@@ -190,7 +190,9 @@ Um cuidado que o código não pega: **link trocado entre páginas** funciona (o 
 
 A página é dado: texto, aula, material e certificado moram em `js/replay-config.js`, e `replay-afericao.html` é só o esqueleto que `js/replay.js` preenche. A inscrição vai para `POST /api/replay/inscricao` → o mesmo `pesquisa_salvar` de todo lead, com o id de pesquisa da sala (`replay-afericao`), as UTMs de primeiro toque e a profissão — e aparece no painel, na aba da sala. Ela **não** dispara aviso ao n8n: o próximo passo da pessoa é a própria aula, que abre na tela.
 
-Dois detalhes de segurança: o player de terceiro só é montado no clique do play (nada de fora carrega antes), e a sala é a única página do site com `frame-src` — fechada nos três provedores que o config aceita (YouTube nocookie, Vimeo e Panda). O certificado nasce escondido e só aparece com `ativo: true` **e** link de emissão.
+A sala tem **mural de comentários** hospedado por nós (`replay_comentarios`): quem liberou a sala escreve, quem está de fora vê só a contagem, e quem está logado no `/painel` ganha os três pontinhos em cada comentário — responder como Izabel (com a foto dela e o selo azul de verificado), esconder do público ou excluir. O selo, o nome e o rosto saem do `js/replay-config.js`, nunca da API; a coluna `admin` só é escrita pela função de responder, que exige o e-mail da sessão do painel.
+
+Três detalhes de segurança que valem a leitura antes de mexer: o player de terceiro só é montado no clique do play (nada de fora carrega antes); a sala é a única página do site com `frame-src` — fechada nos três provedores que o config aceita (YouTube nocookie, Vimeo e Panda); e é a única página pública **sem** `'unsafe-inline'` em `script-src` (o snippet do Pixel entra por hash `sha256`), porque é a única que desenha texto escrito por terceiro. No `js/replay.js`, texto vindo da API entra sempre por `createElement` + `textContent`: os únicos `innerHTML` do arquivo são as constantes de ícone. O certificado nasce escondido e só aparece com `ativo: true` **e** link de emissão.
 
 ## Deploy
 
