@@ -4,18 +4,19 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <!--
-      Sala de aula da Aula de Aferição: o replay e o material.
+      Sala de aula da Aula de Aferição — uma matéria de revista.
 
-      Esqueleto só. Todo o texto, a aula, o material e o certificado vêm de js/replay-config.js, e
-      js/replay.js desenha. Mudar a aula ou o PDF é mexer no config, não aqui.
+      Esqueleto só. Todo o texto, a aula, o sumário, o material, o mural e o certificado vêm de
+      js/replay-config.js, e js/replay.js desenha. Mudar a aula ou o PDF é mexer no config.
 
-      A sala abre depois do formulário de acesso (nome, WhatsApp, e-mail e profissão), que grava no
-      mesmo lugar de todo lead do projeto e aparece no /painel com as UTMs.
+      A foto de abertura aparece SEMPRE, trancada: é ela que dá vontade. O formulário de acesso
+      libera a aula, grava no mesmo lugar de todo lead do projeto e aparece no /painel com as UTMs.
+      Carga horária não aparece em lugar nenhum da tela (decisão do cliente).
     -->
-    <title>Aula de Aferição — sala de aula | Escola Enfermagem de Valor</title>
+    <title>A aula da Aferição — sala de aula | Escola Enfermagem de Valor</title>
     <meta
       name="description"
-      content="Reveja a Aula de Aferição da profissão por tempo de serviço e baixe o material da Escola Enfermagem de Valor."
+      content="Reveja a aula sobre a aferição da profissão por tempo de serviço e baixe o material da Escola Enfermagem de Valor."
     />
     <meta name="robots" content="noindex, nofollow" />
     <meta name="theme-color" content="#f4ebdd" />
@@ -24,8 +25,9 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png" />
     <link rel="apple-touch-icon" href="/img/apple-touch-icon.png" />
     <link rel="preload" href="/fonts/parkinsans-latin.woff2" as="font" type="font/woff2" crossorigin />
-    <!-- A base (tokens, fundo, campos, botão) e os cartões de profissão vêm das folhas que já
-         existem; replay.css só acrescenta a sala. -->
+    <link rel="preload" href="/img/iza-avatar.jpg" as="image" />
+    <!-- A base (tokens, campos, botão) e os cartões de profissão vêm das folhas que já existem;
+         replay.css acrescenta a revista. -->
     <link rel="stylesheet" href="/css/inscricao.css" />
     <link rel="stylesheet" href="/css/atualizacao.css" />
     <link rel="stylesheet" href="/css/replay.css" />
@@ -36,162 +38,180 @@
     <script src="/js/replay-config.js" defer></script>
     <script src="/js/replay.js" defer></script>
   </head>
-  <body class="grao">
+  <body class="grao sala">
+    <!-- A luz que atravessa o papel. Decoração: fora da árvore de acessibilidade. -->
+    <div class="luz" aria-hidden="true"><i></i><b></b></div>
+
     <a class="pular-link" href="#conteudo">Pular para o conteúdo</a>
 
-    <header class="sala-topo">
-      <div class="sala sala-topo-linha">
-        <div class="sala-marca">
-          <img src="/img/ev-logo-color.png" alt="Escola Enfermagem de Valor" width="414" height="252" />
-        </div>
-        <nav class="sala-nav" aria-label="Seções da sala" id="sala-nav" hidden>
-          <a href="#aulas">Aula</a>
+    <header class="expediente">
+      <div class="expediente-linha">
+        <img class="expediente-marca" src="/img/ev-logo-color.png" alt="Escola Enfermagem de Valor" width="414" height="252" />
+        <p class="expediente-edicao" id="expediente-edicao"></p>
+        <nav class="expediente-nav" aria-label="Seções da matéria" id="sala-nav" hidden>
+          <a href="#aula">A aula</a>
           <a href="#material" id="nav-material" hidden>Material</a>
-          <a href="#certificado" id="nav-certificado" hidden>Certificado</a>
+          <a href="#mural" id="nav-mural" hidden>Comentários</a>
         </nav>
       </div>
     </header>
 
-    <main id="conteudo">
-      <!-- ---------------------------------------------------------------- Hero -->
-      <section class="sala sala-hero" aria-labelledby="sala-titulo">
+    <main id="conteudo" class="revista">
+      <!-- ---------------------------------------------------------------- A capa -->
+      <section class="capa" aria-labelledby="sala-titulo">
         <p class="eyebrow" id="sala-eyebrow"></p>
-        <h1 class="sala-hero" id="sala-titulo" tabindex="-1"></h1>
-        <p class="sala-hero-sub" id="sala-descricao"></p>
-        <ul class="sala-numeros" id="sala-numeros" aria-label="Sobre a aula"></ul>
+        <h1 class="capa-titulo" id="sala-titulo" tabindex="-1"></h1>
+        <p class="capa-apoio" id="sala-apoio"></p>
+        <div class="capa-credito" id="capa-credito"></div>
       </section>
 
+      <!-- ------------------------------------------------- A foto de abertura (o vídeo) -->
+      <section class="abertura sangra" id="aula" aria-label="A aula">
+        <div id="abertura-quadro"></div>
+      </section>
+      <p class="abertura-legenda" id="abertura-legenda"></p>
+
+      <!-- ------------------------------------------------- O que você vai ver -->
+      <aside class="sumario" id="sumario" hidden>
+        <p class="sumario-rotulo" id="sumario-rotulo">O que você vai ver</p>
+        <ol id="sumario-lista"></ol>
+      </aside>
+
       <div class="sala-com-js">
-        <!-- ------------------------------------------------------- Acesso (trava a sala) -->
-        <section class="sala" id="secao-acesso" aria-labelledby="acesso-titulo">
-          <div class="sala-acesso">
-            <h2 id="acesso-titulo"></h2>
-            <p class="sala-acesso-apoio" id="acesso-apoio"></p>
+        <!-- ----------------------------------------------- A porta (o formulário) -->
+        <div class="porta" id="porta">
+          <p class="porta-rotulo" id="porta-rotulo"></p>
+          <h2 id="porta-titulo"></h2>
+          <p class="porta-apoio" id="porta-apoio"></p>
 
-            <form class="ins-form" id="form-acesso" novalidate>
-              <div class="campo" data-campo="nome">
-                <label for="campo-nome">Nome completo</label>
-                <input
-                  id="campo-nome"
-                  name="nome"
-                  type="text"
-                  autocomplete="name"
-                  autocapitalize="words"
-                  enterkeyhint="next"
-                  maxlength="120"
-                  aria-describedby="erro-nome"
-                  placeholder="Como você se chama?"
-                />
-                <p class="campo-erro" id="erro-nome" role="alert" hidden></p>
-              </div>
+          <form class="ins-form" id="form-acesso" novalidate>
+            <div class="campo" data-campo="nome">
+              <label for="campo-nome">Nome completo</label>
+              <input
+                id="campo-nome"
+                name="nome"
+                type="text"
+                autocomplete="name"
+                autocapitalize="words"
+                enterkeyhint="next"
+                maxlength="120"
+                aria-describedby="erro-nome"
+                placeholder="Como você se chama?"
+              />
+              <p class="campo-erro" id="erro-nome" role="alert" hidden></p>
+            </div>
 
-              <div class="campo" data-campo="whatsapp">
-                <label for="campo-whatsapp">WhatsApp com DDD</label>
-                <input
-                  id="campo-whatsapp"
-                  name="whatsapp"
-                  type="tel"
-                  inputmode="numeric"
-                  autocomplete="tel-national"
-                  enterkeyhint="next"
-                  maxlength="25"
-                  aria-describedby="erro-whatsapp"
-                  placeholder="(00) 00000-0000"
-                />
-                <p class="campo-erro" id="erro-whatsapp" role="alert" hidden></p>
-              </div>
+            <div class="campo" data-campo="whatsapp">
+              <label for="campo-whatsapp">WhatsApp com DDD</label>
+              <input
+                id="campo-whatsapp"
+                name="whatsapp"
+                type="tel"
+                inputmode="numeric"
+                autocomplete="tel-national"
+                enterkeyhint="next"
+                maxlength="25"
+                aria-describedby="erro-whatsapp"
+                placeholder="(00) 00000-0000"
+              />
+              <p class="campo-erro" id="erro-whatsapp" role="alert" hidden></p>
+            </div>
 
-              <div class="campo" data-campo="email">
-                <label for="campo-email">E-mail</label>
-                <input
-                  id="campo-email"
-                  name="email"
-                  type="email"
-                  inputmode="email"
-                  autocomplete="email"
-                  autocapitalize="off"
-                  autocorrect="off"
-                  spellcheck="false"
-                  enterkeyhint="done"
-                  maxlength="254"
-                  aria-describedby="erro-email"
-                  placeholder="seuemail@exemplo.com"
-                />
-                <p class="campo-erro" id="erro-email" role="alert" hidden></p>
-                <div class="sugestao" id="sugestao-email" role="group" aria-labelledby="sugestao-texto" hidden>
-                  <p id="sugestao-texto">Você quis dizer <strong id="sugestao-valor"></strong>?</p>
-                  <div class="sugestao-botoes">
-                    <button type="button" class="sugestao-sim" id="sugestao-sim">Sim, corrigir</button>
-                    <button type="button" class="sugestao-nao" id="sugestao-nao">Não, meu e-mail está certo</button>
-                  </div>
+            <div class="campo" data-campo="email">
+              <label for="campo-email">E-mail</label>
+              <input
+                id="campo-email"
+                name="email"
+                type="email"
+                inputmode="email"
+                autocomplete="email"
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck="false"
+                enterkeyhint="done"
+                maxlength="254"
+                aria-describedby="erro-email"
+                placeholder="seuemail@exemplo.com"
+              />
+              <p class="campo-erro" id="erro-email" role="alert" hidden></p>
+              <div class="sugestao" id="sugestao-email" role="group" aria-labelledby="sugestao-texto" hidden>
+                <p id="sugestao-texto">Você quis dizer <strong id="sugestao-valor"></strong>?</p>
+                <div class="sugestao-botoes">
+                  <button type="button" class="sugestao-sim" id="sugestao-sim">Sim, corrigir</button>
+                  <button type="button" class="sugestao-nao" id="sugestao-nao">Não, meu e-mail está certo</button>
                 </div>
               </div>
-
-              <div class="campo" data-campo="perfil">
-                <p class="opcoes-titulo" id="perfil-titulo"></p>
-                <div class="opcoes" id="opcoes-perfil" role="radiogroup" aria-labelledby="perfil-titulo"></div>
-                <p class="campo-erro" id="erro-perfil" role="alert" hidden></p>
-              </div>
-
-              <p class="form-status" id="acesso-status" role="alert"></p>
-
-              <button type="submit" class="botao-checkout" id="botao-acesso">
-                <span class="botao-checkout-texto" id="botao-acesso-texto">QUERO ASSISTIR A AULA</span>
-                <span class="botao-carregando" aria-hidden="true"></span>
-              </button>
-
-              <p class="sala-cadeado">
-                <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
-                  <path
-                    d="M7 11V8a5 5 0 0 1 10 0v3M5 11h14v9H5z"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  />
-                </svg>
-                <span>Seus dados ficam só com a Escola. Sem spam.</span>
-              </p>
-            </form>
-          </div>
-        </section>
-
-        <!-- ------------------------------------------------------- A aula -->
-        <section class="sala sala-secao" id="aulas" aria-labelledby="aulas-titulo" hidden>
-          <div class="sala-cabeca">
-            <h2 id="aulas-titulo">A aula</h2>
-            <p id="aulas-apoio">Reveja quantas vezes quiser.</p>
-          </div>
-          <div class="sala-aulas" id="lista-aulas"></div>
-        </section>
-
-        <!-- ------------------------------------------------------- Material -->
-        <section class="sala sala-secao" id="material" aria-labelledby="material-titulo" hidden>
-          <div class="sala-cabeca">
-            <h2 id="material-titulo"></h2>
-            <p id="material-apoio"></p>
-          </div>
-          <div class="sala-material" id="lista-material"></div>
-        </section>
-
-        <!-- ------------------------------------------------------- Certificado (escondido) -->
-        <section class="sala sala-secao" id="certificado" aria-labelledby="certificado-titulo" hidden>
-          <div class="sala-certificado">
-            <div>
-              <h2 id="certificado-titulo"></h2>
-              <p id="certificado-apoio"></p>
-              <a class="botao-checkout" id="certificado-cta" href="#" target="_blank" rel="noopener noreferrer">
-                <span class="botao-checkout-texto" id="certificado-cta-texto"></span>
-              </a>
             </div>
-            <img id="certificado-imagem" src="/img/certificado-afericao.svg" alt="Modelo do certificado de participação" />
+
+            <div class="campo" data-campo="perfil">
+              <p class="opcoes-titulo" id="perfil-titulo"></p>
+              <div class="opcoes" id="opcoes-perfil" role="radiogroup" aria-labelledby="perfil-titulo"></div>
+              <p class="campo-erro" id="erro-perfil" role="alert" hidden></p>
+            </div>
+
+            <p class="form-status" id="acesso-status" role="alert"></p>
+
+            <button type="submit" class="botao-checkout" id="botao-acesso">
+              <span class="botao-checkout-texto" id="botao-acesso-texto">QUERO ASSISTIR A AULA</span>
+              <span class="botao-carregando" aria-hidden="true"></span>
+            </button>
+
+            <p class="porta-seguro">
+              <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+                <path
+                  d="M7 11V8a5 5 0 0 1 10 0v3M5 11h14v9H5z"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+              <span>Seus dados ficam só com a Escola. Sem spam.</span>
+            </p>
+            <p class="porta-conversa" id="porta-conversa" hidden></p>
+          </form>
+        </div>
+
+        <!-- ----------------------------------------------- A matéria -->
+        <div class="fio-rotulo" id="fio-materia" hidden><span>A aula</span></div>
+        <h2 class="materia-titulo" id="materia-titulo" hidden></h2>
+        <div class="materia" id="materia" hidden></div>
+        <figure class="olho largo" id="olho" hidden>
+          <blockquote id="olho-texto"></blockquote>
+          <figcaption><cite id="olho-quem"></cite></figcaption>
+        </figure>
+
+        <!-- ----------------------------------------------- Para levar -->
+        <div class="fio-rotulo" id="fio-material" hidden><span id="material-rotulo">Para levar</span></div>
+        <p class="material-apoio" id="material-apoio" hidden></p>
+        <ul class="material-lista" id="material-lista" hidden></ul>
+
+        <!-- ----------------------------------------------- Cartas das alunas -->
+        <div class="fio-rotulo" id="fio-mural" hidden><span id="mural-rotulo"></span></div>
+        <section id="mural" aria-labelledby="mural-rotulo" hidden>
+          <p class="mural-apoio" id="mural-apoio"></p>
+          <div id="mural-compositor"></div>
+          <ol class="cartas" id="cartas"></ol>
+          <button type="button" class="mural-mais" id="mural-mais" hidden>Ver comentários mais antigos</button>
+        </section>
+
+        <!-- ----------------------------------------------- Certificado (escondido) -->
+        <div class="fio-rotulo" id="fio-certificado" hidden><span>Certificado</span></div>
+        <section class="certificado" id="certificado" aria-labelledby="certificado-titulo" hidden>
+          <div>
+            <h2 id="certificado-titulo"></h2>
+            <p id="certificado-apoio"></p>
+            <a class="botao-checkout" id="certificado-cta" href="#" target="_blank" rel="noopener noreferrer">
+              <span class="botao-checkout-texto" id="certificado-cta-texto"></span>
+            </a>
           </div>
+          <img id="certificado-imagem" src="/img/certificado-afericao.svg" alt="Modelo do certificado de participação" />
         </section>
       </div>
 
       <!-- Sem JavaScript: a sala não abre, e a página diz o que fazer em vez de ficar vazia. -->
-      <div class="sala sala-secao sala-sem-js" style="display: none">
+      <div class="sala-sem-js" style="display: none">
         <p class="sala-aviso">
           <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
             <path
@@ -211,9 +231,9 @@
       </div>
     </main>
 
-    <footer class="sala-rodape">
+    <footer class="colofao">
       <img src="/img/ev-icone-color.png" alt="" width="155" height="155" />
-      <p id="sala-rodape-texto"></p>
+      <p id="colofao-texto"></p>
     </footer>
 
     <div class="sr-only" id="sala-aviso" aria-live="polite"></div>

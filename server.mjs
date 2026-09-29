@@ -11,7 +11,7 @@
  * js/lead-rules.js (nome, WhatsApp, e-mail) são os mesmos arquivos que rodam no navegador,
  * carregados com vm. O que a tela aceita é exatamente o que o servidor grava.
  */
-import { createHmac, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import { Resolver } from "node:dns/promises";
 import { createReadStream, readFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
@@ -121,24 +121,46 @@ const CSP_PESQUISA = [
 ].join("; ");
 
 /*
- * A sala de aula precisa de UMA coisa a mais que o resto do site: deixar o player do vídeo entrar
- * num iframe. Por isso ela tem CSP própria, com frame-src fechado nos três provedores que o
- * js/replay-config.js aceita — e só neles. O iframe é montado no clique do play, então nada de
- * terceiro carrega antes de a pessoa pedir.
+ * A sala de aula é a ÚNICA página pública que desenha texto escrito por terceiro (o mural de
+ * comentários). Por isso ela tem a CSP mais fechada das páginas públicas, e em duas frentes:
+ *
+ *  - SEM 'unsafe-inline' em script-src. O replay-*.html não tem script inline nenhum (todos com
+ *    src + defer); o único inline que existe na resposta é o snippet do Meta Pixel, injetado pelo
+ *    transformPage. O texto dele é determinado pelo META_PIXEL_ID (só dígitos), então o hash é
+ *    estável e entra no lugar do unsafe-inline. Com isso, um innerHTML esquecido no js/replay.js
+ *    volta a ser defacement, e não roubo do contato das leads e da sessão do painel.
+ *  - frame-src fechado nos três provedores de vídeo do js/replay-config.js, e só neles. O iframe é
+ *    montado no clique do play: nada de terceiro carrega antes de a pessoa pedir.
  */
-const CSP_REPLAY = [
-  "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' https://connect.facebook.net",
-  // As capas: i.ytimg (YouTube) e i.vimeocdn (Vimeo).
-  "img-src 'self' data: https://www.facebook.com https://i.ytimg.com https://i.vimeocdn.com",
-  "connect-src 'self' https://www.facebook.com https://connect.facebook.net",
-  "style-src 'self' 'unsafe-inline'",
-  "font-src 'self'",
-  "frame-src https://www.youtube-nocookie.com https://www.youtube.com https://player.vimeo.com https://*.tv.pandavideo.com.br",
-  "frame-ancestors 'none'",
-  "base-uri 'self'",
-  "form-action 'self'"
-].join("; ");
+const hashDoPixelCache = new Map();
+
+function hashDoPixel(pixelId) {
+  if (!pixelId) return "";
+  if (hashDoPixelCache.has(pixelId)) return hashDoPixelCache.get(pixelId);
+  const html = metaPixelCode(pixelId);
+  const abre = html.indexOf("<script>") + "<script>".length;
+  const fecha = html.indexOf("</script>");
+  // O hash é sobre o texto EXATO do elemento, inclusive a quebra de linha inicial.
+  const valor = ` 'sha256-${createHash("sha256").update(html.slice(abre, fecha), "utf8").digest("base64")}'`;
+  hashDoPixelCache.set(pixelId, valor);
+  return valor;
+}
+
+function cspDoReplay(pixelId) {
+  return [
+    "default-src 'self'",
+    `script-src 'self'${hashDoPixel(pixelId)} https://connect.facebook.net`,
+    // As capas: i.ytimg (YouTube) e i.vimeocdn (Vimeo).
+    "img-src 'self' data: https://www.facebook.com https://i.ytimg.com https://i.vimeocdn.com",
+    "connect-src 'self' https://www.facebook.com https://connect.facebook.net",
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self'",
+    "frame-src https://www.youtube-nocookie.com https://www.youtube.com https://player.vimeo.com https://*.tv.pandavideo.com.br",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'"
+  ].join("; ");
+}
 
 // O painel não carrega nada de fora nem roda script inline: mesmo que um texto vindo do banco
 // escapasse do escapeHtml, o navegador não o executaria.
@@ -2860,7 +2882,7 @@ async function buildResponseBody({ filePath, pathname, extension, encoding, pixe
   return data;
 }
 
-function staticHeaders(pathname, extension) {
+function staticHeaders(pathname, extension, pixelId) {
   const headers = {
     "Content-Type": contentTypes.get(extension),
     "X-Content-Type-Options": "nosniff",
@@ -2883,7 +2905,11 @@ function staticHeaders(pathname, extension) {
   }
 
   if (extension === ".html") {
-    headers["Content-Security-Policy"] = doPainel ? CSP_PAINEL : ROTA_DO_REPLAY.has(pathname) ? CSP_REPLAY : CSP_PESQUISA;
+    headers["Content-Security-Policy"] = doPainel
+      ? CSP_PAINEL
+      : ROTA_DO_REPLAY.has(pathname)
+        ? cspDoReplay(pixelId)
+        : CSP_PESQUISA;
     if (!doPainel) headers["X-Frame-Options"] = "DENY";
   }
 
@@ -2960,7 +2986,7 @@ async function serveStatic(request, response, config) {
     return;
   }
 
-  const headers = staticHeaders(pathname, extension);
+  const headers = staticHeaders(pathname, extension, config.metaPixelId);
 
   if (compressibleExtensions.has(extension)) {
     const encoding = negotiateEncoding(request.headers["accept-encoding"]);

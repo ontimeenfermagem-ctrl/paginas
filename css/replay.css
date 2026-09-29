@@ -1,257 +1,616 @@
 /*
- * replay.css — só o que a sala de aula (/replay-afericao) acrescenta.
+ * replay.css — a sala de aula (/replay-*) como MATÉRIA DE REVISTA.
  *
- * A base vem de css/inscricao.css (tokens, fundo de papel com grão, campos, erro, sugestão de
- * e-mail, botão) e de css/atualizacao.css (os cartões de profissão), carregadas antes desta. Aqui
- * ficam o topo, o hero, o cartão da aula com o player, o material e o certificado.
+ * A base vem de css/inscricao.css (tokens, campos, erro, sugestão de e-mail, botão) e de
+ * css/atualizacao.css (os cartões de profissão), carregadas antes desta. Aqui fica o resto: a
+ * grade de duas medidas, o expediente, a capa, a foto de abertura, o corpo do texto, o material,
+ * o mural de cartas e o colofão — mais a luz que atravessa o papel no fundo.
  *
- * A página é mais larga que os formulários do projeto: o vídeo pede espaço. O formulário de acesso
- * continua numa coluna estreita, que é o que faz ele parecer curto de preencher.
+ * O desenho tem duas medidas e só duas: a coluna de leitura (--texto, ~62 caracteres, a medida do
+ * impresso) e a coluna larga (--largo), onde só a foto de abertura e o olho têm licença de romper
+ * a margem. É essa decisão que separa "página de revista" de "página com fonte grande".
+ *
+ * Carga horária não aparece em lugar nenhum: foi decisão do cliente, e o sumário "o que você vai
+ * ver" entrou no lugar dela.
  */
 
 :root {
-  --sala: 980px;
-  --sala-estreita: 460px;
+  /*
+   * --rose e --lilac moram em pesquisa.css, obrigado.css e painel.css, que NÃO são carregadas
+   * aqui. Sem estas duas linhas os color-mix() da luz resolvem para transparente e a animação
+   * simplesmente não aparece, sem um erro no console.
+   */
+  --rose: #d39c9a;
+  --lilac: #b9a9be;
+
+  --texto: 680px; /* a coluna de leitura */
+  --largo: 1080px; /* a foto de abertura e o olho */
+  --estreita: 460px; /* o formulário, que continua curto de preencher */
+  --topo-altura: 58px;
+
+  /* Os fios do impresso */
+  --fio: color-mix(in oklab, var(--gold) 52%, var(--border));
+  --fio-forte: color-mix(in oklab, var(--gold) 80%, var(--ember));
+
+  /*
+   * O selo de verificado: o único azul do projeto. O mesmo critério já usado no verde do WhatsApp
+   * (css/inscricao.css): o tom famoso fica no brilho, e o preenchimento desce para um azul que
+   * passa no contraste. --verificado dá 4,27:1 sobre o marfim e o branco sobre ele dá 4,64:1;
+   * selo é objeto gráfico, cujo piso é 3:1 (WCAG 1.4.11), então sobra folga.
+   */
+  --verificado: #1d7ab8;
+  --verificado-forte: #16628f;
+  --verificado-brilho: #1d9bf0;
 }
 
 /* ================================================================== */
-/* Estrutura                                                           */
+/* A luz no papel (o fundo animado)                                    */
 /* ================================================================== */
 
-.sala {
-  width: 100%;
-  max-width: calc(var(--sala) + 2 * var(--gutter));
-  margin: 0 auto;
-  padding: 0 var(--gutter);
+/*
+ * Duas manchas enormes e translúcidas atravessando a página devagar, em sentidos opostos: são os
+ * MESMOS dois brilhos que o css/inscricao.css já pinta parados no fundo, agora se movendo. O papel
+ * parece respirar sob um abajur que passa.
+ *
+ * Só `transform` anima — propriedade de compositor: nenhum quadro repinta e nenhum remede a
+ * página. Zero imagem, zero script, zero requisição: o CSP não muda uma vírgula.
+ *
+ * O fundo de papel mora AQUI DENTRO, e não no html: com `isolation: isolate`, o grão passa a
+ * mesclar só dentro deste grupo, e o marfim precisa estar no grupo para o multiply escurecer o
+ * papel como escurece hoje.
+ */
+.luz {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  isolation: isolate;
+  background-color: var(--parchment);
+  pointer-events: none;
 }
 
-.sala-secao {
-  margin: 0 auto;
-  padding: 40px 0 8px;
-  scroll-margin-top: 84px;
+.luz i,
+.luz b {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 78vmax;
+  height: 78vmax;
+  margin: -39vmax 0 0 -39vmax;
+  border-radius: 50%;
+  will-change: transform;
 }
 
-.sala-secao + .sala-secao {
-  padding-top: 8px;
+/* A mancha rosa: entra pela esquerda embaixo e sai pela direita em cima. */
+.luz i {
+  background: radial-gradient(circle at 50% 50%, color-mix(in oklab, var(--rose) 34%, transparent) 0%, transparent 62%);
+  animation: luz-rosa 52s linear infinite;
 }
 
-.sala-cabeca {
-  margin-bottom: 18px;
+/* A lilás, virando dourado, no sentido contrário e mais devagar. */
+.luz b {
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in oklab, var(--lilac) 30%, transparent) 0%,
+    color-mix(in oklab, var(--gold-soft) 16%, transparent) 42%,
+    transparent 66%
+  );
+  animation: luz-lilas 68s linear infinite;
 }
 
-.sala-cabeca h2 {
-  margin: 4px 0 6px;
-  color: var(--ink);
-  font-size: clamp(22px, 5.4vw, 30px);
-  font-weight: 800;
-  letter-spacing: -0.01em;
-  line-height: 1.15;
+/* Cada volta termina onde começou: com "reduzir movimento" o quadro congelado é o inicial. */
+@keyframes luz-rosa {
+  0% {
+    transform: translate3d(-32vmax, 26vmax, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(30vmax, -24vmax, 0) scale(1.16);
+  }
+  100% {
+    transform: translate3d(-32vmax, 26vmax, 0) scale(1);
+  }
 }
 
-.sala-cabeca p {
-  margin: 0;
-  max-width: 62ch;
-  color: var(--ink-soft);
-  font-size: 15.5px;
-  line-height: 1.5;
+@keyframes luz-lilas {
+  0% {
+    transform: translate3d(28vmax, -22vmax, 0) scale(1.1);
+  }
+  50% {
+    transform: translate3d(-26vmax, 24vmax, 0) scale(1);
+  }
+  100% {
+    transform: translate3d(28vmax, -22vmax, 0) scale(1.1);
+  }
+}
+
+/* O grão do papel, por cima da luz e dentro do mesmo grupo isolado. */
+.luz::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(color-mix(in oklab, var(--ink) 20%, transparent) 0.5px, transparent 0.5px);
+  background-size: 3px 3px;
+  mix-blend-mode: multiply;
+  opacity: 0.5;
+}
+
+/*
+ * A página tem fundo próprio agora (a .luz): o grão do body sai de cena para não dobrar.
+ *
+ * A classe do body é `.sala`, e NÃO `.revista`: `.revista` é a grade, e ela existe uma vez só, no
+ * <main>. Com as duas no body, o main virava item da própria grade e ficava preso na coluna de
+ * texto — a foto de abertura deixava de romper a margem sem nenhum aviso.
+ */
+body.sala::before {
+  content: none;
+}
+
+body.sala {
+  background: transparent;
 }
 
 /* ================================================================== */
-/* Topo                                                               */
+/* A grade de duas medidas                                            */
 /* ================================================================== */
 
-.sala-topo {
+/*
+ * A coluna de leitura tem largura RESOLVIDA — `min(100% - 2*gutter, --texto)` —, e não um
+ * minmax(0, --texto). Com minmax, as duas colunas de fora (que querem 200px cada) disputam o
+ * espaço com ela e, num celular de 390px, o texto fica com ~100px: uma palavra por linha. Esta é a
+ * receita de grade com sangria que funciona em qualquer largura.
+ */
+.revista {
+  display: grid;
+  grid-template-columns:
+    [sangra-i] minmax(var(--gutter), 1fr)
+    [largo-i] minmax(0, calc((var(--largo) - var(--texto)) / 2))
+    [texto-i] min(100% - 2 * var(--gutter), var(--texto)) [texto-f]
+    minmax(0, calc((var(--largo) - var(--texto)) / 2)) [largo-f]
+    minmax(var(--gutter), 1fr) [sangra-f];
+}
+
+/* Por padrão, tudo vive na coluna de leitura. */
+.revista > * {
+  grid-column: texto-i / texto-f;
+}
+
+/* As duas exceções, com motivo: a foto de abertura e o olho. */
+.revista > .largo {
+  grid-column: largo-i / largo-f;
+}
+
+.revista > .sangra {
+  grid-column: sangra-i / sangra-f;
+}
+
+/*
+ * A sangra já vai de borda a borda: sangra-i e sangra-f são as linhas EXTERNAS da grade, e as duas
+ * colunas de gutter ficam dentro do intervalo. Margem negativa aqui só criaria rolagem horizontal.
+ */
+
+.revista > [hidden] {
+  display: none !important;
+}
+
+/* ================================================================== */
+/* Expediente (o topo)                                                */
+/* ================================================================== */
+
+.expediente {
   position: sticky;
   top: 0;
-  z-index: 20;
+  z-index: 30;
   padding-top: var(--seguro-topo);
-  background: color-mix(in oklab, var(--parchment) 88%, transparent);
+  background: color-mix(in oklab, var(--parchment) 90%, transparent);
   backdrop-filter: saturate(140%) blur(10px);
-  border-bottom: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  /* O filete duplo: a regra clássica de cabeçalho impresso, de graça. */
+  border-bottom: 1px solid var(--fio);
+  box-shadow: 0 2px 0 -1px color-mix(in oklab, var(--gold) 30%, transparent);
+  transition: opacity 260ms ease;
 }
 
-.sala-topo-linha {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  min-height: 62px;
-}
-
-.sala-marca {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.sala-marca img {
-  width: auto;
-  height: 34px;
-}
-
-.sala-nav {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.sala-nav a {
-  display: inline-flex;
-  align-items: center;
-  min-height: 40px;
-  padding: 8px 12px;
-  border-radius: 999px;
-  color: var(--ink-soft);
-  font-size: 14.5px;
-  font-weight: 600;
-  text-decoration: none;
-  transition:
-    background 140ms ease,
-    color 140ms ease;
-}
-
-.sala-nav a:hover {
-  background: color-mix(in oklab, var(--ember-glow) 60%, transparent);
-  color: var(--ember-deep);
-}
-
-.sala-nav a:focus-visible {
-  outline: none;
-  box-shadow: var(--anel-foco);
-}
-
-@media (max-width: 520px) {
-  .sala-nav a {
-    padding: 8px 10px;
-    font-size: 14px;
-  }
-  .sala-marca img {
-    height: 28px;
-  }
-}
-
-/* ================================================================== */
-/* Hero                                                              */
-/* ================================================================== */
-
-.sala-hero {
-  padding: 30px 0 6px;
-  text-align: center;
-}
-
-.sala-hero h1 {
-  margin: 6px auto 10px;
-  max-width: 22ch;
-  color: var(--ink);
-  font-size: clamp(28px, 7.4vw, 46px);
-  font-weight: 800;
-  letter-spacing: -0.022em;
-  line-height: 1.08;
-}
-
-.sala-hero h1 b {
-  color: var(--ember);
-  font-weight: 800;
-}
-
-.sala-hero-sub {
-  margin: 0 auto;
-  max-width: 54ch;
-  color: var(--ink-soft);
-  font-size: clamp(15.5px, 3.8vw, 17.5px);
-  line-height: 1.55;
-}
-
-/* Os números: pílulas de papel, uma linha no celular. */
-/* Três colunas iguais, sempre: em 390px as pílulas quebravam 2+1 e a última ficava sozinha. */
-.sala-numeros {
+.expediente-linha {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  max-width: 520px;
-  margin: 22px auto 6px;
-  padding: 0;
-  list-style: none;
-}
-
-.sala-numeros li {
-  display: flex;
-  flex-direction: column;
+  grid-template-columns: auto 1fr auto;
   align-items: center;
-  justify-content: center;
-  gap: 1px;
-  padding: 12px 10px;
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  background: var(--parchment-soft);
-  box-shadow: var(--sombra-cartao);
+  gap: 18px;
+  max-width: calc(var(--largo) + 2 * var(--gutter));
+  min-height: var(--topo-altura);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
 }
 
-.sala-numeros b {
-  color: var(--ember);
-  font-size: 22px;
-  font-weight: 800;
-  letter-spacing: -0.01em;
-  line-height: 1.1;
+.expediente-marca {
+  width: auto;
+  height: 30px;
 }
 
-.sala-numeros span {
-  color: var(--ink-soft);
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+.expediente-edicao {
+  margin: 0;
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
   text-align: center;
   text-transform: uppercase;
 }
 
-/* ================================================================== */
-/* Formulário de acesso                                              */
-/* ================================================================== */
-
-.sala-acesso {
-  max-width: calc(var(--sala-estreita) + 2 * var(--gutter));
-  margin: 26px auto 0;
-  padding: 24px 20px 26px;
-  border: 1px solid var(--border);
-  border-radius: 22px;
-  background: var(--parchment-soft);
-  box-shadow: var(--sombra-cartao);
-  text-align: left;
+.expediente-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
-.sala-acesso h2 {
-  margin: 0 0 6px;
-  color: var(--ink);
-  font-size: 21px;
-  font-weight: 800;
-  letter-spacing: -0.01em;
+/* Link de revista é texto com sublinhado de ouro, não botão de pílula. */
+.expediente-nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 9px;
+  border-bottom: 2px solid transparent;
+  color: var(--ink-soft);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-decoration: none;
+  text-transform: uppercase;
+  transition:
+    color 140ms ease,
+    border-color 140ms ease;
+}
+
+.expediente-nav a:hover {
+  border-bottom-color: var(--gold);
+  color: var(--ember-deep);
+}
+
+.expediente-nav a:focus-visible {
+  outline: none;
+  box-shadow: var(--anel-foco);
+}
+
+@media (max-width: 600px) {
+  .expediente-linha {
+    grid-template-columns: auto 1fr;
+    gap: 10px;
+  }
+  .expediente-edicao {
+    display: none;
+  }
+  .expediente-marca {
+    height: 26px;
+  }
+  .expediente-nav a {
+    padding: 0 7px;
+    font-size: 10.5px;
+  }
+}
+
+/* ================================================================== */
+/* A capa                                                             */
+/* ================================================================== */
+
+.capa {
+  padding: 40px 0 0;
   text-align: center;
 }
 
-.sala-acesso-apoio {
-  margin: 0 0 18px;
+.capa-titulo {
+  margin: 14px auto 0;
+  max-width: 17ch;
+  color: var(--ink);
+  font-size: clamp(34px, 9vw, 68px);
+  font-weight: 800;
+  letter-spacing: -0.032em;
+  line-height: 0.98;
+  text-wrap: balance;
+}
+
+/*
+ * O contraste tipográfico de revista: uma palavra em peso leve e ameixa dentro do título pesado.
+ * Não é itálico de propósito — Parkinsans não tem face itálica, e o navegador inventaria um
+ * oblíquo torto.
+ */
+.capa-titulo em {
+  color: var(--ember);
+  font-style: normal;
+  font-weight: 300;
+}
+
+.capa-apoio {
+  margin: 18px auto 0;
+  max-width: 46ch;
+  color: var(--ink);
+  font-size: clamp(16.5px, 4.2vw, 21px);
+  font-weight: 300;
+  line-height: 1.45;
+  text-wrap: pretty;
+}
+
+/*
+ * A linha de crédito, no lugar exato onde estavam as três pílulas de número. Faz trabalho duplo:
+ * tira a carga horária da tela e apresenta o rosto e o selo da Iza ANTES do mural, para a resposta
+ * dela lá embaixo ser reconhecida na hora.
+ */
+.capa-credito {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 11px;
+  max-width: 440px;
+  margin: 30px auto 0;
+  padding-top: 18px;
+  border-top: 1px solid var(--fio);
+  text-align: left;
+}
+
+.capa-credito img {
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
+  border: 2px solid var(--parchment-soft);
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px var(--gold);
+  object-fit: cover;
+}
+
+.capa-credito-texto {
+  min-width: 0;
+}
+
+.capa-credito-nome {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.capa-credito-papel {
+  margin: 2px 0 0;
+  color: var(--ink-soft);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ================================================================== */
+/* O selo de verificado                                              */
+/* ================================================================== */
+
+.selo-verificado {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  color: var(--verificado);
+  filter: drop-shadow(0 0 3px color-mix(in oklab, var(--verificado-brilho) 45%, transparent));
+}
+
+/* ================================================================== */
+/* A foto de abertura (o vídeo)                                       */
+/* ================================================================== */
+
+.abertura {
+  margin-top: 36px;
+}
+
+.abertura-quadro {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  border: 0;
+  /* Celular: sangra, canto reto, fio em cima e embaixo — foto impressa até o corte. */
+  border-top: 1px solid var(--fio);
+  border-bottom: 1px solid var(--fio);
+  background: radial-gradient(120% 120% at 50% 0%, color-mix(in oklab, var(--ember) 24%, var(--ink)) 0%, var(--ink) 70%);
+  color: var(--parchment);
+  font-family: inherit;
+  cursor: pointer;
+}
+
+@media (min-width: 720px) {
+  .abertura-quadro {
+    border: 1px solid var(--fio);
+    border-radius: 4px;
+    box-shadow: 0 34px 64px -42px rgba(57, 43, 56, 0.55);
+  }
+}
+
+.abertura-quadro iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.abertura-capa {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.5;
+}
+
+.abertura-centro {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 14px;
+  padding: 20px;
+  text-align: center;
+}
+
+.abertura-play {
+  display: grid;
+  place-items: center;
+  width: 82px;
+  height: 82px;
+  border-radius: 999px;
+  background: var(--parchment-soft);
+  box-shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.6);
+  transition:
+    transform 160ms ease,
+    background 160ms ease;
+}
+
+/* O anel respira três vezes e para: chama o olho sem ficar pedindo atenção para sempre. */
+.abertura-play::before {
+  content: "";
+  position: absolute;
+  width: 82px;
+  height: 82px;
+  border: 2px solid color-mix(in oklab, var(--parchment) 60%, transparent);
+  border-radius: 999px;
+  animation: respira 2.4s ease-out 3;
+}
+
+@keyframes respira {
+  0% {
+    opacity: 0.9;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.5);
+  }
+}
+
+.abertura-play svg {
+  margin-left: 4px;
+  color: var(--ember);
+}
+
+.abertura-quadro:hover .abertura-play {
+  background: #fff;
+  transform: scale(1.06);
+}
+
+.abertura-quadro:focus-visible {
+  outline: 3px solid var(--gold-soft);
+  outline-offset: -5px;
+}
+
+.abertura-texto {
+  margin: 0;
+  color: color-mix(in oklab, var(--parchment) 90%, transparent);
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* A trava, enquanto a sala não foi liberada. */
+.abertura-trava svg {
+  color: var(--gold-soft);
+}
+
+.abertura-quadro[aria-disabled="true"] {
+  cursor: default;
+}
+
+/*
+ * A legenda de foto: fica na medida do TEXTO enquanto a foto é larga. É o desencontro entre as
+ * duas larguras que faz o olho ler "revista".
+ */
+.abertura-legenda {
+  margin: 14px auto 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--gold);
+  color: var(--ink-soft);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+/* ================================================================== */
+/* A porta (o formulário de acesso)                                   */
+/* ================================================================== */
+
+.porta {
+  max-width: calc(var(--estreita) + 2 * var(--gutter));
+  margin: 38px auto 0;
+  padding: 26px 22px 28px;
+  border: 1px solid var(--border);
+  /* A tarja ameixa: deixa de ser "caixinha de site" e vira cupom de assinatura. */
+  border-top: 3px solid var(--ember);
+  border-radius: 16px;
+  background: var(--parchment-soft);
+  box-shadow: var(--sombra-cartao);
+  scroll-margin-top: calc(var(--topo-altura) + 20px);
+}
+
+.porta-rotulo {
+  margin: 0 0 4px;
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.porta h2 {
+  margin: 0 0 6px;
+  color: var(--ink);
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.012em;
+  text-align: center;
+}
+
+.porta-apoio {
+  margin: 0 0 20px;
   color: var(--ink-soft);
   font-size: 14.5px;
   line-height: 1.45;
   text-align: center;
 }
 
-/* O grupo de profissão dentro do formulário. */
-.sala-acesso .opcoes-titulo {
+.porta .opcoes-titulo {
   margin: 4px 0 8px;
   color: var(--ink);
   font-size: 15px;
   font-weight: 700;
 }
 
-.sala-acesso .opcao {
+.porta .opcao {
   min-height: 52px;
   padding: 11px 14px;
   font-size: 15px;
 }
 
-.sala-cadeado {
+/*
+ * O botão da sala é AMEIXA, não verde. Verde, neste projeto, é o botão de entrar no grupo do
+ * WhatsApp (css/obrigado.css) — usar o mesmo aqui prometeria outra coisa.
+ */
+.sala .botao-checkout,
+.porta .botao-checkout {
+  background: linear-gradient(180deg, var(--ember) 0%, var(--ember-deep) 100%);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.25) inset,
+    0 14px 30px -18px color-mix(in oklab, var(--ember-deep) 75%, transparent);
+}
+
+.sala .botao-checkout:hover,
+.porta .botao-checkout:hover {
+  background: linear-gradient(180deg, var(--ember-deep) 0%, #4c3243 100%);
+}
+
+.sala .botao-checkout:focus-visible,
+.porta .botao-checkout:focus-visible {
+  box-shadow: var(--anel-foco);
+}
+
+.porta-seguro {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -262,290 +621,601 @@
   line-height: 1.4;
 }
 
-.sala-cadeado svg {
+.porta-seguro svg {
   flex: 0 0 auto;
   color: var(--gold);
 }
 
-/*
- * O botão da sala é AMEIXA, não verde. Verde, neste projeto, é o botão de entrar no grupo do
- * WhatsApp (css/obrigado.css) — usar o mesmo aqui prometeria outra coisa. A forma, o tamanho e o
- * estado de carregando continuam os do css/inscricao.css.
- */
-.sala .botao-checkout {
-  background: linear-gradient(180deg, var(--ember) 0%, var(--ember-deep) 100%);
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.25) inset,
-    0 14px 30px -18px color-mix(in oklab, var(--ember-deep) 75%, transparent);
-}
-
-.sala .botao-checkout:hover {
-  background: linear-gradient(180deg, var(--ember-deep) 0%, #4c3243 100%);
-}
-
-.sala .botao-checkout:focus-visible {
-  box-shadow: var(--anel-foco);
-}
-
-/* ================================================================== */
-/* Aulas                                                              */
-/* ================================================================== */
-
-.sala-aulas {
-  display: grid;
-  gap: 18px;
-}
-
-.sala-aula {
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 22px;
-  background: var(--parchment-soft);
-  box-shadow: var(--sombra-cartao);
-}
-
-/* O quadro do vídeo: 16:9 sem depender de JS para a altura. */
-.sala-quadro {
-  position: relative;
-  aspect-ratio: 16 / 9;
-  width: 100%;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  background:
-    radial-gradient(120% 120% at 50% 0%, color-mix(in oklab, var(--ember) 22%, var(--ink)) 0%, var(--ink) 70%);
-  color: var(--parchment);
-  display: block;
-  padding: 0;
-  cursor: pointer;
-  font-family: inherit;
-}
-
-.sala-quadro iframe {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  border: 0;
-}
-
-.sala-quadro-capa {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  opacity: 0.55;
-}
-
-.sala-quadro-centro {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  gap: 12px;
-  align-content: center;
-  padding: 20px;
+/* A prova social com a sala trancada: só a CONTAGEM, nunca texto de terceiro. */
+.porta-conversa {
+  margin: 12px 0 0;
+  color: var(--ember);
+  font-size: 13.5px;
+  font-weight: 600;
   text-align: center;
 }
 
-.sala-play {
+/* ================================================================== */
+/* Os fios de seção                                                   */
+/* ================================================================== */
+
+/* O rótulo de seção do impresso: o texto no meio de um filete. */
+.fio-rotulo {
   display: grid;
-  place-items: center;
-  width: 78px;
-  height: 78px;
-  border-radius: 999px;
-  background: var(--parchment-soft);
-  box-shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.6);
-  transition:
-    transform 160ms ease,
-    background 160ms ease;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 14px;
+  margin: 56px 0 20px;
 }
 
-.sala-play svg {
-  margin-left: 4px;
+.fio-rotulo::before,
+.fio-rotulo::after {
+  content: "";
+  height: 1px;
+  background: var(--fio);
+}
+
+.fio-rotulo span {
   color: var(--ember);
-}
-
-.sala-quadro:hover .sala-play {
-  transform: scale(1.06);
-  background: #fff;
-}
-
-.sala-quadro:focus-visible {
-  outline: 3px solid var(--ember-glow);
-  outline-offset: -5px;
-}
-
-.sala-quadro-texto {
-  margin: 0;
-  color: color-mix(in oklab, var(--parchment) 88%, transparent);
-  font-size: 14.5px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-
-/* Sem vídeo configurado: nada de quadro clicável, só o aviso honesto. */
-.sala-quadro[aria-disabled="true"] {
-  cursor: default;
-}
-
-.sala-aula-corpo {
-  padding: 18px 20px 20px;
-}
-
-.sala-aula-topo {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.sala-etiqueta {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 11px;
-  border-radius: 999px;
-  background: color-mix(in oklab, var(--ember-glow) 75%, var(--parchment-soft));
-  color: var(--ember-deep);
-  font-size: 12.5px;
+  font-size: 11.5px;
   font-weight: 700;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
 }
 
-.sala-etiqueta.ouro {
-  background: color-mix(in oklab, var(--gold-soft) 62%, var(--parchment-soft));
-  color: #6b5622;
+/* ================================================================== */
+/* O sumário e a matéria                                              */
+/* ================================================================== */
+
+.materia-titulo {
+  margin: 0 0 22px;
+  color: var(--ink);
+  font-size: clamp(24px, 6vw, 34px);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.14;
+  text-wrap: balance;
 }
 
-.sala-aula h3 {
-  margin: 0 0 8px;
+.sumario {
+  margin: 0 0 30px;
+  padding: 22px 24px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--parchment-soft) 80%, transparent);
+}
+
+.sumario-rotulo {
+  margin: 0 0 12px;
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.sumario ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: sumario;
+}
+
+.sumario li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
   color: var(--ink);
-  font-size: clamp(19px, 4.6vw, 24px);
+  counter-increment: sumario;
+  font-size: 16.5px;
+  line-height: 1.5;
+}
+
+.sumario li + li {
+  margin-top: 10px;
+}
+
+.sumario li::before {
+  content: counter(sumario);
+  align-self: start;
+  min-width: 22px;
+  color: var(--gold);
+  font-size: 13px;
   font-weight: 800;
-  letter-spacing: -0.012em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.75;
+  text-align: right;
+}
+
+.materia p {
+  margin: 0 0 1.15em;
+  color: var(--ink);
+  font-size: 19px;
+  font-weight: 340;
+  line-height: 1.68;
+  text-wrap: pretty;
+}
+
+/* A capitular: três linhas, em ameixa. */
+.materia p:first-of-type::first-letter {
+  float: left;
+  margin: 8px 10px 0 0;
+  color: var(--ember);
+  font-size: 4.1em;
+  font-weight: 800;
+  line-height: 0.76;
+  text-transform: uppercase;
+}
+
+.materia p:first-of-type::first-line {
+  font-weight: 500;
+}
+
+/* O diamante de fim de matéria. */
+.materia p:last-of-type::after {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 9px;
+  background: var(--ember);
+  transform: rotate(45deg) translateY(-1px);
+}
+
+/* ================================================================== */
+/* O olho (pull quote)                                                */
+/* ================================================================== */
+
+.olho {
+  margin: 40px 0;
+  padding: 30px 0 26px;
+  border-top: 1px solid var(--fio);
+  border-bottom: 1px solid var(--fio);
+  text-align: center;
+}
+
+.olho blockquote {
+  margin: 0 auto;
+  max-width: 30ch;
+  color: var(--ember-deep);
+  font-size: clamp(22px, 5.4vw, 32px);
+  font-weight: 300;
+  letter-spacing: -0.016em;
+  line-height: 1.26;
+  text-wrap: balance;
+}
+
+.olho blockquote::before {
+  content: "\201C";
+  display: block;
+  margin-bottom: -6px;
+  color: var(--gold-soft);
+  font-size: 2.6em;
+  font-weight: 800;
+  line-height: 0.6;
+}
+
+.olho cite {
+  display: block;
+  margin-top: 16px;
+  color: var(--ink-soft);
+  font-size: 11.5px;
+  font-weight: 700;
+  font-style: normal;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* ================================================================== */
+/* O material ("para levar")                                          */
+/* ================================================================== */
+
+.material-apoio {
+  margin: -8px 0 16px;
+  color: var(--ink-soft);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.material-lista {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+  list-style: none;
+}
+
+.material-item {
+  border-bottom: 1px solid var(--border);
+}
+
+.material-link {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 14px;
+  min-height: 64px;
+  padding: 14px 8px;
+  color: var(--ink);
+  text-decoration: none;
+  transition: background 140ms ease;
+}
+
+.material-link:hover {
+  background: color-mix(in oklab, var(--ember-glow) 26%, transparent);
+}
+
+.material-link:focus-visible {
+  outline: none;
+  border-radius: 10px;
+  box-shadow: var(--anel-foco);
+}
+
+.material-losango {
+  width: 8px;
+  height: 8px;
+  background: var(--gold);
+  transform: rotate(45deg);
+}
+
+.material-link strong {
+  display: block;
+  font-size: 16.5px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.material-link > span > span {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-soft);
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+
+.material-tipo {
+  align-self: start;
+  margin-top: 3px;
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* ================================================================== */
+/* Cartas das alunas (o mural)                                        */
+/* ================================================================== */
+
+.mural-apoio {
+  margin: -8px 0 20px;
+  color: var(--ink-soft);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+/* O compositor */
+.compositor {
+  margin: 0 0 30px;
+  padding: 18px 18px 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--parchment-soft);
+}
+
+.compositor-quem {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 12px;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.compositor textarea {
+  display: block;
+  width: 100%;
+  min-height: 92px;
+  padding: 12px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  background: var(--parchment);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.compositor textarea:focus {
+  border-color: var(--ember);
+  outline: none;
+}
+
+.compositor textarea:focus-visible {
+  box-shadow: var(--anel-foco);
+}
+
+.compositor-linha {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.compositor-conta {
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.compositor .botao-checkout {
+  width: auto;
+  min-height: 46px;
+  margin: 0;
+  padding: 0 22px;
+  font-size: 14px;
+}
+
+.cartas {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.carta + .carta {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.carta-quem {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+/* Monograma em vez de foto: ninguém mandou foto, e inventar avatar de terceiro é mentira. */
+.carta-inicial {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ember-glow) 70%, var(--parchment));
+  color: var(--ember-deep);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.carta-identidade {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.carta-nome {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 700;
   line-height: 1.2;
 }
 
-.sala-aula p {
-  margin: 0;
-  max-width: 68ch;
+.carta-quando {
+  margin: 2px 0 0;
   color: var(--ink-soft);
-  font-size: 15.5px;
-  line-height: 1.55;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
-/* ================================================================== */
-/* Material                                                            */
-/* ================================================================== */
-
-.sala-material {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-}
-
-.sala-baixar {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 16px 18px;
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  background: var(--parchment-soft);
-  box-shadow: var(--sombra-cartao);
+.carta-texto {
+  margin: 10px 0 0;
   color: var(--ink);
-  text-decoration: none;
-  transition:
-    transform 140ms ease,
-    border-color 140ms ease;
+  font-size: 16.5px;
+  line-height: 1.6;
+  /* As quebras de linha do comentário valem, sem nenhum HTML vindo de fora. */
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
 }
 
-.sala-baixar:hover {
-  border-color: color-mix(in oklab, var(--ember) 38%, var(--border));
-  transform: translateY(-1px);
+/*
+ * A resposta da Iza: o ÚNICO bloco pintado da seção. É isso que faz a palavra dela pesar na
+ * página, sem precisar de cor nova.
+ */
+.carta-resposta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  margin: 16px 0 0 18px;
+  padding: 16px 18px;
+  border-left: 3px solid var(--ember);
+  border-radius: 0 14px 14px 0;
+  background: color-mix(in oklab, var(--ember-glow) 42%, var(--parchment-soft));
 }
 
-.sala-baixar:focus-visible {
+.carta-resposta img {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border: 2px solid var(--parchment-soft);
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px var(--gold);
+  object-fit: cover;
+}
+
+.carta-resposta .carta-texto {
+  margin-top: 6px;
+  font-size: 16px;
+}
+
+/* Os três pontinhos: só existem para quem está logado no painel. */
+.carta-menu {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.carta-menu:hover {
+  border-color: var(--border);
+  background: var(--parchment-soft);
+  color: var(--ember);
+}
+
+.carta-menu:focus-visible {
   outline: none;
   box-shadow: var(--anel-foco);
 }
 
-.sala-baixar-icone {
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  width: 46px;
-  height: 46px;
-  border-radius: 14px;
-  background: color-mix(in oklab, var(--ember-glow) 70%, var(--parchment));
-  color: var(--ember-deep);
+.carta-acoes {
+  position: absolute;
+  top: 40px;
+  right: 0;
+  z-index: 10;
+  min-width: 208px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--parchment-soft);
+  box-shadow: 0 20px 44px -26px rgba(57, 43, 56, 0.5);
 }
 
-.sala-baixar-texto {
-  min-width: 0;
+.carta-acoes button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 14.5px;
+  font-weight: 600;
+  text-align: left;
 }
 
-.sala-baixar strong {
-  display: block;
-  font-size: 16px;
-  font-weight: 700;
-  line-height: 1.25;
+.carta-acoes button:hover {
+  background: color-mix(in oklab, var(--ember-glow) 55%, transparent);
 }
 
-.sala-baixar span {
-  display: block;
-  margin-top: 2px;
-  color: var(--ink-soft);
-  font-size: 13.5px;
-  line-height: 1.4;
+.carta-acoes button:focus-visible {
+  outline: none;
+  box-shadow: var(--anel-foco);
 }
 
-.sala-baixar-tipo {
-  color: var(--gold);
-  font-size: 12px;
+.carta-acoes .perigo {
+  color: var(--danger, #a8432c);
+}
+
+.carta-acoes .perigo:hover {
+  background: color-mix(in oklab, var(--danger, #a8432c) 12%, transparent);
+}
+
+/* Comentário escondido pela moderação: só o admin vê, e vê que está fora do ar. */
+.carta[data-estado="oculto"] {
+  opacity: 0.62;
+}
+
+.carta-etiqueta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--gold-soft) 50%, var(--parchment-soft));
+  color: #6b5622;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+.mural-mais {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  margin-top: 26px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--ember);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.mural-mais:hover {
+  border-color: var(--ember);
+  background: var(--parchment-soft);
+}
+
+.mural-mais:focus-visible {
+  outline: none;
+  box-shadow: var(--anel-foco);
 }
 
 /* ================================================================== */
 /* Certificado (escondido por padrão — ver replay-config.js)           */
 /* ================================================================== */
 
-.sala-certificado {
+.certificado {
   display: grid;
   align-items: center;
   gap: 22px;
   padding: 24px;
   border: 1px solid var(--border);
-  border-radius: 22px;
+  border-radius: 18px;
   background: linear-gradient(180deg, var(--parchment-soft), color-mix(in oklab, var(--gold-soft) 22%, var(--parchment-soft)));
   box-shadow: var(--sombra-cartao);
 }
 
 @media (min-width: 720px) {
-  .sala-certificado {
+  .certificado {
     grid-template-columns: 1fr 1fr;
   }
 }
 
-.sala-certificado img {
+.certificado img {
   width: 100%;
   height: auto;
   border: 1px solid color-mix(in oklab, var(--gold) 40%, var(--border));
-  border-radius: 12px;
+  border-radius: 10px;
   background: #fff;
 }
 
-.sala-certificado h2 {
+.certificado h2 {
   margin: 0 0 8px;
   font-size: clamp(21px, 5vw, 28px);
 }
 
-.sala-certificado p {
+.certificado p {
   margin: 0 0 16px;
   color: var(--ink-soft);
   font-size: 15.5px;
@@ -553,39 +1223,58 @@
 }
 
 /* ================================================================== */
-/* Rodapé                                                             */
+/* Colofão (o rodapé)                                                 */
 /* ================================================================== */
 
-.sala-rodape {
-  margin-top: 40px;
-  padding: 26px var(--gutter) calc(28px + var(--seguro-baixo));
-  border-top: 1px solid var(--border);
+.colofao {
+  margin-top: 64px;
+  padding: 30px var(--gutter) calc(32px + var(--seguro-baixo));
+  border-top: 1px solid var(--fio);
+  box-shadow: 0 -2px 0 -1px color-mix(in oklab, var(--gold) 30%, transparent) inset;
   text-align: center;
+  transition: opacity 260ms ease;
 }
 
-.sala-rodape img {
+.colofao img {
   width: auto;
-  height: 46px;
-  margin-bottom: 8px;
+  height: 40px;
+  margin: 0 auto 12px;
 }
 
-.sala-rodape p {
+.colofao p {
   margin: 0 auto;
-  max-width: 60ch;
+  max-width: 52ch;
   color: var(--ink-soft);
-  font-size: 13.5px;
-  line-height: 1.5;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  line-height: 1.7;
+  text-transform: uppercase;
 }
 
 /* ================================================================== */
-/* Estados                                                            */
+/* Assistindo: a decoração sai da frente                              */
 /* ================================================================== */
 
-/* Enquanto a sala está trancada, o que vem depois do formulário não existe para ninguém —
-   nem para o leitor de tela, nem para o Ctrl+F. */
-[hidden] {
-  display: none !important;
+/*
+ * Durante a aula, o quadro é a única coisa acesa. Isto mexe SÓ em decoração — nunca na opacidade
+ * de texto: o corpo da matéria e os comentários passam no contraste a 100%, e a 60% reprovariam
+ * (WCAG 1.4.3). Se alguém "melhorar" isto depois, é aqui que quebra.
+ */
+body.assistindo .luz,
+body.assistindo .expediente,
+body.assistindo .colofao {
+  opacity: 0.35;
 }
+
+body.assistindo .luz i,
+body.assistindo .luz b {
+  animation-play-state: paused;
+}
+
+/* ================================================================== */
+/* Estados e preferências                                             */
+/* ================================================================== */
 
 .sala-aviso {
   display: flex;
@@ -594,7 +1283,7 @@
   margin: 0;
   padding: 14px 16px;
   border: 1px dashed color-mix(in oklab, var(--gold) 55%, var(--border));
-  border-radius: 16px;
+  border-radius: 14px;
   background: color-mix(in oklab, var(--gold-soft) 26%, var(--parchment-soft));
   color: var(--ink);
   font-size: 14.5px;
@@ -607,24 +1296,43 @@
   color: var(--gold);
 }
 
+/*
+ * "Reduzir movimento": o css/inscricao.css já força animation-duration:.01ms em tudo, o que faria
+ * a luz saltar para o ÚLTIMO quadro e ficar torta para sempre. `animation: none` congela no
+ * PRIMEIRO quadro — e cada keyframe começa e termina no mesmo lugar, então o congelado é o certo.
+ */
 @media (prefers-reduced-motion: reduce) {
-  .sala-baixar,
-  .sala-play {
+  .luz i,
+  .luz b,
+  .abertura-play::before {
+    animation: none !important;
+  }
+  .luz i {
+    transform: translate3d(-32vmax, 26vmax, 0);
+  }
+  .luz b {
+    transform: translate3d(28vmax, -22vmax, 0) scale(1.1);
+  }
+  .abertura-play,
+  .material-link,
+  .expediente,
+  .colofao {
     transition: none;
   }
-  .sala-baixar:hover {
-    transform: none;
-  }
-  .sala-quadro:hover .sala-play {
+  .abertura-quadro:hover .abertura-play {
     transform: none;
   }
 }
 
 @media (prefers-contrast: more) {
-  .sala-aula,
-  .sala-acesso,
-  .sala-baixar,
-  .sala-numeros li {
+  .luz i,
+  .luz b {
+    display: none;
+  }
+  .sumario,
+  .compositor,
+  .porta,
+  .certificado {
     border-color: var(--ink-soft);
   }
 }

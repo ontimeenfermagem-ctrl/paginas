@@ -6,6 +6,7 @@
  * de fora entrar num iframe.
  */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { afterEach, test } from "node:test";
 import vm from "node:vm";
@@ -128,6 +129,28 @@ test("a rota da sala serve a página, com e sem barra, e não é indexada", asyn
     // O Pixel é injetado aqui como nas outras páginas públicas.
     assert.match(corpo, /fbq\('init'/);
   }
+});
+
+test("a CSP da sala não tem unsafe-inline em script-src: o Pixel entra por hash", async () => {
+  const { base } = await subir();
+  const sala = await pegar(base, SALA.rota);
+  const csp = sala.headers["content-security-policy"];
+  const scriptSrc = csp.split("; ").find((parte) => parte.startsWith("script-src"));
+  // É a única página pública que desenha texto de terceiro: aqui unsafe-inline seria roubo de
+  // contato das leads e da sessão do painel, não só defacement.
+  assert.doesNotMatch(scriptSrc, /unsafe-inline/);
+  assert.match(scriptSrc, /'sha256-[A-Za-z0-9+/=]{40,}'/, "o hash do snippet do Pixel está no CSP");
+
+  // E o hash tem que ser o do snippet REALMENTE servido: se o corte mudar, o navegador recusa o
+  // script e o Pixel para de contar sem ninguém perceber.
+  const abre = sala.corpo.indexOf("<script>\n!function") + "<script>".length;
+  const fecha = sala.corpo.indexOf("</script>", abre);
+  const hash = createHash("sha256").update(sala.corpo.slice(abre, fecha), "utf8").digest("base64");
+  assert.ok(csp.includes(`'sha256-${hash}'`), "o hash do CSP bate com o script injetado");
+
+  // As outras páginas continuam como estavam.
+  const pesquisa = await pegar(base, "/pesquisa-icp");
+  assert.match(pesquisa.headers["content-security-policy"], /script-src [^;]*'unsafe-inline'/);
 });
 
 test("a sala é a única página com frame-src: o player entra, e só dos três provedores", async () => {
@@ -278,9 +301,19 @@ test("replay-config: a sala está inteira e não colide com as outras pesquisas"
   for (const id of ids) assert.ok(!["icp-escola-ev", "atualizacao-perfil", "manychat-instagram"].includes(id), id);
   // As quatro profissões da sala são as MESMAS da pergunta 1 da pesquisa.
   assert.deepEqual([...RPL.perfis()], [...EV.perguntaPorId("perfil").opcoes]);
-  // A duração que o cliente pediu.
   assert.equal(SALA.aulas.length, 1);
-  assert.equal(SALA.aulas[0].duracao, "3 horas");
+  // Carga horária NÃO aparece na tela (decisão do cliente): a aula não tem `duracao`, e o sumário
+  // "o que você vai ver" entrou no lugar dela.
+  assert.equal(SALA.aulas[0].duracao, undefined);
+  assert.equal(SALA.numeros, undefined);
+  assert.ok(SALA.sumario.length >= 4, "o sumário é o que dá vontade de assistir");
+  // A descrição chega depois: enquanto não chegar, a matéria é uma lista vazia e a seção não sai.
+  assert.deepEqual([...SALA.materia], []);
+  // Quem responde com selo sai do CÓDIGO, nunca da API.
+  assert.equal(RPL.ADMIN.nome, "Izabel Gonçalves");
+  assert.equal(RPL.ADMIN.avatar, "/img/iza-avatar.jpg");
+  assert.match(RPL.ADMIN.selo, /Escola Enfermagem de Valor/);
+  assert.equal(RPL.comentariosAtivos(SALA), true);
 });
 
 test("replay-config: vídeo só vale de provedor conhecido, e o link do player sai certo", () => {
