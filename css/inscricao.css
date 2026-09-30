@@ -509,6 +509,99 @@ button {
   }
 }
 
+/* ================================================================== */
+/* Rodapé da parceria (EDUCA SA + selo do MEC)                         */
+/* ================================================================== */
+/*
+ * Mora abaixo do palco de 100svh: nada aqui divide a atenção com o botão. A logo da EDUCA SA é
+ * branca e vermelha sobre fundo transparente, então precisa de um painel escuro atrás; o selo do
+ * MEC é dourado e fica direto no papel, ao lado.
+ */
+
+.ins-rodape {
+  width: 100%;
+  max-width: calc(var(--coluna) + 2 * var(--gutter));
+  margin: 0 auto;
+  padding: 26px var(--gutter) calc(34px + var(--seguro-baixo));
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+
+.ins-parceria-chapeu {
+  margin: 0;
+  color: var(--ember);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.ins-parceria-titulo {
+  margin: 4px 0 0;
+  font-size: 19px;
+  font-weight: 500;
+  line-height: 1.25;
+  letter-spacing: -0.012em;
+  text-wrap: balance;
+}
+.ins-parceria-titulo strong {
+  font-weight: 800;
+}
+
+.ins-parceria {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+/* O painel escuro que faz a marca branca aparecer no papel marfim. */
+.ins-parceria-marca {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 260px;
+  padding: 16px 20px;
+  border-radius: 16px;
+  background: linear-gradient(160deg, #3f3040 0%, var(--ink) 58%, #2c2130 100%);
+  box-shadow: var(--sombra-cartao);
+}
+.ins-parceria-marca img {
+  width: 100%;
+  height: auto;
+}
+
+.ins-parceria-selo {
+  flex: 0 0 auto;
+  width: 86px;
+  height: auto;
+  filter: drop-shadow(0 8px 16px rgba(57, 43, 56, 0.22));
+}
+
+.ins-parceria-texto {
+  margin: 16px 0 0;
+  color: var(--ink-soft);
+  font-size: 14px;
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+.ins-parceria-texto strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+@media (max-width: 379px) {
+  .ins-parceria {
+    gap: 12px;
+  }
+  .ins-parceria-marca {
+    padding: 13px 15px;
+  }
+  .ins-parceria-selo {
+    width: 72px;
+  }
+}
+
 /* Telas bem estreitas (320px): menos respiro, mesmo tamanho de letra. */
 @media (max-width: 359px) {
   :root {
