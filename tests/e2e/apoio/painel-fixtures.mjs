@@ -526,6 +526,72 @@ export function gerar({ seed = 7, pessoas: totalPessoas = 800, agora = new Date(
     const x = naoCompraramGps[1];
     aviso({ evento_em: depois(x.criado_em, 240000), evento: "PURCHASE_OUT_OF_SHOPPING_CART", status: null, transacao: null, comprador_nome: x.nome, comprador_email: x.email, valor: null, sck: null, pagina: GPS.id, inscricao_id: x.id, casou: true });
   }
+  /*
+   * As DEMAIS páginas de checkout do config (hoje a Aplicação da Aferição, amanhã outra): um lote
+   * genérico de inscrições, para toda aba da faixa ter número e o teste do painel não depender de
+   * um bloco escrito à mão por página. Quem precisa de um caso específico (XSS no sck, boleto,
+   * reembolso) ganha bloco próprio, como a Viver de Furo e o GPS acima.
+   */
+  const JA_GERADAS = new Set([VDF.id, GPS.id]);
+  for (const [indicePagina, pagina] of CHK.LISTA.filter((item) => !JA_GERADAS.has(item.id)).entries()) {
+    const origens = [
+      { utm_source: "instagram", utm_medium: "bio", utm_campaign: `${pagina.id}-set`, utm_term: "criativo-01", utm_content: null },
+      { utm_source: "facebook", utm_medium: "paid", utm_campaign: `${pagina.id}-set`, utm_term: "criativo-02", utm_content: "video-a" },
+      { utm_source: "whatsapp", utm_medium: "lista", utm_campaign: "lista-vip", utm_term: null, utm_content: null },
+      { utm_source: null, utm_medium: null, utm_campaign: null, utm_term: null, utm_content: null }
+    ];
+    for (let i = 0; i < 24; i++) {
+      const criado = carimbo(Math.floor(Math.pow(r4(), 1.3) * 9));
+      const origem = origens[Math.floor(r4() * origens.length)];
+      const comprou = r4() < 0.25;
+      const nome = `${NOMES[Math.floor(r4() * NOMES.length)]} ${SOBRENOMES[Math.floor(r4() * SOBRENOMES.length)]}`;
+      const digits = `${DDD[Math.floor(r4() * DDD.length)]}9${String(10000000 + Math.floor(r4() * 89999999))}`.slice(0, 11);
+      const compradoEm = comprou ? new Date(Math.min(new Date(criado).getTime() + 360000, agoraMs - 1000)).toISOString() : null;
+      const inscricao = {
+        id: `4${indicePagina}000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+        pagina: pagina.id,
+        criado_em: criado,
+        atualizado_em: criado,
+        nome,
+        whatsapp: `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`,
+        whatsapp_digits: digits,
+        whatsapp_internacional: `55${digits}`,
+        email: `${nome.split(" ")[0].normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()}.${pagina.id}${i}@gmail.com`,
+        cliques: 1,
+        clicou_em: criado,
+        comprou_em: compradoEm,
+        compra_status: comprou ? "APPROVED" : null,
+        compra_valor: comprou ? 197 : null,
+        compra_transacao: comprou ? `HP${pagina.id.toUpperCase().slice(0, 6)}${300000 + i}` : null,
+        compra_evento_em: compradoEm,
+        ...origem,
+        fbclid: null,
+        gclid: null,
+        page_url: `${pagina.origem || ""}${pagina.rota}`,
+        referrer: null,
+        dispositivo: i % 7 === 0 ? "desktop" : "mobile"
+      };
+      inscricao.checkout_url = linkDoCheckout(pagina, inscricao, i);
+      inscricoes.push(inscricao);
+      if (comprou) {
+        aviso({
+          evento_em: compradoEm,
+          aprovado_em: compradoEm,
+          evento: "PURCHASE_APPROVED",
+          status: "APPROVED",
+          transacao: inscricao.compra_transacao,
+          comprador_nome: nome,
+          comprador_email: inscricao.email,
+          valor: 197,
+          sck: sckQueFoi(inscricao, CHK.sckDaPagina(pagina)),
+          pagina: pagina.id,
+          inscricao_id: inscricao.id,
+          casou: true
+        });
+      }
+    }
+  }
+
   for (const inscricao of inscricoes) {
     delete inscricao._sck;
     delete inscricao._reenviou;

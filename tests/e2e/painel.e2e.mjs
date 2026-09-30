@@ -1546,22 +1546,25 @@ cenario("inscricoes", async () => {
       await esperarCalmo(page);
       confere(mock.chamadas.length > 0 && mock.chamadas.every((c) => c.rota === "inscricoes" && c.url.includes(`pagina=${GPS.id}`)), "Atualizar recarrega só a aba aberta");
 
-      // Teclado: Home vai para a primeira aba, End para a última, seta à esquerda volta uma.
+      // Teclado: Home vai para a primeira aba, End para a última, seta à esquerda volta uma. Qual é
+      // a última sai do config — página de checkout nova entra no fim da faixa, e o teste segue.
+      const ULTIMA = CHK.LISTA[CHK.LISTA.length - 1];
+      const PENULTIMA = CHK.LISTA[CHK.LISTA.length - 2];
       await page.focus(`#pagina-${idAba(GPS)}`);
       await page.keyboard.press("Home");
       await esperarCalmo(page);
       confere((await page.evaluate(() => document.activeElement.id)) === "pagina-pesquisa-icp" && (await page.isVisible("[data-perfis]")), "Home abre a pesquisa");
       await page.keyboard.press("End");
-      await page.waitForSelector(`${cartao(GPS)} [data-etapa]`);
-      confere((await page.evaluate(() => document.activeElement.id)) === `pagina-${idAba(GPS)}`, "End abre a última aba (GPS)");
+      await page.waitForSelector(`${cartao(ULTIMA)} [data-etapa]`);
+      confere((await page.evaluate(() => document.activeElement.id)) === `pagina-${idAba(ULTIMA)}`, `End abre a última aba (${ULTIMA.nome})`);
       mock.chamadas.length = 0;
       await page.keyboard.press("ArrowLeft");
-      await page.waitForSelector(`${cartao(VDF)} [data-etapa]`);
+      await page.waitForSelector(`${cartao(PENULTIMA)} [data-etapa]`);
       await esperarCalmo(page);
-      confere((await page.evaluate(() => document.activeElement.id)) === `pagina-${idAba(VDF)}`, "seta à esquerda volta para a Viver de Furo");
-      const v7 = inscricoesResumo(DADOS, { desde, pagina: VDF.id }).paginas[0];
-      confere((await texto(page, `${cartao(VDF)} [data-etapa='inscritos'] .num strong`)) === fmt(v7.inscritos), `Viver de Furo com o mesmo período (${v7.inscritos})`);
-      confere(mock.chamadas.some((c) => c.rota === "inscricoes" && c.url.includes(`pagina=${VDF.id}`) && c.url.includes("desde=")), "o pedido leva página e período");
+      confere((await page.evaluate(() => document.activeElement.id)) === `pagina-${idAba(PENULTIMA)}`, `seta à esquerda volta uma aba (${PENULTIMA.nome})`);
+      const v7 = inscricoesResumo(DADOS, { desde, pagina: PENULTIMA.id }).paginas[0];
+      confere((await texto(page, `${cartao(PENULTIMA)} [data-etapa='inscritos'] .num strong`)) === fmt(v7.inscritos), `${PENULTIMA.nome} com o mesmo período (${v7.inscritos})`);
+      confere(mock.chamadas.some((c) => c.rota === "inscricoes" && c.url.includes(`pagina=${PENULTIMA.id}`) && c.url.includes("desde=")), "o pedido leva página e período");
 
       // Erro e "Tentar de novo".
       await page.click("[data-paginas] [data-pagina='pesquisa-icp']");

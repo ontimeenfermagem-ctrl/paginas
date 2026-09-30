@@ -60,10 +60,17 @@ const CSP = [
   "form-action 'self'"
 ].join("; ");
 
-const ROTAS = new Map([
-  [PAGINA.rota, HTML],
-  [`${PAGINA.rota}/`, HTML]
-]);
+/*
+ * As rotas que este servidor de teste conhece: cada página de checkout que mora AQUI serve o
+ * arquivo de mesmo nome, como o server.mjs faz (ARQUIVO_INSCRICAO). Sai do config, então página
+ * nova não precisa de linha nova aqui.
+ */
+const ROTAS = new Map(
+  C.LISTA.filter((pagina) => !pagina.origem).flatMap((pagina) => [
+    [pagina.rota, `${pagina.rota}.html`],
+    [`${pagina.rota}/`, `${pagina.rota}.html`]
+  ])
+);
 
 async function subirServidor() {
   const server = http.createServer(async (req, res) => {
@@ -685,3 +692,41 @@ caso(
   },
   { reduzir: true }
 );
+
+/* ================================================================== */
+/* 9. As OUTRAS páginas de checkout que moram aqui                     */
+/* ================================================================== */
+
+/*
+ * Os casos acima rodam todos na Viver de Furo. Este bloco passa por TODAS as páginas de checkout
+ * locais do config — hoje a Aplicação da Aferição, amanhã a próxima — e prova, em cada uma, o que
+ * só o HTML dela pode quebrar: os ids que o js/inscricao.js procura, o produto vindo do config na
+ * tela e o corpo que sai para o /api/inscricao com a página certa.
+ *
+ * Um id trocado numa página nova passaria por todos os outros testes e só apareceria em produção.
+ */
+for (const pagina of C.LISTA.filter((item) => !item.origem && item.id !== PAGINA.id)) {
+  caso(`${pagina.nome}: a página monta, grava a inscrição e vai para o checkout`, async (page, reg) => {
+    await page.goto(`${base}${pagina.rota}${UTM}`);
+    await page.waitForSelector("#form-inscricao");
+
+    // O produto e o título vêm do config, não do HTML escrito à mão.
+    assert.equal(await textoDe(page, "#ins-produto"), pagina.produto);
+    await page.waitForFunction((produto) => document.title.includes(produto), pagina.produto);
+    assert.equal(await page.locator("#botao-ir:visible").count(), 1, "o botão aparece");
+
+    await preencher(page);
+    await page.click("#botao-ir");
+
+    await esperarCheckout(page);
+
+    // O corpo que foi para o /api/inscricao diz de QUAL página é a inscrição, com o contato limpo
+    // e as UTMs da visita. (A URL final é montada pelo SERVIDOR: quem prova o sck e o
+    // preenchimento do checkout é a bateria do montarUrlCheckout, em tests/checkout-config.test.mjs,
+    // e o /api/inscricao em tests/server.test.mjs.)
+    assert.equal(reg.corpos.length, 1, "um envio só");
+    assert.equal(reg.corpos[0].pagina, pagina.id);
+    assert.deepEqual(reg.corpos[0].contato, LIMPO);
+    assert.equal(reg.corpos[0].rastreio.utm_term, "publico-frio", "as UTMs da página vão no corpo");
+  });
+}

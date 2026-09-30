@@ -74,6 +74,22 @@
       // O id numérico do produto aparece no primeiro aviso de venda (compras.produto_id): cole aqui
       // quando souber. Até lá, a oferta basta.
       hotmart: Object.freeze({ ofertas: Object.freeze(["l0r77by6"]), produtos: Object.freeze([]) })
+    }),
+    // A ordem desta lista é a ordem das abas do painel: página nova entra no FIM.
+    "aplicacao-afericao": Object.freeze({
+      id: "aplicacao-afericao",
+      rota: "/aplicacao-afericao",
+      nome: "Aplicação — Aferição",
+      produto: "Aferição da profissão",
+      // O link como o cliente entregou, com a oferta dele. O que já está no link é preservado pelo
+      // montarUrlCheckout: as UTMs, o sck e o contato entram sem tirar o off=.
+      checkout: "https://pay.hotmart.com/G107831049V?off=3yiw3399",
+      // Pedido do cliente: nesta página o utm_term vira o sck.
+      sck: "utm_term",
+      emailSomenteComBr: false,
+      // O id numérico do produto aparece no primeiro aviso de venda (compras.produto_id): cole aqui
+      // quando souber. Até lá, a oferta basta para a venda cair nesta página.
+      hotmart: Object.freeze({ ofertas: Object.freeze(["3yiw3399"]), produtos: Object.freeze([]) })
     })
   });
 

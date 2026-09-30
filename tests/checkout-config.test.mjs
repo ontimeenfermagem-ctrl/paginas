@@ -573,3 +573,59 @@ for (const arquivo of ["lead-rules.js", "checkout-config.js"]) {
     assert.equal(linhas.slice(3).join("\n"), original, `copie js/${arquivo} de novo para ${PASTA_DA_COPIA.pathname}`);
   });
 }
+
+/*
+ * Uma bateria por PÁGINA do config, para página nova nascer coberta: o link final tem que manter a
+ * oferta do cliente, levar as cinco UTMs, repetir a UTM escolhida como `sck` e abrir o checkout já
+ * preenchido. É isso que o cliente pediu em cada uma delas.
+ */
+const UTMS_DE_TESTE = Object.freeze({
+  utm_source: "instagram",
+  utm_medium: "bio",
+  utm_campaign: "campanha-de-setembro",
+  utm_term: "criativo-07",
+  utm_content: "video-a"
+});
+
+for (const pagina of C.LISTA) {
+  test(`${pagina.nome}: o link do checkout preserva a oferta, leva as UTMs, o sck e o contato`, () => {
+    const url = C.montarUrlCheckout(pagina.checkout, {
+      sck: C.sckDaPagina(pagina),
+      utm: UTMS_DE_TESTE,
+      contato: { nome: "maria da silva", whatsapp: "(45) 99811-2233", email: " MARIA@GMAIL.COM " }
+    });
+    const saida = new URL(url);
+    const original = new URL(pagina.checkout);
+
+    assert.equal(saida.origin + saida.pathname, original.origin + original.pathname, "o produto é o mesmo");
+    assert.equal(saida.searchParams.get("off"), original.searchParams.get("off"), "a oferta continua lá");
+    // O que já estava no link (checkoutMode, por exemplo) não pode sumir.
+    for (const [chave, valor] of original.searchParams) {
+      assert.equal(saida.searchParams.get(chave), valor, `${chave} do link original`);
+    }
+
+    for (const [chave, valor] of Object.entries(UTMS_DE_TESTE)) {
+      assert.equal(saida.searchParams.get(chave), valor, chave);
+    }
+    // O sck é a UTM que a página escolheu — e é ele que a Hotmart devolve no aviso de venda.
+    assert.equal(saida.searchParams.get("sck"), UTMS_DE_TESTE[C.sckDaPagina(pagina)], `sck desta página (${C.sckDaPagina(pagina)})`);
+
+    // E o checkout abre preenchido, para a pessoa não digitar tudo de novo.
+    assert.equal(saida.searchParams.get("name"), "Maria da Silva", "nome com as maiúsculas certas");
+    assert.equal(saida.searchParams.get("email"), "maria@gmail.com", "e-mail minúsculo");
+    assert.equal(saida.searchParams.get("phoneac"), "45", "o DDD vai separado");
+    assert.equal(saida.searchParams.get("phonenumber"), "998112233", "e o número sem o DDD");
+  });
+}
+
+test("a Aplicação da Aferição: a rota, a oferta e o sck que o cliente pediu", () => {
+  const pagina = C.paginaDaRota("/aplicacao-afericao");
+  assert.ok(pagina, "a rota existe no config");
+  assert.equal(pagina.id, "aplicacao-afericao");
+  assert.equal(pagina.checkout, "https://pay.hotmart.com/G107831049V?off=3yiw3399");
+  assert.equal(C.sckDaPagina(pagina), "utm_term", "o utm_term vira sck");
+  assert.ok(!pagina.origem, "a página mora neste servidor");
+  // A venda desta oferta cai NESTA página no painel, e não em outra.
+  assert.equal(C.paginaDaVenda({ oferta: "3yiw3399" }).id, "aplicacao-afericao");
+  assert.equal(C.paginaDaVenda({ oferta: "7j2nqptq" }).id, "viver-de-furo");
+});
