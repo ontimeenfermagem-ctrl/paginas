@@ -571,6 +571,8 @@ test("filtros inválidos → 422 invalid_filters, sem ir ao banco", async () => 
     "/api/painel/inscricoes?pagina=toString",
     "/api/painel/inscricoes?limite=0",
     "/api/painel/inscricoes?offset=-2",
+    "/api/painel/inscricoes?parciais_offset=-2",
+    "/api/painel/inscricoes?parciais_offset=abc",
     "/api/painel/exportar-inscricoes.csv?desde=x",
     "/api/painel/exportar-inscricoes.csv?pagina=outra",
     "/api/painel/exportar-inscricoes.csv?pagina=__proto__"
@@ -1184,6 +1186,94 @@ test("inscrições: sem filtro nenhum, o SQL recebe null e a lista não filtra p
   assert.equal(lista.params.get("pagina"), null);
   assert.deepEqual(lista.params.getAll("criado_em"), []);
   assert.equal(lista.params.get("limit"), "100");
+});
+
+function linhaRascunho(n, extra = {}) {
+  return {
+    id: n,
+    pagina: "viver-de-furo",
+    visitante_id: `0000000${n}-0000-4000-8000-000000000000`,
+    criado_em: "2026-09-21T14:00:00+00:00",
+    atualizado_em: "2026-09-21T14:03:00+00:00",
+    nome: `Pessoa ${n}`,
+    whatsapp: "(11) 91234-5678",
+    whatsapp_digits: "11912345678",
+    email: null,
+    ultimo_campo: "email",
+    toques: 3,
+    utm_source: "instagram",
+    utm_medium: null,
+    utm_campaign: null,
+    utm_content: null,
+    utm_term: null,
+    fbclid: null,
+    gclid: null,
+    page_url: "https://lp.exemplo/viver-de-furo-inscricao",
+    referrer: null,
+    dispositivo: "mobile",
+    ...extra
+  };
+}
+
+test("inscrições: a lista de quem NÃO terminou vem junto, com os mesmos filtros e o próprio offset", async () => {
+  const backend = createFakeBackend({
+    tabelas: {
+      inscricoes: () => ({ linhas: [linhaInscricao(1)], total: 1 }),
+      inscricoes_parciais_abertas: () => ({ linhas: [linhaRascunho(1), linhaRascunho(2)], total: 9 })
+    }
+  });
+  const { get } = await logado({ backend });
+
+  const response = await get(
+    "/api/painel/inscricoes?desde=2026-09-01T03:00:00Z&ate=2026-09-22T03:00:00Z&pagina=viver-de-furo&limite=10&parciais_offset=20"
+  );
+  assert.equal(response.status, 200);
+  const corpo = await response.json();
+  assert.equal(corpo.parciais.itens.length, 2);
+  assert.equal(corpo.parciais.total, 9, "o total vem do Content-Range, e não do que coube na página");
+  assert.equal(corpo.parciais.itens[0].ultimo_campo, "email");
+
+  const lista = backend.chamadas.find((chamada) => chamada.caminho === "/rest/v1/inscricoes_parciais_abertas");
+  assert.equal(lista.params.get("pagina"), "eq.viver-de-furo");
+  // Pelo ÚLTIMO toque: "quem parou no meio nesta semana" é quem digitou nesta semana.
+  assert.deepEqual(lista.params.getAll("atualizado_em"), ["gte.2026-09-01T03:00:00.000Z", "lt.2026-09-22T03:00:00.000Z"]);
+  assert.equal(lista.params.get("order"), "atualizado_em.desc,id.desc");
+  assert.equal(lista.params.get("limit"), "10");
+  assert.equal(lista.params.get("offset"), "20", "o carregar mais dos rascunhos não usa o offset dos inscritos");
+  assert.equal(lista.headers.Prefer, "count=exact");
+});
+
+test("inscrições: esticar uma lista não estica a outra (offsets independentes)", async () => {
+  const backend = createFakeBackend({
+    tabelas: {
+      inscricoes: () => ({ linhas: [linhaInscricao(1)], total: 200 }),
+      inscricoes_parciais_abertas: () => ({ linhas: [linhaRascunho(1)], total: 200 })
+    }
+  });
+  const { get } = await logado({ backend });
+
+  assert.equal((await get("/api/painel/inscricoes?offset=50")).status, 200);
+  const inscritos = backend.chamadas.find((chamada) => chamada.caminho === "/rest/v1/inscricoes");
+  const rascunhos = backend.chamadas.find((chamada) => chamada.caminho === "/rest/v1/inscricoes_parciais_abertas");
+  assert.equal(inscritos.params.get("offset"), "50");
+  assert.equal(rascunhos.params.get("offset"), "0");
+});
+
+test("inscrições: banco sem a view dos rascunhos não derruba a aba — parciais vem null e o resto vem inteiro", async () => {
+  const backend = createFakeBackend({
+    tabelas: {
+      inscricoes: () => ({ linhas: [linhaInscricao(1)], total: 1 }),
+      inscricoes_parciais_abertas: () => jsonResponse({ message: "relation does not exist" }, 404)
+    }
+  });
+  const { get } = await logado({ backend });
+
+  const response = await get("/api/painel/inscricoes?pagina=viver-de-furo");
+  assert.equal(response.status, 200);
+  const corpo = await response.json();
+  assert.equal(corpo.parciais, null);
+  assert.equal(corpo.itens.length, 1);
+  assert.equal(corpo.resumo.paginas[0].inscritos, 40);
 });
 
 test("inscrições: o total vem do Content-Range (e não do que coube na página)", async () => {

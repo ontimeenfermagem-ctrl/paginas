@@ -3018,7 +3018,21 @@
    * Servidor com o SQL antigo (sem por_midia, por_conteudo, vendas...): o que falta some da tela e
    * o resto funciona igual.
    */
-  const ins = { pagina: null, resumo: null, itens: [], total: 0, erro: 0, pronto: false, carregando: false, geradoEm: "", diasTodos: new Set() };
+  const ins = {
+    pagina: null,
+    resumo: null,
+    itens: [],
+    total: 0,
+    // Quem COMEÇOU o formulário e não enviou (inscricoes_parciais_abertas). Lista própria, com o
+    // próprio "carregar mais": esticar uma nunca mexe na outra. `tem` só vira true quando o
+    // servidor manda o bloco — banco sem a view ainda (SQL antigo) simplesmente não mostra o cartão.
+    parciais: { itens: [], total: 0, tem: false, carregando: false },
+    erro: 0,
+    pronto: false,
+    carregando: false,
+    geradoEm: "",
+    diasTodos: new Set()
+  };
   const LIMITE_INSCRITOS = 50;
 
   const MOEDA = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
@@ -3037,6 +3051,7 @@
     ins.resumo = null;
     ins.itens = [];
     ins.total = 0;
+    ins.parciais = { itens: [], total: 0, tem: false, carregando: false };
     ins.erro = 0;
     ins.pronto = false;
     ins.carregando = false;
@@ -3074,7 +3089,11 @@
     alvo.href = `/api/painel/exportar-inscricoes.csv${params.toString() ? `?${params}` : ""}`;
   }
 
-  async function carregarInscricoes({ mais = false } = {}) {
+  /**
+   * `mais` estica UMA das duas listas: `lista` diz qual ("inscritos" ou "parciais"). A outra fica
+   * exatamente como está na tela — inclusive o que já tinha sido esticado nela.
+   */
+  async function carregarInscricoes({ mais = false, lista = "inscritos" } = {}) {
     const alvo = $("[data-inscricoes]");
     const secao = $("[data-inscricoes-secao]");
     const status = $("[data-inscricoes-status]");
@@ -3087,14 +3106,17 @@
     }
     if (!ins.pagina) return;
 
+    const esticandoParciais = mais && lista === "parciais";
     const minha = ++seq.inscricoes;
     const params = parametrosInscricoes();
     params.set("limite", String(LIMITE_INSCRITOS));
-    params.set("offset", String(mais ? ins.itens.length : 0));
+    params.set("offset", String(mais && !esticandoParciais ? ins.itens.length : 0));
+    params.set("parciais_offset", String(esticandoParciais ? ins.parciais.itens.length : 0));
     atualizarCsvInscricoes();
 
     secao.setAttribute("aria-busy", "true");
     ins.carregando = true;
+    if (esticandoParciais) ins.parciais.carregando = true;
     // Esqueleto só na primeira vez (de cada página); nas recargas o desenho anterior fica esmaecido.
     if (!ins.pronto) {
       $("[data-inscricoes-periodo]").textContent = rotuloPeriodo();
@@ -3108,6 +3130,7 @@
     if (minha !== seq.inscricoes) return;
     secao.removeAttribute("aria-busy");
     ins.carregando = false;
+    ins.parciais.carregando = false;
 
     if (resposta.status === 401) {
       sessaoExpirou();
@@ -3118,6 +3141,7 @@
       ins.resumo = null;
       ins.itens = [];
       ins.total = 0;
+      ins.parciais = { itens: [], total: 0, tem: false, carregando: false };
       ins.erro = resposta.status || 0;
       ins.pronto = false;
       status.dataset.estado = "erro";
@@ -3128,8 +3152,25 @@
 
     const itens = Array.isArray(resposta.body.itens) ? resposta.body.itens : [];
     ins.resumo = resposta.body.resumo;
-    ins.itens = mais ? ins.itens.concat(itens) : itens;
-    ins.total = num(resposta.body.total);
+    // Esticando os rascunhos, a lista de inscritos não é tocada (ela veio do offset 0 e jogar
+    // fora o que já estava esticado seria a lista encolher na cara de quem clicou).
+    if (!esticandoParciais) {
+      ins.itens = mais ? ins.itens.concat(itens) : itens;
+      ins.total = num(resposta.body.total);
+    }
+
+    const parciais = resposta.body.parciais;
+    if (parciais && typeof parciais === "object" && Array.isArray(parciais.itens)) {
+      ins.parciais = {
+        itens: esticandoParciais ? ins.parciais.itens.concat(parciais.itens) : parciais.itens,
+        total: num(parciais.total),
+        tem: true,
+        carregando: false
+      };
+    } else if (!esticandoParciais) {
+      // Servidor ou banco sem os rascunhos: o cartão some, o resto da aba segue igual.
+      ins.parciais = { itens: [], total: 0, tem: false, carregando: false };
+    }
     ins.erro = 0;
     ins.pronto = true;
     ins.geradoEm = resposta.body.gerado_em || new Date().toISOString();
@@ -3530,6 +3571,90 @@
     </article>`;
   }
 
+  /* ------------------------------------------------------------ Não terminaram (rascunhos) */
+
+  const ROTULO_CAMPO_PARCIAL = { nome: "nome", whatsapp: "WhatsApp", email: "e-mail" };
+  // Só o formato: quem valida de verdade é o js/lead-rules.js, na página. Aqui é para a equipe
+  // saber se dá para usar o dado, e não para recusar ninguém.
+  const EMAIL_INTEIRO = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+  /** wa.me com meio número não abre conversa nenhuma: só vira link o telefone com 11 dígitos. */
+  function digitosInteiros(valor) {
+    const so = String(valor || "").replace(/\D/g, "");
+    return so.length === 11 ? so : "";
+  }
+
+  function rascunhoHtml(item) {
+    const digitos = digitosInteiros(item.whatsapp_digits);
+    const temEmail = EMAIL_INTEIRO.test(String(item.email || "").trim());
+
+    const telefone = digitos
+      ? `<a href="${escapeHtml(whatsappLink(digitos))}" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>${escapeHtml(
+          item.whatsapp || digitos
+        )}<span class="visualmente-oculto"> (abre o WhatsApp)</span></a>`
+      : `<span>${escapeHtml(item.whatsapp ? `${item.whatsapp} (incompleto)` : "sem WhatsApp")}</span>`;
+
+    const falta = [];
+    if (!String(item.nome || "").trim()) falta.push("nome");
+    if (!digitos) falta.push(item.whatsapp ? "WhatsApp inteiro" : "WhatsApp");
+    if (!temEmail) falta.push(item.email ? "e-mail inteiro" : "e-mail");
+
+    // Preencheu os três e mesmo assim não tocou no botão: é o lead mais quente desta lista.
+    const selo = falta.length
+      ? `<span class="selo meio">Falta ${escapeHtml(falta.join(", "))}</span>`
+      : '<span class="selo quente">Preencheu tudo e não enviou</span>';
+
+    const parou = ROTULO_CAMPO_PARCIAL[item.ultimo_campo]
+      ? ` · parou no ${ROTULO_CAMPO_PARCIAL[item.ultimo_campo]}`
+      : "";
+
+    return `<article class="pessoa ins-rascunho" data-rascunho="${escapeHtml(String(item.id))}">
+      <div class="pessoa-cabeca">
+        <div class="pessoa-quem">
+          <span class="pessoa-nome">${escapeHtml(String(item.nome || "").trim() || "Sem nome")}</span>
+          <span class="pessoa-meta">${escapeHtml(`${dataHora(item.atualizado_em)}${parou}`)}</span>
+        </div>
+        <div class="pessoa-contato">${telefone}<span>${escapeHtml(String(item.email || "").trim() || "sem e-mail")}</span></div>
+        <div class="pessoa-selos">${selo}</div>
+        <div class="pessoa-acoes">
+          <span class="pessoa-origem">${escapeHtml(origemTexto(item))}</span>
+        </div>
+      </div>
+    </article>`;
+  }
+
+  /**
+   * O cartão "Não terminaram". Só aparece quando o servidor manda o bloco `parciais` (banco com a
+   * view inscricoes_parciais_abertas) — e, mesmo assim, some quando não há ninguém e o período é
+   * um recorte, para não virar um cartão vazio permanente na tela.
+   */
+  function listaParciaisHtml() {
+    if (!ins.parciais.tem) return "";
+    const p = ins.parciais;
+    const corpo = p.itens.length
+      ? `${p.itens.map((item) => rascunhoHtml(item)).join("")}${
+          p.itens.length < p.total
+            ? `<button type="button" class="botao botao-leve ins-mais" data-parciais-mais data-foco="parciais-mais"${
+                p.carregando ? " disabled" : ""
+              }>${p.carregando ? "Carregando..." : `Carregar mais ${n(Math.min(LIMITE_INSCRITOS, p.total - p.itens.length))}`}</button>`
+            : ""
+        }`
+      : vazioHtml(
+          state.periodo === "tudo" ? "Ninguém parou no meio ainda." : "Ninguém parou no meio neste período.",
+          "Quem começa a preencher e some aparece aqui, com o que já tinha digitado."
+        );
+    return `<article class="cartao ins-parciais" aria-labelledby="ins-parciais-titulo">
+      <div class="cartao-cabeca">
+        <h3 id="ins-parciais-titulo">Não terminaram</h3>
+        <p class="cartao-sub">Quem começou a preencher e não chegou a tocar no botão. O formulário guarda o que foi digitado enquanto a pessoa digita — quem terminar depois sai daqui sozinho.</p>
+      </div>
+      <p class="cartao-sub ins-parciais-conta">Mostrando <strong>${n(p.itens.length)}</strong> de <strong>${n(p.total)}</strong> ${
+        p.total === 1 ? "pessoa" : "pessoas"
+      }, das que pararam mais recentemente para as mais antigas.</p>
+      <div class="ins-pessoas-lista">${corpo}</div>
+    </article>`;
+  }
+
   function pintarInscricoes() {
     const alvo = $("[data-inscricoes]");
     $("[data-inscricoes-periodo]").textContent =
@@ -3556,7 +3681,12 @@
         </div>`
       : placarInscricaoHtml(t);
 
-    redesenhar(alvo, `${topo}<div class="ins-lista">${cartaoInscricaoHtml(pagina, linha, t)}</div>${comprasRecentesHtml(t)}${listaInscritosHtml(pagina)}`);
+    redesenhar(
+      alvo,
+      `${topo}<div class="ins-lista">${cartaoInscricaoHtml(pagina, linha, t)}</div>${comprasRecentesHtml(t)}${listaInscritosHtml(
+        pagina
+      )}${listaParciaisHtml()}`
+    );
   }
 
   $("[data-inscricoes]").addEventListener("click", (evento) => {
@@ -3573,7 +3703,12 @@
     }
     if (alvo.closest("[data-ins-mais]") && !ins.carregando) {
       state.focoDepois = "ins-mais";
-      carregarInscricoes({ mais: true });
+      carregarInscricoes({ mais: true, lista: "inscritos" });
+      return;
+    }
+    if (alvo.closest("[data-parciais-mais]") && !ins.carregando) {
+      state.focoDepois = "parciais-mais";
+      carregarInscricoes({ mais: true, lista: "parciais" });
     }
   });
 

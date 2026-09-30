@@ -290,12 +290,20 @@
   botao.addEventListener("pointercancel", soltarEnviar);
 
   for (const campo of ORDEM) {
+    campos[campo].addEventListener("focus", () => {
+      ultimoCampo = campo;
+    });
     campos[campo].addEventListener("blur", () => {
+      // Saiu do campo: o que está nele já pode valer como rascunho, mesmo que a pessoa pare aqui.
+      salvarRascunho();
       if (apertandoEnviar) return;
       if (campos[campo].value.trim() || tentouEnviar) validarCampo(campo);
       if (campo === "email") atualizarSugestao(false);
     });
     campos[campo].addEventListener("input", () => {
+      ultimoCampo = campo;
+      // Parou de digitar: o rascunho sobe sozinho, sem esperar a pessoa sair do campo.
+      agendarRascunho(RASCUNHO_ESPERA_MS);
       // Corrigiu? O erro some na hora, sem esperar sair do campo.
       if (form.querySelector(`[data-campo="${campo}"]`).classList.contains("tem-erro") && !erroLocal(campo)) {
         mostrarErro(campo, "");
@@ -357,6 +365,126 @@
     whatsappAnterior = campos.whatsapp.value;
     // Nada é enviado sozinho: a pessoa confere e toca no botão.
   })();
+
+  /* ================================================================== */
+  /* Rascunho — o que a pessoa digitou ANTES de tocar no botão            */
+  /* ================================================================== */
+  /*
+   * A maior parte de quem abre um formulário não o envia. O rascunho existe para que esse lead não
+   * vire nada: o que já foi digitado sobe para o /api/inscricao/parcial e aparece no painel, na
+   * lista "Não terminaram" da aba desta página, com o WhatsApp pronto para a equipe chamar.
+   *
+   * Regras que este bloco não quebra, em ordem de importância:
+   *   1. NADA aqui pode atrapalhar a venda. É sempre disparo sem espera, sempre em try/catch, e
+   *      nenhum caminho do envio de verdade depende de uma resposta daqui.
+   *   2. Quem ENVIA some da lista: no instante em que o formulário é aceito, o rascunho desliga
+   *      (`inscricaoEnviada`), e o servidor ainda carimba o rascunho na mesma transação da
+   *      inscrição. Uma pessoa que comprou nunca pode aparecer como "não terminou".
+   *   3. Digitar não vira rajada de POST: o mesmo conteúdo não sai duas vezes, e entre duas
+   *      gravações existe um intervalo mínimo. Quem está saindo da página fura o intervalo (é a
+   *      última chance) e sai por sendBeacon, que sobrevive à página fechando.
+   */
+
+  const API_PARCIAL = "/api/inscricao/parcial";
+  /** Parou de digitar por este tempo: o rascunho sobe. */
+  const RASCUNHO_ESPERA_MS = 1200;
+  /** Duas gravações nunca saem mais perto que isto (a não ser na saída da página). */
+  const RASCUNHO_INTERVALO_MS = 2500;
+
+  let rascunhoAssinatura = "";
+  let rascunhoEnviadoEm = 0;
+  let rascunhoTimer = 0;
+  let inscricaoEnviada = false;
+  let ultimoCampo = "";
+
+  function agendarRascunho(ms) {
+    window.clearTimeout(rascunhoTimer);
+    rascunhoTimer = window.setTimeout(() => salvarRascunho(), ms);
+  }
+
+  /** Só o que o rascunho manda: o valor CRU dos campos, que o servidor normaliza. */
+  function corpoDoRascunho() {
+    return JSON.stringify({
+      pagina: pagina.id,
+      visitante_id: visitanteDoAparelho(),
+      contato: {
+        nome: campos.nome.value.trim(),
+        whatsapp: campos.whatsapp.value.trim(),
+        email: campos.email.value.trim()
+      },
+      ultimo_campo: ultimoCampo || null,
+      rastreio: rastreioAtual()
+    });
+  }
+
+  function mandarRascunho(corpo, saindo) {
+    // Saindo da página, o beacon é o único que o navegador promete entregar. Ele pode recusar
+    // (fila cheia): nesse caso ainda vale tentar o fetch.
+    try {
+      if (saindo && navigator.sendBeacon && navigator.sendBeacon(API_PARCIAL, new Blob([corpo], { type: "application/json" }))) {
+        return;
+      }
+    } catch {
+      // Beacon bloqueado (webview antigo): cai no fetch.
+    }
+    try {
+      if (typeof window.fetch === "function") {
+        window
+          .fetch(API_PARCIAL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: corpo,
+            credentials: "same-origin",
+            keepalive: true
+          })
+          .catch(() => {});
+        return;
+      }
+    } catch {
+      // fetch recusado: última tentativa pelo beacon.
+    }
+    try {
+      if (navigator.sendBeacon) navigator.sendBeacon(API_PARCIAL, new Blob([corpo], { type: "application/json" }));
+    } catch {
+      // Sem jeito de gravar o rascunho. A página continua exatamente igual.
+    }
+  }
+
+  /** `saindo` = a pessoa está fechando ou trocando de página: é a última chance de gravar. */
+  function salvarRascunho({ saindo = false } = {}) {
+    if (inscricaoEnviada) return;
+    window.clearTimeout(rascunhoTimer);
+
+    const nome = campos.nome.value.trim();
+    const whatsapp = campos.whatsapp.value.trim();
+    const email = campos.email.value.trim();
+    // Formulário em branco: não existe rascunho.
+    if (!nome && !whatsapp && !email) return;
+
+    const assinatura = `${nome}|${whatsapp}|${email}|${ultimoCampo}`;
+    if (assinatura === rascunhoAssinatura) return;
+
+    const desde = Date.now() - rascunhoEnviadoEm;
+    if (!saindo && rascunhoEnviadoEm && desde < RASCUNHO_INTERVALO_MS) {
+      agendarRascunho(RASCUNHO_INTERVALO_MS - desde);
+      return;
+    }
+
+    rascunhoAssinatura = assinatura;
+    rascunhoEnviadoEm = Date.now();
+    try {
+      mandarRascunho(corpoDoRascunho(), saindo);
+    } catch {
+      // Nem montar o corpo pode derrubar a página.
+    }
+  }
+
+  // Trocou de aba, minimizou, voltou para o app: no celular é AQUI que a página costuma morrer,
+  // e não no pagehide. Os dois valem, e a assinatura impede a gravação dobrada.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") salvarRascunho({ saindo: true });
+  });
+  window.addEventListener("pagehide", () => salvarRascunho({ saindo: true }));
 
   /* ================================================================== */
   /* Envio                                                               */
@@ -458,6 +586,11 @@
     }
     gravarJson(CHAVE_INSCRICAO, { inscrito: true, pagina: pagina.id, contato, em: new Date().toISOString() });
 
+    // A partir daqui o rascunho desliga: a pessoa TERMINOU, e a saída desta página para o checkout
+    // não pode disparar um "não terminou" no painel.
+    inscricaoEnviada = true;
+    window.clearTimeout(rascunhoTimer);
+
     carregando(true);
 
     let destino = "";
@@ -484,6 +617,8 @@
         const dados = await resposta.json().catch(() => null);
         if (dados && dados.error === "invalid_contact") {
           carregando(false);
+          // O servidor recusou o contato: ela continua aqui, preenchendo. O rascunho volta a valer.
+          inscricaoEnviada = false;
           mostrarErrosDoServidor(dados.campos);
           return;
         }

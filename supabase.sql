@@ -1389,12 +1389,111 @@ create index if not exists compras_recebido_em_idx on public.compras (recebido_e
 create index if not exists compras_comprador_email_idx on public.compras (comprador_email);
 create index if not exists compras_comprador_digits_idx on public.compras (comprador_digits);
 
+-- --------------------------------------------------------------------------------------------
+-- inscricoes_parciais — quem COMEÇOU o formulário e (ainda) não enviou.
+--
+-- Uma linha por aparelho em cada página (pagina + visitante_id), gravada enquanto a pessoa digita.
+-- Serve para uma coisa só: a equipe ver no painel quem parou no meio e ir atrás pelo WhatsApp.
+--
+-- Nada aqui encosta em `inscricoes`. Rascunho é rascunho: pode ter só o nome, telefone pela
+-- metade, e-mail sem arroba. Quem enviou de verdade ganha `concluido_em` e some da lista.
+-- --------------------------------------------------------------------------------------------
+create table if not exists public.inscricoes_parciais (
+  id bigint generated always as identity primary key,
+  -- Id da página em js/checkout-config.js — o mesmo formato de inscricoes.pagina.
+  pagina text not null check (pagina ~ '^[a-z0-9_-]{1,60}$'),
+  -- O visitante do aparelho (ev_pesquisa_visitante), que é o que existe antes do contato.
+  visitante_id uuid not null,
+  criado_em timestamptz not null default now(),
+  atualizado_em timestamptz not null default now(),
+  -- Preenchido por inscricao_salvar quando a pessoa termina. null = ainda não terminou.
+  concluido_em timestamptz,
+  nome text,
+  whatsapp text,                                     -- do jeito que a pessoa digitou até agora
+  whatsapp_digits text,                              -- só dígitos, pode estar incompleto
+  email text,
+  -- Em qual campo ela estava quando parou: 'nome' | 'whatsapp' | 'email'.
+  ultimo_campo text check (ultimo_campo is null or ultimo_campo in ('nome', 'whatsapp', 'email')),
+  toques integer not null default 1,                 -- quantas vezes o rascunho foi gravado
+  utm_source text,
+  utm_medium text,
+  utm_campaign text,
+  utm_content text,
+  utm_term text,
+  fbclid text,
+  gclid text,
+  page_url text,
+  referrer text,
+  dispositivo text
+);
+
+-- Um rascunho por aparelho em cada página: digitar mais não cria linha nova.
+create unique index if not exists inscricoes_parciais_chave_idx
+  on public.inscricoes_parciais (pagina, visitante_id);
+-- A lista do painel: os que pararam por último primeiro.
+create index if not exists inscricoes_parciais_pagina_atualizado_idx
+  on public.inscricoes_parciais (pagina, atualizado_em desc);
+-- inscricoes_parciais_abertas casa o rascunho com a inscrição pelo visitante.
+create index if not exists inscricoes_visitante_id_idx on public.inscricoes (visitante_id);
+
+-- --------------------------------------------------------------------------------------------
+-- inscricoes_parciais_abertas — só quem REALMENTE não terminou.
+--
+-- Duas travas, e de propósito: `concluido_em is null` (o carimbo que inscricao_salvar põe) E
+-- nenhuma inscrição da mesma página com o mesmo visitante, e-mail ou telefone. A segunda existe
+-- por causa da corrida real: o rascunho que a pessoa deixou ao sair da página pode chegar DEPOIS
+-- do envio, e sozinho o carimbo deixaria um comprador na lista de "não terminou".
+-- --------------------------------------------------------------------------------------------
+create or replace view public.inscricoes_parciais_abertas
+with (security_invoker = true) as
+select
+  r.id,
+  r.pagina,
+  r.visitante_id,
+  r.criado_em,
+  r.atualizado_em,
+  r.nome,
+  r.whatsapp,
+  r.whatsapp_digits,
+  r.email,
+  r.ultimo_campo,
+  r.toques,
+  r.utm_source,
+  r.utm_medium,
+  r.utm_campaign,
+  r.utm_content,
+  r.utm_term,
+  r.fbclid,
+  r.gclid,
+  r.page_url,
+  r.referrer,
+  r.dispositivo
+from public.inscricoes_parciais as r
+where r.concluido_em is null
+  and not exists (
+    select 1
+    from public.inscricoes as i
+    where i.pagina = r.pagina
+      and (
+        i.visitante_id = r.visitante_id
+        or (r.email is not null and i.email = r.email)
+        or (r.whatsapp_digits is not null and i.whatsapp_digits = r.whatsapp_digits)
+      )
+  );
+
 alter table public.inscricoes enable row level security;
 alter table public.compras enable row level security;
 revoke all on table public.inscricoes from public, anon, authenticated;
 revoke all on table public.compras from public, anon, authenticated;
 grant select, insert, update, delete on table public.inscricoes to service_role;
 grant select, insert, update, delete on table public.compras to service_role;
+alter table public.inscricoes_parciais enable row level security;
+revoke all on table public.inscricoes_parciais from public, anon, authenticated;
+grant select, insert, update, delete on table public.inscricoes_parciais to service_role;
+revoke all on table public.inscricoes_parciais_abertas from public, anon, authenticated;
+grant select on table public.inscricoes_parciais_abertas to service_role;
+revoke all on sequence public.inscricoes_parciais_id_seq from public, anon, authenticated;
+grant usage, select on sequence public.inscricoes_parciais_id_seq to service_role;
 -- A sequência do id de compras também nasce com grant para anon no Supabase: fora.
 revoke all on sequence public.compras_id_seq from public, anon, authenticated;
 grant usage, select on sequence public.compras_id_seq to service_role;
@@ -1423,6 +1522,7 @@ declare
   v_email text := lower(nullif(btrim(d ->> 'email'), ''));
   v_id_pedido text := nullif(btrim(d ->> 'id'), '');
   uuid_re constant text := '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
+  v_visitante uuid := case when nullif(btrim(d ->> 'visitante_id'), '') ~ uuid_re then (d ->> 'visitante_id')::uuid end;
   v_id uuid;
   v_novo boolean := false;
 begin
@@ -1501,7 +1601,108 @@ begin
     end if;
   end if;
 
+  -- 4. Terminou: o rascunho dela sai da lista de "não terminaram". Fecha pelo visitante E pelo
+  --    contato, porque quem começou num aparelho e enviou noutro é a mesma pessoa. Na MESMA
+  --    transação do insert: não existe instante em que a inscrição já conta e o rascunho ainda
+  --    está aberto.
+  update public.inscricoes_parciais as r set concluido_em = now()
+  where r.pagina = v_pagina
+    and r.concluido_em is null
+    and (
+      (v_visitante is not null and r.visitante_id = v_visitante)
+      or r.email = v_email
+      or r.whatsapp_digits = v_digits
+    );
+
   return json_build_object('ok', true, 'novo', v_novo, 'id', v_id);
+end;
+$$;
+
+
+-- --------------------------------------------------------------------------------------------
+-- inscricao_parcial_salvar: grava o RASCUNHO de quem está digitando e devolve {ok, id}.
+--
+-- Chamado enquanto a pessoa preenche, várias vezes, e por isso é curto e tolerante: nada aqui
+-- valida contato (rascunho por definição está incompleto) e nada aqui lança por causa de um campo
+-- feio. Obrigatórios só a página e o visitante, que são a chave.
+--
+-- Duas regras que fazem a lista do painel ser confiável:
+--   . campo vazio NUNCA apaga o que já foi digitado (a pessoa que limpa o campo para corrigir não
+--     perde o que tinha);
+--   . `concluido_em` não é tocado aqui — um rascunho atrasado, chegando depois do envio, não
+--     ressuscita ninguém como "não terminou".
+-- --------------------------------------------------------------------------------------------
+create or replace function public.inscricao_parcial_salvar(p jsonb)
+returns json
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  d jsonb := case when jsonb_typeof(p) = 'object' then p else '{}'::jsonb end;
+  v_pagina text := nullif(btrim(d ->> 'pagina'), '');
+  uuid_re constant text := '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
+  v_visitante uuid := case when nullif(btrim(d ->> 'visitante_id'), '') ~ uuid_re then (d ->> 'visitante_id')::uuid end;
+  v_campo text := nullif(btrim(d ->> 'ultimo_campo'), '');
+  v_id bigint;
+begin
+  if v_pagina is null then
+    raise exception 'inscricao_parcial_salvar: página obrigatória' using errcode = '22023';
+  end if;
+  if v_visitante is null then
+    raise exception 'inscricao_parcial_salvar: visitante obrigatório' using errcode = '22023';
+  end if;
+  if v_campo is not null and v_campo not in ('nome', 'whatsapp', 'email') then
+    v_campo := null;
+  end if;
+
+  -- Um único comando: sem janela entre "existe?" e "grava", mesmo com dois toques ao mesmo tempo.
+  insert into public.inscricoes_parciais as r (
+    pagina, visitante_id, nome, whatsapp, whatsapp_digits, email, ultimo_campo,
+    utm_source, utm_medium, utm_campaign, utm_content, utm_term, fbclid, gclid,
+    page_url, referrer, dispositivo
+  ) values (
+    v_pagina,
+    v_visitante,
+    nullif(btrim(d ->> 'nome'), ''),
+    nullif(btrim(d ->> 'whatsapp'), ''),
+    nullif(btrim(d ->> 'whatsapp_digits'), ''),
+    lower(nullif(btrim(d ->> 'email'), '')),
+    v_campo,
+    nullif(btrim(d ->> 'utm_source'), ''),
+    nullif(btrim(d ->> 'utm_medium'), ''),
+    nullif(btrim(d ->> 'utm_campaign'), ''),
+    nullif(btrim(d ->> 'utm_content'), ''),
+    nullif(btrim(d ->> 'utm_term'), ''),
+    nullif(btrim(d ->> 'fbclid'), ''),
+    nullif(btrim(d ->> 'gclid'), ''),
+    nullif(btrim(d ->> 'page_url'), ''),
+    nullif(btrim(d ->> 'referrer'), ''),
+    nullif(btrim(d ->> 'dispositivo'), '')
+  )
+  on conflict (pagina, visitante_id) do update set
+    -- coalesce(novo, velho): o que veio vazio não apaga o que já estava lá.
+    nome = coalesce(excluded.nome, r.nome),
+    whatsapp = coalesce(excluded.whatsapp, r.whatsapp),
+    whatsapp_digits = coalesce(excluded.whatsapp_digits, r.whatsapp_digits),
+    email = coalesce(excluded.email, r.email),
+    ultimo_campo = coalesce(excluded.ultimo_campo, r.ultimo_campo),
+    toques = r.toques + 1,
+    atualizado_em = now(),
+    page_url = coalesce(r.page_url, excluded.page_url),
+    referrer = coalesce(r.referrer, excluded.referrer),
+    dispositivo = coalesce(r.dispositivo, excluded.dispositivo),
+    -- Campanha como UM bloco, igual a inscricao_salvar: primeiro toque manda.
+    utm_source = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then excluded.utm_source else r.utm_source end,
+    utm_medium = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then excluded.utm_medium else r.utm_medium end,
+    utm_campaign = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then excluded.utm_campaign else r.utm_campaign end,
+    utm_content = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then excluded.utm_content else r.utm_content end,
+    utm_term = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then excluded.utm_term else r.utm_term end,
+    fbclid = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then excluded.fbclid else r.fbclid end,
+    gclid = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then excluded.gclid else r.gclid end
+  returning r.id into v_id;
+
+  return json_build_object('ok', true, 'id', v_id);
 end;
 $$;
 
@@ -2009,9 +2210,11 @@ as $$
 $$;
 
 revoke all on function public.inscricao_salvar(jsonb) from public, anon, authenticated;
+revoke all on function public.inscricao_parcial_salvar(jsonb) from public, anon, authenticated;
 revoke all on function public.hotmart_registrar_compra(jsonb) from public, anon, authenticated;
 revoke all on function public.inscricoes_resumo(timestamptz, timestamptz, text) from public, anon, authenticated;
 grant execute on function public.inscricao_salvar(jsonb) to service_role;
+grant execute on function public.inscricao_parcial_salvar(jsonb) to service_role;
 grant execute on function public.hotmart_registrar_compra(jsonb) to service_role;
 grant execute on function public.inscricoes_resumo(timestamptz, timestamptz, text) to service_role;
 

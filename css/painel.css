@@ -3122,6 +3122,25 @@ tr.ins-orfa td {
   margin: 0;
 }
 
+/* "Não terminaram": o mesmo cartão dos inscritos, com a listra que diz que ali é rascunho. */
+.ins-parciais-conta {
+  margin: -0.35rem 0 0.7rem;
+}
+
+/* Mesmo cartão do inscrito (.pessoa), com a listra que diz que ali é rascunho. `.ins-pessoa` de
+   propósito NÃO entra: ela é o seletor de "quem se inscreveu", na tela e nos testes. */
+.ins-rascunho {
+  margin: 0;
+  border-left: 3px solid var(--gold-soft);
+}
+
+/* Preencheu os três campos e não tocou no botão: o lead mais quente da lista. */
+.selo.quente {
+  border-color: color-mix(in srgb, var(--ember) 45%, var(--border));
+  background: color-mix(in srgb, var(--ember) 10%, #fffdf8);
+  color: var(--ember-deep);
+}
+
 .ins-sck-valor {
   color: var(--ember-deep);
   font-weight: 600;

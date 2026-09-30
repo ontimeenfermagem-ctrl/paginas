@@ -596,7 +596,55 @@ export function gerar({ seed = 7, pessoas: totalPessoas = 800, agora = new Date(
     delete inscricao._sck;
     delete inscricao._reenviou;
   }
-  return { visitantes, pessoas: respostas, eventos, inscricoes, compras };
+
+  /*
+   * Rascunhos: quem COMEÇOU o formulário e não enviou (inscricoes_parciais_abertas). Três por
+   * página, um de cada estado que a tela desenha diferente — parou no nome, parou no telefone pela
+   * metade, e preencheu tudo e mesmo assim não tocou no botão.
+   */
+  const parciais = [];
+  let idParcial = 0;
+  for (const pagina of CHK.LISTA) {
+    const estados = [
+      { nome: `Rascunho Nome ${pagina.id}`, whatsapp: null, digits: null, email: null, campo: "nome" },
+      { nome: `Rascunho Meio ${pagina.id}`, whatsapp: "(11) 98", digits: "1198", email: null, campo: "whatsapp" },
+      {
+        nome: `Rascunho Cheio ${pagina.id}`,
+        whatsapp: "(11) 91234-5678",
+        digits: "11912345678",
+        email: `cheio.${pagina.id}@gmail.com`,
+        campo: "email"
+      }
+    ];
+    for (const [i, estado] of estados.entries()) {
+      idParcial += 1;
+      parciais.push({
+        id: idParcial,
+        pagina: pagina.id,
+        visitante_id: `40000000-0000-4000-8000-${String(idParcial).padStart(12, "0")}`,
+        criado_em: new Date(agoraMs - (i + 1) * 3600000).toISOString(),
+        atualizado_em: new Date(agoraMs - (i + 1) * 3600000 + 300000).toISOString(),
+        nome: estado.nome,
+        whatsapp: estado.whatsapp,
+        whatsapp_digits: estado.digits,
+        email: estado.email,
+        ultimo_campo: estado.campo,
+        toques: i + 2,
+        utm_source: "instagram",
+        utm_medium: null,
+        utm_campaign: "bio",
+        utm_content: null,
+        utm_term: null,
+        fbclid: null,
+        gclid: null,
+        page_url: `${pagina.origem || ""}${pagina.rota}`,
+        referrer: null,
+        dispositivo: "mobile"
+      });
+    }
+  }
+
+  return { visitantes, pessoas: respostas, eventos, inscricoes, compras, parciais };
 }
 
 /* ------------------------------------------------------------------ Agregados (espelho do SQL) */
@@ -1047,6 +1095,14 @@ export function comoSqlAntigo(resumo, dados, { desde, ate, pagina } = {}) {
       casou: c.inscricao_id != null
     }))
   };
+}
+
+/** A lista de quem NÃO terminou (view inscricoes_parciais_abertas), do toque mais recente ao mais antigo. */
+export function listaParciais(dados, { desde, ate, pagina } = {}, { limite = 100, offset = 0 } = {}) {
+  const todos = (dados.parciais || [])
+    .filter((r) => noRecorte(r.atualizado_em, desde, ate) && (!pagina || r.pagina === pagina))
+    .sort((a, b) => b.atualizado_em.localeCompare(a.atualizado_em) || b.id - a.id);
+  return { itens: todos.slice(offset, offset + limite), total: todos.length };
 }
 
 /** A lista de inscritos de /api/painel/inscricoes (mais recentes primeiro). */

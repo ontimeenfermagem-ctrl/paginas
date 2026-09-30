@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 import { createServerApp } from "../../server.mjs";
-import { abertas, CHK, comoSqlAntigo, cruzamento, EV, gerar, inscricoesResumo, lista, listaInscricoes, OBR, paginas, painel, RPL } from "./apoio/painel-fixtures.mjs";
+import { abertas, CHK, comoSqlAntigo, cruzamento, EV, gerar, inscricoesResumo, lista, listaInscricoes, listaParciais, OBR, paginas, painel, RPL } from "./apoio/painel-fixtures.mjs";
 
 // A faixa de abas, na ordem: a pesquisa, o obrigado, as listas de contato (perfis + uma por sala
 // de aula) e uma por página de inscrição. Sai dos configs, para uma sala nova não quebrar o teste.
@@ -144,7 +144,17 @@ function criarMock(page, { dados = DADOS, logado = true } = {}) {
           const recorte = { desde: q.desde, ate: q.ate, pagina: q.pagina };
           const listaIns = listaInscricoes(mock.dados, recorte, { limite: Number(q.limite || 100), offset: Number(q.offset || 0) });
           const resumo = inscricoesResumo(mock.dados, recorte);
-          return json(200, { ok: true, resumo: mock.sqlAntigo ? comoSqlAntigo(resumo, mock.dados, recorte) : resumo, ...listaIns, gerado_em: new Date().toISOString() });
+          // `mock.semParciais` = banco ainda sem a view dos rascunhos: o cartão some e o resto fica.
+          const parciais = mock.semParciais
+            ? null
+            : listaParciais(mock.dados, recorte, { limite: Number(q.limite || 100), offset: Number(q.parciais_offset || 0) });
+          return json(200, {
+            ok: true,
+            resumo: mock.sqlAntigo ? comoSqlAntigo(resumo, mock.dados, recorte) : resumo,
+            ...listaIns,
+            parciais,
+            gerado_em: new Date().toISOString()
+          });
         }
         if (rota === "cruzamento") {
           const ids = EV.perguntasAnalisaveis().map((p) => p.id);
@@ -1589,6 +1599,49 @@ cenario("inscricoes", async () => {
     const naoEsperados = erros.filter((e) => !/Failed to load resource|502/.test(e));
     confere(naoEsperados.length === 0, `inscrição: sem erros de JavaScript em ${largura}px (${naoEsperados.join(" | ")})`);
     await page.context().close();
+  }
+
+  // "Não terminaram": quem começou o formulário e não enviou, com o que já tinha digitado.
+  {
+    const r = await novaPagina(browser, { url: `/painel?pagina=${idAba(VDF)}&periodo=tudo`, largura: 390, altura: 844 });
+    await r.page.waitForSelector(".ins-parciais");
+    await esperarCalmo(r.page);
+
+    const esperados = listaParciais(DADOS, { pagina: VDF.id });
+    const cartoes = await r.page.$$(".ins-parciais .ins-rascunho");
+    confere(cartoes.length === esperados.itens.length, `não terminaram: ${esperados.itens.length} pessoas na lista (vieram ${cartoes.length})`);
+    confere((await texto(r.page, ".ins-parciais-conta")).includes(fmt(esperados.total)), "não terminaram: o contador diz o total");
+
+    const selos = await r.page.$$eval(".ins-parciais .ins-rascunho .selo", (els) => els.map((e) => e.textContent.trim()));
+    confere(selos.some((t) => t === "Falta WhatsApp, e-mail"), `não terminaram: quem só deu o nome mostra o que falta (${selos})`);
+    confere(selos.some((t) => t === "Falta WhatsApp inteiro, e-mail"), `não terminaram: telefone pela metade é "inteiro" que falta (${selos})`);
+    confere(selos.some((t) => t === "Preencheu tudo e não enviou"), `não terminaram: o lead mais quente é marcado (${selos})`);
+
+    // Só o telefone COMPLETO vira link: wa.me com meio número não abre conversa nenhuma.
+    const links = await r.page.$$eval(".ins-parciais .ins-rascunho .pessoa-contato a", (as) => as.map((a) => a.href));
+    confere(links.length === 1 && links[0] === "https://wa.me/5511912345678", `não terminaram: um botão de WhatsApp, e só o do número inteiro (${links})`);
+    const meio = await r.page.$$eval(".ins-parciais .ins-rascunho .pessoa-contato span", (els) => els.map((e) => e.textContent.trim()));
+    confere(meio.includes("(11) 98 (incompleto)"), `não terminaram: o número pela metade aparece marcado como incompleto (${meio})`);
+    confere(meio.includes("sem e-mail"), "não terminaram: campo que não foi digitado aparece como vazio");
+
+    confere((await r.page.evaluate(() => document.documentElement.scrollWidth)) <= 390, "não terminaram: sem rolagem horizontal em 390px");
+    await tela(r.page, "inscricoes-nao-terminaram-390", { full: true });
+    confere(r.erros.length === 0, `não terminaram: sem erros de JavaScript (${r.erros.join(" | ")})`);
+    await r.page.context().close();
+  }
+
+  // Banco ainda sem a view dos rascunhos: o cartão some e o resto da aba continua inteiro.
+  {
+    const semR = await novaPagina(browser, { largura: 390, altura: 844 });
+    semR.mock.semParciais = true;
+    await semR.page.waitForSelector("[data-panel-view]:not([hidden])");
+    await semR.page.click(`[data-paginas] [data-pagina='${idAba(VDF)}']`);
+    await semR.page.waitForSelector(`${cartao(VDF)} [data-etapa]`);
+    await esperarCalmo(semR.page);
+    confere((await semR.page.$$(".ins-parciais")).length === 0, "sem a view: o cartão de rascunhos nem aparece");
+    confere((await semR.page.$$("[data-inscricoes] .ins-pessoa")).length > 0, "sem a view: a lista de inscritos continua lá");
+    confere(semR.erros.length === 0, `sem a view: sem erros de JavaScript (${semR.erros.join(" | ")})`);
+    await semR.page.context().close();
   }
 
   // Link salvo de antes (?pagina=inscricoes): abre a primeira página de inscrição e a URL passa a

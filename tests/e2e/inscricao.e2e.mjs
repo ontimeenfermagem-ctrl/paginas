@@ -122,7 +122,7 @@ after(async () => {
  * Devolve o registro: `corpos` (o que chegou) e `keepalive` (quantos vieram com keepalive).
  */
 async function interceptar(page, modo) {
-  const reg = { corpos: [], abortados: 0 };
+  const reg = { corpos: [], parciais: [], abortados: 0 };
   await page.route("**/api/inscricao", async (route) => {
     let corpo = null;
     try {
@@ -154,6 +154,22 @@ async function interceptar(page, modo) {
       });
     } catch {
       // A página já foi embora para o checkout antes da resposta: não é erro.
+    }
+  });
+  // O rascunho (o que a pessoa digitou ANTES do botão): registrado e respondido na hora, para
+  // nenhum caso ficar dependendo de um 404 do servidor estático.
+  await page.route("**/api/inscricao/parcial", async (route) => {
+    let corpo = null;
+    try {
+      corpo = JSON.parse(route.request().postData() || "null");
+    } catch {
+      corpo = null;
+    }
+    reg.parciais.push(corpo);
+    try {
+      await route.fulfill({ status: 200, contentType: "application/json", body: '{"ok":true,"gravado":true}' });
+    } catch {
+      // A página já saiu: o rascunho de despedida não precisa de resposta.
     }
   });
   await page.route(/facebook\.(net|com)/, (rota) => rota.abort());
@@ -730,3 +746,113 @@ for (const pagina of C.LISTA.filter((item) => !item.origem && item.id !== PAGINA
     assert.equal(reg.corpos[0].rastreio.utm_term, "publico-frio", "as UTMs da página vão no corpo");
   });
 }
+
+/* ================================================================== */
+/* 10. O rascunho: o que a pessoa digitou ANTES de tocar no botão      */
+/* ================================================================== */
+
+/*
+ * O lead que abandona o formulário é o que esta parte existe para salvar. O que ela precisa provar,
+ * em ordem: o rascunho sobe antes do botão; quem ENVIA não vira "não terminou" na saída da página;
+ * e nada disso atrapalha a ida ao checkout.
+ */
+
+caso("rascunho: sair do campo do nome já grava, antes de qualquer botão", async (page, reg) => {
+  await abrir(page, UTM);
+
+  await page.fill("#campo-nome", "maria  da silva");
+  await page.locator("#campo-whatsapp").focus(); // blur do nome
+  await esperar(400);
+
+  assert.ok(reg.parciais.length >= 1, "o rascunho subiu sozinho");
+  const r = reg.parciais.at(-1);
+  assert.equal(r.pagina, PAGINA.id);
+  assert.match(r.visitante_id, UUID, "o rascunho é do mesmo visitante do aparelho");
+  // O valor CRU: quem normaliza é o servidor, com a mesma régua do contato completo.
+  assert.equal(r.contato.nome, "maria  da silva");
+  assert.equal(r.contato.whatsapp, "");
+  assert.equal(r.contato.email, "");
+  assert.equal(r.ultimo_campo, "nome", "o painel mostra em qual campo a pessoa parou");
+  assert.equal(r.rastreio.utm_term, "publico-frio", "a campanha do lead que sumiu vai junto");
+  assert.equal(reg.corpos.length, 0, "nenhuma inscrição foi criada: ela ainda não enviou nada");
+});
+
+/**
+ * Espera um rascunho que satisfaça `condicao`. Entre duas gravações existe um intervalo mínimo
+ * (o formulário não vira rajada de POST), então esperar por conteúdo é mais honesto do que
+ * esperar por um tempo fixo.
+ */
+async function esperarRascunho(reg, condicao, limite = 6000) {
+  const fim = Date.now() + limite;
+  while (Date.now() < fim) {
+    const achado = reg.parciais.filter(Boolean).find(condicao);
+    if (achado) return achado;
+    await esperar(120);
+  }
+  return null;
+}
+
+caso("rascunho: parar de digitar no meio do telefone grava sem sair do campo", async (page, reg) => {
+  await abrir(page);
+  await page.type("#campo-nome", "Ana Paula");
+  // Ninguém sai de campo nenhum daqui para a frente: quem manda o rascunho é a parada de digitação.
+  await page.type("#campo-whatsapp", "1198");
+
+  const r = await esperarRascunho(reg, (item) => item.contato.whatsapp);
+  assert.ok(r, "o rascunho subiu só por ter parado de digitar");
+  assert.equal(r.contato.nome, "Ana Paula");
+  assert.equal(r.contato.whatsapp, "(11) 98", "o telefone pela metade, com a máscara da tela");
+  assert.equal(r.ultimo_campo, "whatsapp");
+  assert.equal(reg.corpos.length, 0, "nada disso cria inscrição");
+});
+
+caso("rascunho: digitar sem parar não vira rajada de POST", async (page, reg) => {
+  await abrir(page);
+  // Sete segundos de digitação contínua, um caractere a cada 250 ms.
+  await page.type("#campo-nome", "Ana Paula de Souza Lima", { delay: 250 });
+  await esperar(1500);
+  assert.ok(reg.parciais.length <= 4, `gravações demais para 7s digitando: ${reg.parciais.length}`);
+  assert.ok(reg.parciais.length >= 1, "mas o rascunho subiu enquanto ela digitava");
+});
+
+caso("rascunho: formulário em branco não manda nada", async (page, reg) => {
+  await abrir(page);
+  await page.locator("#campo-nome").focus();
+  await page.locator("#campo-email").focus();
+  await esperar(1800);
+  assert.deepEqual(reg.parciais, [], "sem nada digitado, nada sobe");
+});
+
+caso("rascunho: quem ENVIA não vira 'não terminou' na saída para o checkout", async (page, reg) => {
+  await abrir(page);
+  await preencher(page);
+  await esperar(1500); // dá tempo de o rascunho de quem estava preenchendo subir
+  const antes = reg.parciais.length;
+
+  await page.click("#botao-ir");
+  await esperarCheckout(page);
+
+  assert.equal(reg.corpos.length, 1, "a inscrição foi enviada");
+  assert.equal(
+    reg.parciais.length,
+    antes,
+    "nenhum rascunho sai depois do envio: a saída da página não pode criar um 'não terminou'"
+  );
+});
+
+caso(
+  "rascunho: contato recusado pelo servidor devolve a pessoa ao formulário, e o rascunho volta a valer",
+  async (page, reg) => {
+    await abrir(page);
+    await preencher(page);
+    await page.click("#botao-ir");
+    await page.waitForSelector("#erro-email:not([hidden])");
+
+    await page.fill("#campo-email", "maria.silva@gmail.com");
+    await page.locator("#campo-nome").focus();
+
+    const r = await esperarRascunho(reg, (item) => item.contato.email === "maria.silva@gmail.com");
+    assert.ok(r, "ela continua na página, então o rascunho continua subindo");
+  },
+  { api: () => ({ status: 422, json: { ok: false, error: "invalid_contact", campos: { email: "Confere o e-mail." } } }) }
+);

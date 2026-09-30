@@ -75,6 +75,10 @@ const SALVAR_RATE_LIMIT_WINDOW_MS = 60_000;
 // A página de inscrição grava uma vez por envio (mais os reenvios de quem volta e clica de novo).
 const INSCRICAO_RATE_LIMIT_MAX = 240;
 const INSCRICAO_RATE_LIMIT_WINDOW_MS = 60_000;
+// O rascunho é gravado enquanto a pessoa digita (a cada parada, a cada campo, ao sair da página):
+// são muitos toques legítimos de um mesmo IP, por isso o teto é mais alto que o da inscrição.
+const PARCIAL_RATE_LIMIT_MAX = 600;
+const PARCIAL_RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_KEYS = 5_000;
 
 // O payload da Hotmart é grande (produto, comprador, comissões, assinatura) e guardamos ele CRU.
@@ -1769,6 +1773,108 @@ async function handleInscricao(request, response, options) {
 }
 
 /* ------------------------------------------------------------------------------------------ */
+/* Rascunho da inscrição (quem começou e ainda não enviou)                                     */
+/* ------------------------------------------------------------------------------------------ */
+
+const CAMPOS_PARCIAIS = new Set(["nome", "whatsapp", "email"]);
+
+/**
+ * O contato de um RASCUNHO: as mesmas funções de normalização do contato completo (leadRules), sem
+ * nenhuma recusa. Rascunho incompleto é o caso normal, e não erro — "Mar", "(11) 9" e "joao@" têm
+ * que caber. O que não veio vira null, e null nunca apaga o que já está no banco.
+ */
+export function normalizarContatoParcial(fonte) {
+  const c = isPlainObject(fonte) ? fonte : {};
+  const nome = leadRules.normalizeName(typeof c.nome === "string" ? c.nome : "").slice(0, 150);
+  const whatsapp = leadRules.formatPhone(typeof c.whatsapp === "string" ? c.whatsapp.slice(0, 40) : "");
+  const email = leadRules.normalizeEmail(typeof c.email === "string" ? c.email : "").slice(0, 254);
+  return {
+    // "maria da silva" já entra como "Maria da Silva": a equipe copia direto para o WhatsApp.
+    nome: nome ? leadRules.formatName(nome) : null,
+    whatsapp: whatsapp || null,
+    whatsapp_digits: whatsapp.replace(/\D/g, "") || null,
+    email: email || null
+  };
+}
+
+/**
+ * POST /api/inscricao/parcial — grava o que a pessoa já digitou, ANTES de ela tocar no botão.
+ *
+ * Chamado pela própria página enquanto o formulário é preenchido (a cada campo, a cada parada de
+ * digitação e ao sair da página). Serve para uma coisa: a equipe ver no painel quem parou no meio
+ * e ir atrás pelo WhatsApp.
+ *
+ * Três princípios, na ordem:
+ *   1. NADA aqui pode atrapalhar a venda. É fire-and-forget do lado da página; aqui é só gravar.
+ *   2. NADA aqui valida contato. Rascunho incompleto é o caso normal — recusar por causa de um
+ *      e-mail sem arroba seria jogar fora exatamente o lead que se quer resgatar.
+ *   3. NADA aqui apaga: campo vazio não sobrescreve o que já foi digitado, e `concluido_em` não é
+ *      tocado (ver inscricao_parcial_salvar).
+ *
+ * Quem TERMINA some da lista sozinho: inscricao_salvar carimba o rascunho na mesma transação da
+ * inscrição, e a view inscricoes_parciais_abertas ainda confere se existe inscrição com o mesmo
+ * visitante, e-mail ou telefone — um rascunho de despedida que chegue depois do envio não
+ * ressuscita ninguém como "não terminou".
+ */
+async function handleInscricaoParcial(request, response, options) {
+  if (corsDaInscricao(request, response, options)) return;
+  if (request.method !== "POST") return methodNotAllowed(response, "POST, OPTIONS");
+  if (!aceitaCorpoDaInscricao(request, response, options)) return;
+
+  if (!options.allowInscricaoParcial(request)) {
+    sendJson(response, 429, { ok: false, error: "too_many_requests" });
+    return;
+  }
+
+  const body = await readObjectBody(request, response);
+  if (!body) return;
+
+  // Contra a LISTA, e não pelo id cru (o mesmo cuidado do /api/inscricao).
+  const pagina = PAGINAS_CHECKOUT.find((item) => item.id === body.pagina) || null;
+  if (!pagina) {
+    sendJson(response, 422, { ok: false, error: "invalid_page" });
+    return;
+  }
+
+  // Sem visitante não há chave: seriam linhas soltas, uma por toque de tecla.
+  const visitante = normalizarUuid(body.visitante_id);
+  if (!visitante) {
+    sendJson(response, 422, { ok: false, error: "invalid_visitor" });
+    return;
+  }
+
+  const contato = normalizarContatoParcial(body.contato);
+  // Formulário em branco (a pessoa só abriu e saiu): não existe rascunho para guardar.
+  if (!contato.nome && !contato.whatsapp_digits && !contato.email) {
+    sendJson(response, 200, { ok: true, gravado: false });
+    return;
+  }
+
+  if (!supabaseEnabled(options)) {
+    sendJson(response, 503, { ok: false, error: "database_not_configured" });
+    return;
+  }
+
+  const gravado = {
+    pagina: pagina.id,
+    visitante_id: visitante,
+    ...contato,
+    ultimo_campo: CAMPOS_PARCIAIS.has(body.ultimo_campo) ? body.ultimo_campo : null,
+    ...normalizarRastreio(body.rastreio)
+  };
+
+  try {
+    await callRpc(options, "inscricao_parcial_salvar", { p: gravado });
+  } catch (error) {
+    console.error(`Falha ao salvar rascunho da inscrição: ${error?.message || "erro"}`);
+    sendJson(response, 502, { ok: false, error: "database_unavailable" });
+    return;
+  }
+
+  sendJson(response, 200, { ok: true, gravado: true });
+}
+
+/* ------------------------------------------------------------------------------------------ */
 /* Webhook de venda da Hotmart                                                                 */
 /* ------------------------------------------------------------------------------------------ */
 
@@ -2313,6 +2419,9 @@ function lerPaginaCheckout(params) {
  * Inscrições e compras da(s) página(s) de checkout: os números vêm do SQL (inscricoes_resumo, o
  * período inteiro) e a lista de inscritos vem da tabela, paginada — os mesmos filtros nos dois.
  */
+// Teto do "carregar mais" da lista de rascunhos: offset gigante só faria o banco varrer à toa.
+const PARCIAIS_OFFSET_MAX = 100_000;
+
 function handleInscricoesPainel(request, response, options) {
   return rotaDoPainel(request, response, options, "as inscrições", async (params) => {
     const { desde, ate } = lerPeriodo(params);
@@ -2330,20 +2439,50 @@ function handleInscricoesPainel(request, response, options) {
     if (desde) query.append("criado_em", `gte.${desde}`);
     if (ate) query.append("criado_em", `lt.${ate}`);
 
-    // As duas idas ao banco vão juntas: os números e a lista chegam no mesmo tempo de uma.
-    const [resumoResponse, listaResponse] = await Promise.all([
+    // Quem COMEÇOU o formulário e não enviou (inscricoes_parciais_abertas). Lista à parte, com o
+    // próprio offset: "carregar mais" numa lista não mexe na outra.
+    const offsetParciais = lerInteiro(params, "parciais_offset", { padrao: 0, minimo: 0, maximo: PARCIAIS_OFFSET_MAX });
+    const queryParciais = new URLSearchParams();
+    queryParciais.set("select", "*");
+    queryParciais.set("order", "atualizado_em.desc,id.desc");
+    queryParciais.set("limit", String(limite));
+    queryParciais.set("offset", String(offsetParciais));
+    if (pagina) queryParciais.set("pagina", `eq.${pagina}`);
+    // Pelo ÚLTIMO toque: "quem parou no meio nesta semana" é quem digitou nesta semana.
+    if (desde) queryParciais.append("atualizado_em", `gte.${desde}`);
+    if (ate) queryParciais.append("atualizado_em", `lt.${ate}`);
+
+    // As idas ao banco vão juntas: os números e as duas listas chegam no tempo de uma.
+    const [resumoResponse, listaResponse, parciaisResponse] = await Promise.all([
       callRpc(options, "inscricoes_resumo", { p_desde: desde, p_ate: ate, p_pagina: pagina }),
-      supabaseRequest(options, `inscricoes?${query.toString()}`, { headers: { Prefer: "count=exact" } })
+      supabaseRequest(options, `inscricoes?${query.toString()}`, { headers: { Prefer: "count=exact" } }),
+      // Banco ainda sem a view (servidor novo, SQL antigo): a aba inteira não pode cair por causa
+      // da lista de rascunhos. Ela some, e o resto funciona igual.
+      supabaseRequest(options, `inscricoes_parciais_abertas?${queryParciais.toString()}`, {
+        headers: { Prefer: "count=exact" }
+      }).catch((error) => {
+        console.error(`Rascunhos de inscrição indisponíveis: ${error?.message || "erro"}`);
+        return null;
+      })
     ]);
     const resumo = await readObjectResponse(resumoResponse);
     if (!Array.isArray(resumo.paginas)) throw new Error("supabase_unexpected_shape");
     const itens = await listaResponse.json();
     if (!Array.isArray(itens)) throw new Error("supabase_unexpected_shape");
 
+    let parciais = null;
+    if (parciaisResponse) {
+      const lista = await parciaisResponse.json().catch(() => null);
+      if (Array.isArray(lista)) {
+        parciais = { itens: lista, total: totalFromContentRange(parciaisResponse, offsetParciais + lista.length) };
+      }
+    }
+
     return {
       resumo,
       itens,
       total: totalFromContentRange(listaResponse, offset + itens.length),
+      parciais,
       gerado_em: new Date(options.now()).toISOString()
     };
   });
@@ -4096,6 +4235,7 @@ export function createServerApp({
     allowComentarios: createRateLimiter({ windowMs: COMENTARIO_RATE_LIMIT_WINDOW_MS, max: COMENTARIOS_RATE_LIMIT_MAX, now: agora }),
     allowPainelAcao: createRateLimiter({ windowMs: COMENTARIO_RATE_LIMIT_WINDOW_MS, max: 60, now: agora }),
     allowInscricao: createRateLimiter({ windowMs: INSCRICAO_RATE_LIMIT_WINDOW_MS, max: INSCRICAO_RATE_LIMIT_MAX, now: agora }),
+    allowInscricaoParcial: createRateLimiter({ windowMs: PARCIAL_RATE_LIMIT_WINDOW_MS, max: PARCIAL_RATE_LIMIT_MAX, now: agora }),
     allowLogin: createRateLimiter({ windowMs: PAINEL_LOGIN_WINDOW_MS, max: PAINEL_LOGIN_MAX, now: agora }),
     allowLeads: createRateLimiter({ windowMs: LEADS_RATE_LIMIT_WINDOW_MS, max: LEADS_RATE_LIMIT_MAX, now: agora })
   };
@@ -4105,6 +4245,7 @@ export function createServerApp({
     ["/api/pesquisa/salvar", handleSalvar],
     ["/api/pagina/evento", handlePaginaEvento],
     ["/api/inscricao", handleInscricao],
+    ["/api/inscricao/parcial", handleInscricaoParcial],
     ["/api/hotmart/venda", handleHotmartVenda],
     ["/api/integrations/manychat/lead", handleManychatLead],
     ["/api/replay/inscricao", handleReplayInscricao],

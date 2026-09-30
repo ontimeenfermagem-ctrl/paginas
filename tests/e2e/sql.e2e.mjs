@@ -1837,7 +1837,7 @@ describe("desempenho", () => {
 const PAGINA = "viver-de-furo";
 
 async function limparInscricoes() {
-  await stack.sql("truncate table public.inscricoes, public.compras restart identity");
+  await stack.sql("truncate table public.inscricoes, public.compras, public.inscricoes_parciais restart identity");
 }
 
 /** O `p` de inscricao_salvar, como o servidor monta. */
@@ -1922,31 +1922,37 @@ describe("inscrições: instalação e segurança", () => {
     const [objetos] = await stack.sql(`
       select
         (select count(*) from pg_proc where pronamespace = 'public'::regnamespace
-           and proname in ('inscricao_salvar', 'hotmart_registrar_compra', 'inscricoes_resumo')) as funcoes,
+           and proname in ('inscricao_salvar', 'inscricao_parcial_salvar', 'hotmart_registrar_compra', 'inscricoes_resumo')) as funcoes,
         (select count(*) from pg_indexes where schemaname = 'public' and tablename = 'inscricoes') as indices_inscricoes,
         (select count(*) from pg_indexes where schemaname = 'public' and tablename = 'compras') as indices_compras,
+        (select count(*) from pg_indexes where schemaname = 'public' and tablename = 'inscricoes_parciais') as indices_parciais,
         (select relrowsecurity::text from pg_class where oid = 'public.inscricoes'::regclass) as rls_inscricoes,
         (select relrowsecurity::text from pg_class where oid = 'public.compras'::regclass) as rls_compras,
-        (select count(*) from pg_policies where tablename in ('inscricoes', 'compras')) as politicas
+        (select relrowsecurity::text from pg_class where oid = 'public.inscricoes_parciais'::regclass) as rls_parciais,
+        (select count(*) from pg_policies where tablename in ('inscricoes', 'compras', 'inscricoes_parciais')) as politicas
     `);
-    // inscricoes: pk + chave única + (pagina, criado_em) + whatsapp_digits + email = 5
+    // inscricoes: pk + chave única + (pagina, criado_em) + whatsapp_digits + email + visitante_id = 6
     // compras: pk + (transacao, evento) + recebido_em + email + digits = 5
+    // inscricoes_parciais: pk + chave única + (pagina, atualizado_em) = 3
     assert.deepEqual(objetos, {
-      funcoes: "3",
-      indices_inscricoes: "5",
+      funcoes: "4",
+      indices_inscricoes: "6",
       indices_compras: "5",
+      indices_parciais: "3",
       rls_inscricoes: "true",
       rls_compras: "true",
+      rls_parciais: "true",
       politicas: "0"
     });
 
     const funcoes = await stack.sql(`
       select proname, prosecdef::text as definer, array_to_string(proconfig, ',') as config, pg_get_function_identity_arguments(oid) as args
       from pg_proc where pronamespace = 'public'::regnamespace
-        and proname in ('inscricao_salvar', 'hotmart_registrar_compra', 'inscricoes_resumo') order by proname
+        and proname in ('inscricao_salvar', 'inscricao_parcial_salvar', 'hotmart_registrar_compra', 'inscricoes_resumo') order by proname
     `);
     assert.deepEqual(funcoes, [
       { proname: "hotmart_registrar_compra", definer: "false", config: "search_path=public", args: "p jsonb" },
+      { proname: "inscricao_parcial_salvar", definer: "false", config: "search_path=public", args: "p jsonb" },
       { proname: "inscricao_salvar", definer: "false", config: "search_path=public", args: "p jsonb" },
       {
         proname: "inscricoes_resumo",
@@ -1981,9 +1987,14 @@ describe("inscrições: instalação e segurança", () => {
 
       const corpos = {
         inscricoes: { id: randomUUID(), pagina: PAGINA, whatsapp_digits: "11999999999", email: "invasor@gmail.com" },
-        compras: { evento: "PURCHASE_APPROVED", payload: {} }
+        compras: { evento: "PURCHASE_APPROVED", payload: {} },
+        inscricoes_parciais: { pagina: PAGINA, visitante_id: randomUUID(), email: "invasor@gmail.com" }
       };
-      for (const tabela of ["inscricoes", "compras"]) {
+      // A view dos rascunhos também não: ela mostra nome, telefone e e-mail de gente que nem enviou.
+      const viewAberta = await chamar("GET", "inscricoes_parciais_abertas?select=*", { chave });
+      assert.ok([401, 403].includes(viewAberta.status), `${papel} GET inscricoes_parciais_abertas -> ${viewAberta.status}`);
+      assert.ok(!Array.isArray(viewAberta.json));
+      for (const tabela of ["inscricoes", "compras", "inscricoes_parciais"]) {
         const leitura = await chamar("GET", `${tabela}?select=*`, { chave });
         assert.ok([401, 403].includes(leitura.status), `${papel} GET ${tabela} -> ${leitura.status}`);
         assert.ok(!Array.isArray(leitura.json));
@@ -1996,6 +2007,7 @@ describe("inscrições: instalação e segurança", () => {
 
       for (const [funcao, corpo] of [
         ["inscricao_salvar", { p: inscricao() }],
+        ["inscricao_parcial_salvar", { p: { pagina: PAGINA, visitante_id: randomUUID(), nome: "Invasor" } }],
         ["hotmart_registrar_compra", { p: compra({ transacao: "HP-INVASOR" }) }],
         ["inscricoes_resumo", { p_pagina: PAGINA }]
       ]) {
@@ -2014,22 +2026,46 @@ describe("inscrições: instalação e segurança", () => {
       select
         bool_or(has_table_privilege(papel, 'public.inscricoes', 'select,insert,update,delete,truncate,references,trigger'))::text as inscricoes,
         bool_or(has_table_privilege(papel, 'public.compras', 'select,insert,update,delete,truncate,references,trigger'))::text as compras,
+        bool_or(has_table_privilege(papel, 'public.inscricoes_parciais', 'select,insert,update,delete,truncate,references,trigger'))::text as parciais,
+        bool_or(has_table_privilege(papel, 'public.inscricoes_parciais_abertas', 'select,insert,update,delete'))::text as parciais_view,
         bool_or(has_sequence_privilege(papel, 'public.compras_id_seq', 'usage,select,update'))::text as sequencia,
+        bool_or(has_sequence_privilege(papel, 'public.inscricoes_parciais_id_seq', 'usage,select,update'))::text as sequencia_parciais,
         bool_or(has_function_privilege(papel, 'public.inscricao_salvar(jsonb)', 'execute')
+             or has_function_privilege(papel, 'public.inscricao_parcial_salvar(jsonb)', 'execute')
              or has_function_privilege(papel, 'public.hotmart_registrar_compra(jsonb)', 'execute')
              or has_function_privilege(papel, 'public.inscricoes_resumo(timestamptz,timestamptz,text)', 'execute'))::text as funcoes
       from unnest(array['anon', 'authenticated', 'public']) as papel
     `);
-    assert.deepEqual(p, { inscricoes: "false", compras: "false", sequencia: "false", funcoes: "false" });
+    assert.deepEqual(p, {
+      inscricoes: "false",
+      compras: "false",
+      parciais: "false",
+      parciais_view: "false",
+      sequencia: "false",
+      sequencia_parciais: "false",
+      funcoes: "false"
+    });
 
     const [s] = await stack.sql(`
       select has_table_privilege('service_role', 'public.inscricoes', 'select,insert,update')::text as inscricoes,
              has_table_privilege('service_role', 'public.compras', 'select,insert,update')::text as compras,
+             has_table_privilege('service_role', 'public.inscricoes_parciais', 'select,insert,update')::text as parciais,
+             has_table_privilege('service_role', 'public.inscricoes_parciais_abertas', 'select')::text as parciais_view,
+             has_function_privilege('service_role', 'public.inscricao_parcial_salvar(jsonb)', 'execute')::text as parcial_salvar,
              has_function_privilege('service_role', 'public.inscricao_salvar(jsonb)', 'execute')::text as salvar,
              has_function_privilege('service_role', 'public.hotmart_registrar_compra(jsonb)', 'execute')::text as registrar,
              has_function_privilege('service_role', 'public.inscricoes_resumo(timestamptz,timestamptz,text)', 'execute')::text as resumo
     `);
-    assert.deepEqual(s, { inscricoes: "true", compras: "true", salvar: "true", registrar: "true", resumo: "true" });
+    assert.deepEqual(s, {
+      inscricoes: "true",
+      compras: "true",
+      parciais: "true",
+      parciais_view: "true",
+      parcial_salvar: "true",
+      salvar: "true",
+      registrar: "true",
+      resumo: "true"
+    });
   });
 });
 
@@ -2135,6 +2171,167 @@ describe("inscricao_salvar", () => {
       const r = await rpc("inscricao_salvar", { p });
       assert.equal(r.status, 400, JSON.stringify(r.json));
     }
+  });
+});
+
+/** O `p` de inscricao_parcial_salvar, como o servidor monta a partir do que já foi digitado. */
+function rascunho(sobrescrever = {}) {
+  return {
+    pagina: PAGINA,
+    visitante_id: randomUUID(),
+    nome: "Maria",
+    whatsapp: null,
+    whatsapp_digits: null,
+    email: null,
+    ultimo_campo: "nome",
+    utm_source: "instagram",
+    utm_medium: null,
+    utm_campaign: "bio",
+    utm_content: null,
+    utm_term: null,
+    fbclid: null,
+    gclid: null,
+    page_url: "https://lp.exemplo/viver-de-furo-inscricao?utm_source=instagram",
+    referrer: null,
+    dispositivo: "mobile",
+    ...sobrescrever
+  };
+}
+
+async function rascunhosAbertos() {
+  const r = await chamar("GET", `inscricoes_parciais_abertas?pagina=eq.${PAGINA}&select=*&order=id`);
+  assert.equal(r.status, 200);
+  return r.json;
+}
+
+describe("inscricao_parcial_salvar", () => {
+  test("o primeiro toque cria o rascunho; os seguintes são a MESMA linha, somando toques", async () => {
+    await limparInscricoes();
+    const visitante = randomUUID();
+
+    const um = await rpcOk("inscricao_parcial_salvar", { p: rascunho({ visitante_id: visitante }) });
+    assert.equal(um.ok, true);
+    const dois = await rpcOk("inscricao_parcial_salvar", {
+      p: rascunho({ visitante_id: visitante, nome: "Maria da Silva", whatsapp: "(11) 91234-5678", whatsapp_digits: "11912345678", ultimo_campo: "whatsapp" })
+    });
+    assert.equal(dois.id, um.id, "digitar mais não cria linha nova");
+
+    const [contagem] = await stack.sql("select count(*) as n from public.inscricoes_parciais");
+    assert.equal(contagem.n, "1");
+
+    const [linha] = await rascunhosAbertos();
+    assert.equal(linha.nome, "Maria da Silva");
+    assert.equal(linha.whatsapp_digits, "11912345678");
+    assert.equal(linha.email, null);
+    assert.equal(linha.ultimo_campo, "whatsapp");
+    assert.equal(linha.toques, 2);
+    assert.equal(linha.utm_source, "instagram");
+  });
+
+  test("campo que volta VAZIO não apaga o que já estava digitado", async () => {
+    await limparInscricoes();
+    const visitante = randomUUID();
+    await rpcOk("inscricao_parcial_salvar", { p: rascunho({ visitante_id: visitante, nome: "Maria da Silva", email: "maria@gmail.com" }) });
+    // A pessoa limpa o campo do e-mail para corrigir e o rascunho sobe no meio do caminho.
+    await rpcOk("inscricao_parcial_salvar", { p: rascunho({ visitante_id: visitante, nome: null, email: null }) });
+
+    const [linha] = await rascunhosAbertos();
+    assert.equal(linha.nome, "Maria da Silva");
+    assert.equal(linha.email, "maria@gmail.com");
+  });
+
+  test("a campanha é um BLOCO de primeiro toque, igual à da inscrição", async () => {
+    await limparInscricoes();
+    const visitante = randomUUID();
+    await rpcOk("inscricao_parcial_salvar", { p: rascunho({ visitante_id: visitante, utm_source: "instagram", utm_campaign: "bio", utm_term: null }) });
+    await rpcOk("inscricao_parcial_salvar", { p: rascunho({ visitante_id: visitante, utm_source: "facebook", utm_campaign: "set", utm_term: "criativo-09" }) });
+
+    const [linha] = await rascunhosAbertos();
+    assert.equal(linha.utm_source, "instagram");
+    assert.equal(linha.utm_campaign, "bio");
+    assert.equal(linha.utm_term, null, "o termo da segunda campanha não preenche o buraco da primeira");
+  });
+
+  test("outra página é outro rascunho, mesmo do mesmo aparelho", async () => {
+    await limparInscricoes();
+    const visitante = randomUUID();
+    await rpcOk("inscricao_parcial_salvar", { p: rascunho({ visitante_id: visitante }) });
+    await rpcOk("inscricao_parcial_salvar", { p: rascunho({ visitante_id: visitante, pagina: "aplicacao-afericao" }) });
+
+    const [contagem] = await stack.sql("select count(*) as n from public.inscricoes_parciais");
+    assert.equal(contagem.n, "2");
+  });
+
+  test("sem página ou sem visitante: recusa, porque sem chave o rascunho viraria uma linha por tecla", async () => {
+    await limparInscricoes();
+    assert.equal((await rpc("inscricao_parcial_salvar", { p: rascunho({ pagina: null }) })).status, 400);
+    assert.equal((await rpc("inscricao_parcial_salvar", { p: rascunho({ visitante_id: "eu-mesmo" }) })).status, 400);
+    assert.equal((await rpc("inscricao_parcial_salvar", { p: null })).status, 400);
+
+    const [contagem] = await stack.sql("select count(*) as n from public.inscricoes_parciais");
+    assert.equal(contagem.n, "0");
+  });
+
+  test("campo inventado em ultimo_campo vira null em vez de derrubar a gravação", async () => {
+    await limparInscricoes();
+    await rpcOk("inscricao_parcial_salvar", { p: rascunho({ ultimo_campo: "cartao_de_credito" }) });
+    const [linha] = await rascunhosAbertos();
+    assert.equal(linha.ultimo_campo, null);
+  });
+});
+
+describe("inscricoes_parciais_abertas: quem terminou NUNCA aparece como quem não terminou", () => {
+  test("enviar o formulário carimba o rascunho do mesmo visitante e tira a pessoa da lista", async () => {
+    await limparInscricoes();
+    const visitante = randomUUID();
+    await rpcOk("inscricao_parcial_salvar", {
+      p: rascunho({ visitante_id: visitante, nome: "Maria da Silva", whatsapp_digits: "11912345678", email: "maria@gmail.com" })
+    });
+    assert.equal((await rascunhosAbertos()).length, 1);
+
+    await rpcOk("inscricao_salvar", { p: inscricao({ visitante_id: visitante }) });
+
+    assert.deepEqual(await rascunhosAbertos(), [], "quem enviou sai da lista");
+    const [linha] = await stack.sql("select concluido_em from public.inscricoes_parciais");
+    assert.ok(linha.concluido_em, "o carimbo fica gravado, e não só escondido pela view");
+  });
+
+  test("começou num aparelho e enviou noutro: o contato fecha o rascunho do mesmo jeito", async () => {
+    await limparInscricoes();
+    await rpcOk("inscricao_parcial_salvar", {
+      p: rascunho({ nome: "Maria da Silva", whatsapp: "(11) 91234-5678", whatsapp_digits: "11912345678", email: "maria@gmail.com" })
+    });
+    // Outro visitante, o MESMO contato.
+    await rpcOk("inscricao_salvar", { p: inscricao({ visitante_id: randomUUID() }) });
+    assert.deepEqual(await rascunhosAbertos(), []);
+  });
+
+  test("rascunho de despedida que chega DEPOIS do envio não ressuscita ninguém na lista", async () => {
+    await limparInscricoes();
+    const visitante = randomUUID();
+    await rpcOk("inscricao_salvar", { p: inscricao({ visitante_id: visitante }) });
+    // O beacon que a página mandou ao sair para o checkout chega agora, atrasado.
+    await rpcOk("inscricao_parcial_salvar", {
+      p: rascunho({ visitante_id: visitante, nome: "Maria da Silva", whatsapp_digits: "11912345678", email: "maria@gmail.com" })
+    });
+
+    const [contagem] = await stack.sql("select count(*) as n from public.inscricoes_parciais");
+    assert.equal(contagem.n, "1", "a linha existe...");
+    assert.deepEqual(await rascunhosAbertos(), [], "...mas a view não a mostra, porque a inscrição existe");
+  });
+
+  test("quem parou no meio de verdade continua na lista, com o que já tinha digitado", async () => {
+    await limparInscricoes();
+    await rpcOk("inscricao_parcial_salvar", { p: rascunho({ nome: "Ana Paula", whatsapp: "(11) 9", whatsapp_digits: "119", ultimo_campo: "whatsapp" }) });
+    // Outra pessoa, essa terminou.
+    await rpcOk("inscricao_parcial_salvar", { p: rascunho({ nome: "Maria da Silva", whatsapp_digits: "11912345678", email: "maria@gmail.com" }) });
+    await rpcOk("inscricao_salvar", { p: inscricao() });
+
+    const abertos = await rascunhosAbertos();
+    assert.equal(abertos.length, 1);
+    assert.equal(abertos[0].nome, "Ana Paula");
+    assert.equal(abertos[0].whatsapp, "(11) 9", "o telefone pela metade é guardado como está");
+    assert.equal(abertos[0].ultimo_campo, "whatsapp");
   });
 });
 
