@@ -2092,11 +2092,11 @@ describe("inscricao_salvar", () => {
     assert.equal(linha.comprou_em, null);
   });
 
-  test("reenviar o formulário soma cliques na MESMA inscrição e mantém o rastreio de primeiro toque", async () => {
+  test("reenviar o formulário soma cliques na MESMA inscrição, e a visita passa a ser a do ÚLTIMO envio", async () => {
     await limparInscricoes();
     const primeira = await rpcOk("inscricao_salvar", { p: inscricao() });
 
-    // A mesma pessoa volta pelo link direto (sem UTM nenhuma) e envia de novo, duas vezes.
+    // A mesma pessoa volta pelo link direto (sem UTM nenhuma) e envia de novo.
     const segunda = await rpcOk("inscricao_salvar", {
       p: inscricao({
         id: randomUUID(),
@@ -2111,34 +2111,33 @@ describe("inscricao_salvar", () => {
         checkout_url: "https://pay.hotmart.com/Y74893363S?off=7j2nqptq&checkoutMode=10"
       })
     });
-    await rpcOk("inscricao_salvar", { p: inscricao({ id: randomUUID() }) });
 
     assert.equal(segunda.novo, false);
     assert.equal(segunda.id, primeira.id, "é a mesma linha");
-
     const [contagem] = await stack.sql("select count(*) as n from public.inscricoes");
     assert.equal(contagem.n, "1");
 
     const linha = await linhaInscricao(primeira.id);
-    assert.equal(linha.cliques, 3);
-    assert.equal(linha.utm_source, "facebook", "primeiro toque: a campanha da primeira visita fica");
-    assert.equal(linha.utm_term, "criativo-07");
-    assert.equal(linha.page_url, "https://lp.exemplo/viver-de-furo-inscricao?utm_source=facebook");
-    assert.equal(linha.referrer, "https://www.facebook.com/");
-    assert.equal(linha.checkout_url, inscricao().checkout_url, "o último link aberto é o que fica gravado");
+    assert.equal(linha.cliques, 2);
+    // Sem UTM no último envio = sem UTM na inscrição: a campanha antiga não fica grudada.
+    for (const campo of ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid", "gclid", "referrer"]) {
+      assert.equal(linha[campo], null, `${campo} é o do último envio (nenhum)`);
+    }
+    assert.equal(linha.page_url, "https://lp.exemplo/viver-de-furo-inscricao", "o endereço é o da última visita");
+    assert.equal(linha.checkout_url, "https://pay.hotmart.com/Y74893363S?off=7j2nqptq&checkoutMode=10", "o último link aberto é o que fica gravado");
     assert.ok(new Date(linha.atualizado_em) >= new Date(linha.criado_em));
   });
 
-  test("o rastreio de primeiro toque é um BLOCO: campanha nova não preenche buraco da antiga", async () => {
+  test("a campanha é a do ÚLTIMO envio, em BLOCO: nada da campanha antiga sobra", async () => {
     await limparInscricoes();
-    // Primeiro toque sem utm_term, mas com utm_source: a campanha inteira é essa.
     const primeira = await rpcOk("inscricao_salvar", { p: inscricao({ utm_source: "instagram", utm_campaign: "bio", utm_term: null, utm_content: null, utm_medium: null }) });
-    await rpcOk("inscricao_salvar", { p: inscricao({ id: randomUUID(), utm_source: "facebook", utm_term: "criativo-09", utm_campaign: "set" }) });
+    await rpcOk("inscricao_salvar", { p: inscricao({ id: randomUUID(), utm_source: "facebook", utm_medium: null, utm_term: "criativo-09", utm_campaign: "set", utm_content: null }) });
 
     const linha = await linhaInscricao(primeira.id);
-    assert.equal(linha.utm_source, "instagram");
-    assert.equal(linha.utm_campaign, "bio");
-    assert.equal(linha.utm_term, null, "o termo da segunda campanha NÃO entra no lugar vazio da primeira");
+    assert.equal(linha.utm_source, "facebook");
+    assert.equal(linha.utm_campaign, "set");
+    assert.equal(linha.utm_term, "criativo-09");
+    assert.equal(linha.utm_medium, null, "campo que a campanha nova não tem fica vazio, e não herda o da antiga");
   });
 
   test("contato diferente (outro e-mail, outro telefone) é outra inscrição, mesmo com o id repetido", async () => {
@@ -2240,16 +2239,16 @@ describe("inscricao_parcial_salvar", () => {
     assert.equal(linha.email, "maria@gmail.com");
   });
 
-  test("a campanha é um BLOCO de primeiro toque, igual à da inscrição", async () => {
+  test("a campanha é a do ÚLTIMO toque, em BLOCO, igual à da inscrição", async () => {
     await limparInscricoes();
     const visitante = randomUUID();
     await rpcOk("inscricao_parcial_salvar", { p: rascunho({ visitante_id: visitante, utm_source: "instagram", utm_campaign: "bio", utm_term: null }) });
     await rpcOk("inscricao_parcial_salvar", { p: rascunho({ visitante_id: visitante, utm_source: "facebook", utm_campaign: "set", utm_term: "criativo-09" }) });
 
     const [linha] = await rascunhosAbertos();
-    assert.equal(linha.utm_source, "instagram");
-    assert.equal(linha.utm_campaign, "bio");
-    assert.equal(linha.utm_term, null, "o termo da segunda campanha não preenche o buraco da primeira");
+    assert.equal(linha.utm_source, "facebook");
+    assert.equal(linha.utm_campaign, "set");
+    assert.equal(linha.utm_term, "criativo-09");
   });
 
   test("outra página é outro rascunho, mesmo do mesmo aparelho", async () => {

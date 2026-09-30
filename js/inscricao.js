@@ -153,8 +153,7 @@
    * aberta sem UTM vai para o checkout sem UTM e sem sck — nada guardado de outra visita, nem de
    * outra página, entra no lugar.
    *
-   * O primeiro toque de cada PESSOA continua existindo, mas no banco: inscricao_salvar não troca
-   * a campanha de uma inscrição que já tem uma.
+   * No banco vale a mesma regra: cada envio grava a campanha DESTE envio (inscricao_salvar).
    */
   const CAMPANHA_DESTA_VISITA = C.rastreioDaUrl(window.location.search);
   try {

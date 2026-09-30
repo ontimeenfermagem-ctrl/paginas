@@ -1266,8 +1266,8 @@ notify pgrst, 'reload schema';
 -- inscricoes — uma linha por PESSOA em cada página (pagina + WhatsApp + e-mail).
 --
 -- Reenviar o formulário (voltou, clicou de novo, abriu no outro aparelho) NÃO cria linha nova:
--- soma `cliques`, atualiza o link do checkout e mantém o rastreio de PRIMEIRO toque. É isso que
--- faz "inscritos" ser gente, e "cliques" ser clique.
+-- soma `cliques`, atualiza o link do checkout e a visita (endereço + campanha) passa a ser a do
+-- ÚLTIMO envio. É isso que faz "inscritos" ser gente, e "cliques" ser clique.
 -- --------------------------------------------------------------------------------------------
 create table if not exists public.inscricoes (
   -- O id nasce no navegador (o mesmo padrão da pesquisa). Se ele repetir para outro contato, a
@@ -1505,9 +1505,8 @@ grant usage, select on sequence public.compras_id_seq to service_role;
 -- `p` já vem validado pelo servidor (contato pelas mesmas regras da tela, link do checkout montado
 -- por EVCheckout.montarUrlCheckout). Aqui mora só o que precisa ser atômico:
 --   . a mesma pessoa na mesma página é UMA linha (chave única), com `cliques` somando;
---   . o rastreio é de PRIMEIRO toque, e em BLOCO — quem chegou pelo anúncio e voltou depois pelo
---     link direto continua creditada ao anúncio, com a campanha inteira, e não meia campanha de
---     cada visita (mesma regra de pesquisa_salvar).
+--   . o rastreio é o do ÚLTIMO envio, e em BLOCO — a campanha inteira da visita, nunca meia
+--     campanha de cada visita. Sem UTM no último envio = sem UTM (nada antigo fica grudado).
 -- --------------------------------------------------------------------------------------------
 create or replace function public.inscricao_salvar(p jsonb)
 returns json
@@ -1533,7 +1532,7 @@ begin
     raise exception 'inscricao_salvar: WhatsApp e e-mail obrigatórios' using errcode = '22023';
   end if;
 
-  -- 1. Já existe? Soma o clique e mantém o primeiro toque.
+  -- 1. Já existe? Soma o clique e a visita passa a ser a deste envio.
   update public.inscricoes as i set
     nome = coalesce(nullif(btrim(d ->> 'nome'), ''), i.nome),
     whatsapp = coalesce(nullif(btrim(d ->> 'whatsapp'), ''), i.whatsapp),
@@ -1542,17 +1541,18 @@ begin
     clicou_em = now(),
     atualizado_em = now(),
     visitante_id = coalesce(i.visitante_id, case when nullif(btrim(d ->> 'visitante_id'), '') ~ uuid_re then (d ->> 'visitante_id')::uuid end),
-    page_url = coalesce(i.page_url, nullif(btrim(d ->> 'page_url'), '')),
-    referrer = coalesce(i.referrer, nullif(btrim(d ->> 'referrer'), '')),
-    dispositivo = coalesce(i.dispositivo, nullif(btrim(d ->> 'dispositivo'), '')),
-    -- Campanha como UM bloco: só preenche se NENHUM campo de rastreio de campanha existir ainda.
-    utm_source = case when (i.utm_source, i.utm_medium, i.utm_campaign, i.utm_content, i.utm_term, i.fbclid, i.gclid) is null then nullif(btrim(d ->> 'utm_source'), '') else i.utm_source end,
-    utm_medium = case when (i.utm_source, i.utm_medium, i.utm_campaign, i.utm_content, i.utm_term, i.fbclid, i.gclid) is null then nullif(btrim(d ->> 'utm_medium'), '') else i.utm_medium end,
-    utm_campaign = case when (i.utm_source, i.utm_medium, i.utm_campaign, i.utm_content, i.utm_term, i.fbclid, i.gclid) is null then nullif(btrim(d ->> 'utm_campaign'), '') else i.utm_campaign end,
-    utm_content = case when (i.utm_source, i.utm_medium, i.utm_campaign, i.utm_content, i.utm_term, i.fbclid, i.gclid) is null then nullif(btrim(d ->> 'utm_content'), '') else i.utm_content end,
-    utm_term = case when (i.utm_source, i.utm_medium, i.utm_campaign, i.utm_content, i.utm_term, i.fbclid, i.gclid) is null then nullif(btrim(d ->> 'utm_term'), '') else i.utm_term end,
-    fbclid = case when (i.utm_source, i.utm_medium, i.utm_campaign, i.utm_content, i.utm_term, i.fbclid, i.gclid) is null then nullif(btrim(d ->> 'fbclid'), '') else i.fbclid end,
-    gclid = case when (i.utm_source, i.utm_medium, i.utm_campaign, i.utm_content, i.utm_term, i.fbclid, i.gclid) is null then nullif(btrim(d ->> 'gclid'), '') else i.gclid end
+    dispositivo = coalesce(nullif(btrim(d ->> 'dispositivo'), ''), i.dispositivo),
+    -- A visita é a do ÚLTIMO envio, em bloco: endereço, referência e campanha saem juntos da mesma
+    -- visita. Sem UTM nesta visita = sem UTM na inscrição — nenhuma campanha antiga fica grudada.
+    page_url = coalesce(nullif(btrim(d ->> 'page_url'), ''), i.page_url),
+    referrer = nullif(btrim(d ->> 'referrer'), ''),
+    utm_source = nullif(btrim(d ->> 'utm_source'), ''),
+    utm_medium = nullif(btrim(d ->> 'utm_medium'), ''),
+    utm_campaign = nullif(btrim(d ->> 'utm_campaign'), ''),
+    utm_content = nullif(btrim(d ->> 'utm_content'), ''),
+    utm_term = nullif(btrim(d ->> 'utm_term'), ''),
+    fbclid = nullif(btrim(d ->> 'fbclid'), ''),
+    gclid = nullif(btrim(d ->> 'gclid'), '')
   where i.pagina = v_pagina and i.whatsapp_digits = v_digits and i.email = v_email
   returning i.id into v_id;
 
@@ -1689,17 +1689,17 @@ begin
     ultimo_campo = coalesce(excluded.ultimo_campo, r.ultimo_campo),
     toques = r.toques + 1,
     atualizado_em = now(),
-    page_url = coalesce(r.page_url, excluded.page_url),
-    referrer = coalesce(r.referrer, excluded.referrer),
-    dispositivo = coalesce(r.dispositivo, excluded.dispositivo),
-    -- Campanha como UM bloco, igual a inscricao_salvar: primeiro toque manda.
-    utm_source = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then excluded.utm_source else r.utm_source end,
-    utm_medium = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then excluded.utm_medium else r.utm_medium end,
-    utm_campaign = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then excluded.utm_campaign else r.utm_campaign end,
-    utm_content = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then excluded.utm_content else r.utm_content end,
-    utm_term = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then excluded.utm_term else r.utm_term end,
-    fbclid = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then excluded.fbclid else r.fbclid end,
-    gclid = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then excluded.gclid else r.gclid end
+    dispositivo = coalesce(excluded.dispositivo, r.dispositivo),
+    -- A visita é a do ÚLTIMO toque, em bloco, igual a inscricao_salvar.
+    page_url = coalesce(excluded.page_url, r.page_url),
+    referrer = excluded.referrer,
+    utm_source = excluded.utm_source,
+    utm_medium = excluded.utm_medium,
+    utm_campaign = excluded.utm_campaign,
+    utm_content = excluded.utm_content,
+    utm_term = excluded.utm_term,
+    fbclid = excluded.fbclid,
+    gclid = excluded.gclid
   returning r.id into v_id;
 
   return json_build_object('ok', true, 'id', v_id);
