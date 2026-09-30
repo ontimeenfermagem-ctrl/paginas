@@ -583,7 +583,10 @@ caso("quem volta do checkout encontra os campos preenchidos e o botão liberado"
   assert.equal(await page.inputValue("#campo-email"), "maria@gmail.com");
 });
 
-caso("rastreio de PRIMEIRO toque: a segunda visita, sem UTM, mantém a campanha da primeira", async (page, reg) => {
+const SEM_CAMPANHA = { utm_source: null, utm_medium: null, utm_campaign: null, utm_content: null, utm_term: null, fbclid: null, gclid: null };
+const campanhaDe = (rastreio) => Object.fromEntries(Object.keys(SEM_CAMPANHA).map((campo) => [campo, rastreio[campo]]));
+
+caso("a UTM é só a da URL aberta: a segunda visita, sem UTM, vai sem UTM nenhuma", async (page, reg) => {
   await abrir(page, UTM);
   await page.goto(base + PAGINA.rota);
   await page.waitForSelector("#form-inscricao");
@@ -591,11 +594,45 @@ caso("rastreio de PRIMEIRO toque: a segunda visita, sem UTM, mantém a campanha 
   await page.click("#botao-ir");
   await esperarCheckout(page);
   const { rastreio } = reg.corpos[0];
-  assert.equal(rastreio.utm_source, "meta");
-  assert.equal(rastreio.utm_campaign, "furo-set");
-  assert.equal(rastreio.fbclid, "fb123");
+  assert.deepEqual(campanhaDe(rastreio), SEM_CAMPANHA, "nada da visita anterior entra no lugar");
   assert.equal(rastreio.page_url, `${base}${PAGINA.rota}`, "page_url é o da visita atual");
 });
+
+/*
+ * O caso real de 2026-09-30: o celular tinha guardada a campanha da Viver de Furo vinda do link da
+ * API oficial do WhatsApp (a chave era a MESMA para todas as páginas), e a Aferição aberta SEM
+ * UTM mandou essa campanha para o checkout. Plano B forçado (servidor fora), para a prova ser a
+ * URL que o próprio navegador monta.
+ */
+const AFERICAO = C.PAGINAS["aplicacao-afericao"];
+caso(
+  "campanha guardada no aparelho por OUTRA página não vaza: Aferição sem UTM vai ao checkout sem UTM e sem sck",
+  async (page, reg) => {
+    await page.goto(base + AFERICAO.rota);
+    await page.waitForSelector("#form-inscricao");
+    await page.evaluate(() =>
+      localStorage.setItem(
+        "ev_inscricao_rastreio_v1",
+        JSON.stringify({ utm_source: "Whatsapp", utm_medium: "API", utm_campaign: "Viver-de-furo", utm_content: "Checkout", utm_term: "API_OFICIAL" })
+      )
+    );
+    await page.reload();
+    await page.waitForSelector("#form-inscricao");
+    assert.equal(await page.evaluate(() => localStorage.getItem("ev_inscricao_rastreio_v1")), null, "o lixo antigo é apagado ao abrir");
+
+    await preencher(page);
+    await page.click("#botao-ir");
+    const destino = await esperarCheckout(page);
+
+    assert.deepEqual(campanhaDe(reg.corpos[0].rastreio), SEM_CAMPANHA, "o corpo sai sem campanha nenhuma");
+    for (const campo of ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "sck"]) {
+      assert.equal(destino.searchParams.get(campo), null, `o checkout não pode ter ${campo}: ${destino}`);
+    }
+    assert.equal(destino.searchParams.get("off"), "3yiw3399", "o resto do link continua certo");
+    assert.equal(destino.searchParams.get("email"), "maria@gmail.com", "e o checkout continua preenchido");
+  },
+  { api: () => ({ status: 500, json: { ok: false } }) }
+);
 
 caso("sem localStorage (webview bloqueado): valida, envia e sai do mesmo jeito", async (page, reg) => {
   await page.addInitScript(() => {

@@ -28,8 +28,12 @@
   const API = "/api/inscricao";
   /** O mesmo visitante da pesquisa e das páginas de obrigado. */
   const CHAVE_VISITANTE = "ev_pesquisa_visitante";
-  /** Rastreio de PRIMEIRO toque desta página (bloco inteiro, nunca campo a campo). */
-  const CHAVE_RASTREIO = "ev_inscricao_rastreio_v1";
+  /**
+   * Onde ficava a campanha "de primeiro toque" guardada no aparelho — UMA chave para TODAS as
+   * páginas de inscrição, e por isso a campanha da Viver de Furo ia parar no checkout da
+   * Aferição. Não é mais lida: só apagada, para não sobrar lixo no celular de ninguém.
+   */
+  const CHAVE_RASTREIO_ANTIGA = "ev_inscricao_rastreio_v1";
   /** Quem já se inscreveu neste aparelho: os campos voltam preenchidos. */
   const CHAVE_INSCRICAO = "ev_inscricao_v1";
 
@@ -145,24 +149,22 @@
   }
 
   /**
-   * A campanha é um BLOCO só: se a primeira visita a esta página trouxe qualquer utm/fbclid/gclid,
-   * fica o bloco dela inteiro. Misturar campo a campo creditaria uma campanha do Facebook à bio do
-   * Instagram. Mesma regra do js/pesquisa.js.
+   * A campanha é a DESTA visita: exatamente as UTMs (e fbclid/gclid) da URL aberta agora. Página
+   * aberta sem UTM vai para o checkout sem UTM e sem sck — nada guardado de outra visita, nem de
+   * outra página, entra no lugar.
+   *
+   * O primeiro toque de cada PESSOA continua existindo, mas no banco: inscricao_salvar não troca
+   * a campanha de uma inscrição que já tem uma.
    */
-  function blocoDeCampanha() {
-    const daUrl = C.rastreioDaUrl(window.location.search);
-    const guardado = lerJson(CHAVE_RASTREIO);
-    if (guardado && CAMPANHA.some((campo) => typeof guardado[campo] === "string" && guardado[campo])) return guardado;
-    if (CAMPANHA.some((campo) => daUrl[campo])) gravarJson(CHAVE_RASTREIO, daUrl);
-    return daUrl;
+  const CAMPANHA_DESTA_VISITA = C.rastreioDaUrl(window.location.search);
+  try {
+    window.localStorage.removeItem(CHAVE_RASTREIO_ANTIGA);
+  } catch {
+    // Storage bloqueado: não há o que limpar.
   }
 
-  // O primeiro toque é registrado AO ABRIR a página, e não no envio: quem chega pelo anúncio,
-  // sai e volta direto tem a campanha certa mesmo sem ter preenchido nada da primeira vez.
-  const CAMPANHA_DESTA_PESSOA = blocoDeCampanha();
-
   function rastreioAtual() {
-    const bloco = CAMPANHA_DESTA_PESSOA;
+    const bloco = CAMPANHA_DESTA_VISITA;
     const dados = {
       // Sem o #: âncora não diz nada sobre a origem e pode carregar lixo.
       page_url: texto(window.location.origin + window.location.pathname + window.location.search, "page_url"),
