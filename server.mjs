@@ -3987,8 +3987,8 @@ async function handleManychatLead(request, response, options) {
       // Sem finalizou: este lead não dispara aviso ao n8n — o ManyChat já continua a conversa dele.
       finalizou: false
     }),
-    // Origem decidida AQUI, nunca pelo corpo do pedido. São colunas de primeiro toque: numa
-    // atualização, o pesquisa_salvar guarda a origem que já estava lá.
+    // Origem decidida AQUI, nunca pelo corpo do pedido. Como ela sempre traz campanha, cada contato
+    // pela DM passa a ser a última visita da pessoa (pesquisa_salvar, v_visita).
     ...ORIGEM_MANYCHAT,
     // De onde no Instagram: qual post, automação ou palavra-chave trouxe a pessoa (utm_content) e
     // qual anúncio (utm_term). São os dois campos que o ManyChat PODE mandar — o resto da origem

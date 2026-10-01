@@ -112,7 +112,7 @@
   }
 
   /* ================================================================== */
-  /* Rastreio de primeiro toque                                          */
+  /* Rastreio da visita                                                  */
   /* ================================================================== */
 
   function texto(valor, campo) {
@@ -139,16 +139,17 @@
     return dados;
   }
 
-  /** Campanha é um BLOCO só: a primeira visita manda, e nunca se mistura com a seguinte. */
-  function blocoDeCampanha() {
-    const agora = daUrl();
-    const guardado = lerJson(CHAVE_RASTREIO);
-    if (guardado && CAMPANHA.some((campo) => typeof guardado[campo] === "string" && guardado[campo])) return guardado;
-    if (CAMPANHA.some((campo) => agora[campo])) gravarJson(CHAVE_RASTREIO, agora);
-    return agora;
+  /**
+   * A campanha é a DESTA visita: exatamente a da URL aberta agora. Sem UTM na URL, sem UTM — nada
+   * guardado de visita anterior entra no lugar. A campanha que ficava guardada no aparelho
+   * (CHAVE_RASTREIO) não é mais lida: só apagada, para não sobrar lixo.
+   */
+  const CAMPANHA_DESTA_PESSOA = daUrl();
+  try {
+    window.localStorage.removeItem(CHAVE_RASTREIO);
+  } catch {
+    // Storage bloqueado: não há o que limpar.
   }
-
-  const CAMPANHA_DESTA_PESSOA = blocoDeCampanha();
 
   function rastreioAtual() {
     const dados = {

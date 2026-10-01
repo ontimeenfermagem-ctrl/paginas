@@ -401,7 +401,7 @@ describe("pesquisa_registrar_evento", () => {
     assert.equal(v.utm_source, "instagram");
   });
 
-  test("rastreio de primeiro toque: campanha (utm/fbclid/gclid) é um bloco só; page_url/referrer só preenchem o que faltava; vazio vira null", async () => {
+  test("rastreio da ÚLTIMA visita: a campanha (utm/fbclid/gclid) entra em bloco; evento sem endereço não mexe; vazio vira null", async () => {
     const id = randomUUID();
     await registrar(id, "visita", {
       utm_source: "instagram",
@@ -424,23 +424,29 @@ describe("pesquisa_registrar_evento", () => {
       dispositivo: "desktop"
     });
     v = await visitante(id);
-    assert.equal(v.utm_source, "instagram");
-    assert.equal(v.utm_campaign, "lancamento");
-    assert.equal(v.page_url, "https://x/pesquisa?utm_source=instagram");
-    assert.equal(v.dispositivo, "mobile");
-    // O bloco da primeira visita fica inteiro: nada da campanha do Facebook entra nele.
-    assert.equal(v.utm_medium, null);
-    assert.equal(v.utm_content, null);
-    assert.equal(v.fbclid, null);
+    // A visita nova entra inteira, em bloco: nada da campanha do Instagram sobra misturado.
+    assert.equal(v.utm_source, "facebook");
+    assert.equal(v.utm_medium, "cpc");
+    assert.equal(v.utm_campaign, "outra");
+    assert.equal(v.utm_content, "anuncio-2");
+    assert.equal(v.fbclid, "abc");
+    assert.equal(v.page_url, "https://x/pesquisa");
     assert.equal(v.referrer, "https://l.instagram.com/");
+    assert.equal(v.dispositivo, "desktop");
 
-    // Primeira visita sem campanha nenhuma: o bloco da visita seguinte entra inteiro.
+    // Voltou sem UTM nenhuma: fica sem UTM (nenhuma campanha antiga grudada).
+    await registrar(id, "visita", { page_url: "https://x/pesquisa", dispositivo: "mobile" });
+    v = await visitante(id);
+    for (const campo of ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid", "gclid", "referrer"]) {
+      assert.equal(v[campo], null, `${campo} é o da última visita (nenhum)`);
+    }
+
+    // Evento sem endereço (não veio de uma página aberta) não mexe na visita guardada.
     const outro = randomUUID();
-    await registrar(outro, "visita", { page_url: "https://x/pesquisa", dispositivo: "mobile" });
-    await registrar(outro, "visita", { utm_source: "facebook", utm_medium: "cpc", fbclid: "fb-2" });
+    await registrar(outro, "visita", { page_url: "https://x/pesquisa?utm_source=facebook", utm_source: "facebook", fbclid: "fb-2" });
+    await registrar(outro, "inicio", { dispositivo: "mobile" });
     const w = await visitante(outro);
     assert.equal(w.utm_source, "facebook");
-    assert.equal(w.utm_medium, "cpc");
     assert.equal(w.fbclid, "fb-2");
   });
 
@@ -512,8 +518,8 @@ describe("pesquisa_salvar", () => {
     assert.equal(linha.etapa_max, 3);
     assert.equal(linha.respondidas, 9);
     assert.equal(linha.progresso_percentual, 30);
-    assert.equal(linha.utm_source, "instagram", "primeiro toque");
-    assert.equal(linha.utm_medium, null, "campanha é um bloco de primeiro toque: nada da visita nova entra");
+    assert.equal(linha.utm_source, "facebook", "a visita é a do último salvamento");
+    assert.equal(linha.utm_medium, "cpc", "a campanha do último salvamento entra inteira");
     assert.deepEqual(linha.tempos, { contato: 20, perfil: 5, idade: 3 });
     assert.ok(linha.ultima_resposta_em);
 
@@ -664,14 +670,14 @@ describe("pesquisa_salvar", () => {
     assert.equal(r.concluiu_agora, true);
     assert.equal(r.finalizou_agora, false);
 
-    // Chegou ao fim: finalizou_agora e a linha inteira, com o rastreio de PRIMEIRO toque.
+    // Chegou ao fim: finalizou_agora e a linha inteira, com o rastreio da última visita.
     r = await rpcOk("pesquisa_salvar", {
       p: payload({ id, seq: 4, completa: true, finalizou: true, posicao: 40, pergunta_posicao: "fim", etapa_posicao: 9, utm_source: "facebook" })
     });
     assert.equal(r.finalizou_agora, true);
     assert.equal(r.concluiu_agora, false);
     assert.equal(r.linha.id, id);
-    assert.equal(r.linha.utm_source, "instagram");
+    assert.equal(r.linha.utm_source, "facebook");
     assert.equal(r.linha.whatsapp_internacional, "55" + r.linha.whatsapp_digits);
     assert.ok(r.linha.finalizado_em);
     assert.equal(r.linha.webhook_enviado_em, null);

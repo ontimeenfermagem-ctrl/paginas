@@ -401,10 +401,10 @@ caso("já concluída: reabrir a pesquisa leva direto ao obrigado; ?nova=1 recome
   await responderAteOFim(page, { perfil: P.PERFIL.auxiliar });
   await esperarObrigado(page, "/obrigado-afericao");
   const salvos = reg.salvar.length;
-  // Reabre pelo link "pelado" (sem UTM): volta para a MESMA página, com as UTMs do primeiro toque.
+  // Reabre pelo link "pelado" (sem UTM): volta para a MESMA página, sem UTM (a da URL aberta agora).
   await page.goto(base + "/pesquisa-icp");
   const chegada = await esperarObrigado(page, "/obrigado-afericao");
-  assert.equal(chegada.search, `?${QUERY}`);
+  assert.equal(chegada.search, "");
   assert.equal(reg.salvar.length, salvos, "reabrir não grava de novo");
   // O ?nova=1 não tem mais link no rodapé do obrigado (só confundia quem acabou de responder),
   // mas o endereço continua recomeçando a pesquisa como outra pessoa.
@@ -416,7 +416,7 @@ caso("já concluída: reabrir a pesquisa leva direto ao obrigado; ?nova=1 recome
   assert.equal(r.contato, null);
   assert.deepEqual(r.respostas, {});
   assert.equal(r.concluida, false);
-  assert.equal(r.rastreio.utm_source, "instagram", "rastreio do aparelho continua");
+  assert.equal(r.rastreio.utm_source, null, "a URL aberta não tem UTM: nada de visita anterior fica no rascunho novo");
   await page.click("#botao-comecar");
   assert.equal(await page.inputValue("#campo-nome"), "");
   // Recarregar não apaga de novo (o parâmetro já saiu).
@@ -846,15 +846,23 @@ caso("sem localStorage: funciona e não quebra", async (page, reg) => {
   assert.match(reg.salvar[0].visitante_id, /^[0-9a-f-]{36}$/);
 });
 
-caso("UTM de primeiro toque: a campanha da primeira visita fica inteira (sem misturar com a nova)", async (page, reg) => {
-  await page.goto(base + "/pesquisa-icp?utm_source=instagram");
+caso("UTM da ÚLTIMA visita: a campanha nova entra inteira, e voltar sem UTM fica sem UTM", async (page, reg) => {
+  await page.goto(base + "/pesquisa-icp?utm_source=instagram&utm_medium=bio");
   await page.goto(base + "/pesquisa-icp?utm_source=whatsapp&utm_campaign=nova&fbclid=FBX");
-  const r = await lerRascunho(page);
-  assert.equal(r.rastreio.utm_source, "instagram");
-  assert.equal(r.rastreio.utm_campaign, null);
-  assert.equal(r.rastreio.fbclid, null);
-  assert.equal(reg.evento.length, 2);
+  let r = await lerRascunho(page);
+  assert.equal(r.rastreio.utm_source, "whatsapp");
+  assert.equal(r.rastreio.utm_campaign, "nova");
+  assert.equal(r.rastreio.fbclid, "FBX");
+  assert.equal(r.rastreio.utm_medium, null, "nada da campanha antiga sobra misturado na nova");
+
+  await page.goto(base + "/pesquisa-icp");
+  r = await lerRascunho(page);
+  for (const campo of ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid", "gclid"]) {
+    assert.equal(r.rastreio[campo], null, `sem UTM na URL, ${campo} fica vazio`);
+  }
+  assert.equal(reg.evento.length, 3);
   assert.ok(reg.evento.every((e) => e.evento === "visita" && e.visitante_id === reg.evento[0].visitante_id));
+  assert.equal(reg.evento[2].utm_source ?? null, null, "o evento da terceira visita sai sem UTM");
 });
 
 caso("pixel: eventos certos quando fbq existe (inclui pesquisa_icp_concluida com código e página)", async (page) => {

@@ -269,14 +269,14 @@ caso(
 
 /* ------------------------------------------------------------------ rascunho e rastreio */
 
-caso("sem UTM na URL: vale o rastreio de primeiro toque do rascunho; técnico conta como técnico", async (page, reg) => {
+caso("sem UTM na URL: a visita sai sem UTM (nada guardado no rascunho entra no lugar); técnico conta como técnico", async (page, reg) => {
   await comRascunho(page, rascunho(P.PERFIL.tecnico));
   await abrir(page, "/obrigado-evento-outubro");
   const visita = await ate(() => reg.pagina.find((e) => e.evento === "visita"));
-  assert.equal(visita.utm_source, "instagram");
-  assert.equal(visita.utm_medium, "stories");
-  assert.equal(visita.utm_campaign, "icp-set");
-  assert.equal(visita.fbclid, "abc123");
+  assert.equal(visita.utm_source ?? null, null);
+  assert.equal(visita.utm_medium ?? null, null);
+  assert.equal(visita.utm_campaign ?? null, null);
+  assert.equal(visita.fbclid ?? null, null);
   assert.equal(visita.perfil, P.PERFIL.tecnico);
   assert.equal(visita.sessao_id, "3f1b2c4d-5e6f-4a1b-8c2d-9e0f1a2b3c4d");
 });

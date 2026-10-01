@@ -321,8 +321,8 @@ $$;
 -- pesquisa_registrar_evento: 'visita' (a página abriu) ou 'inicio' (clicou em "Começar").
 --
 -- Uma linha por visitante, com upsert: recarregar a página soma visitas, mas não cria visitante
--- novo. O rastreio é de PRIMEIRO toque — quem chegou pelo anúncio e voltou depois pelo link direto
--- continua creditado ao anúncio; campo que estava vazio é preenchido.
+-- novo. A visita (endereço, referência e campanha, em bloco) é a do ÚLTIMO evento: quem volta por
+-- outro link passa a ter a campanha desse link, e quem volta sem UTM fica sem UTM.
 --
 -- A linha nasce com visitas = 1 mesmo quando o primeiro evento que chega é 'inicio': se alguém
 -- clicou em começar, a página abriu pelo menos uma vez (o aviso de visita é que se perdeu na rede).
@@ -352,7 +352,6 @@ begin
     coalesce(nullif(btrim(d ->> 'pesquisa'), ''), 'icp-escola-ev'),
     1,
     case when p_evento = 'inicio' then now() end,
-    -- nullif(btrim()): string vazia gravada contaria como "já preenchido" e travaria o primeiro toque.
     nullif(btrim(d ->> 'page_url'), ''),
     nullif(btrim(d ->> 'referrer'), ''),
     nullif(btrim(d ->> 'utm_source'), ''),
@@ -368,19 +367,18 @@ begin
     visitas = v.visitas + (p_evento = 'visita')::int,
     atualizado_em = now(),
     comecou_em = coalesce(v.comecou_em, excluded.comecou_em),
-    page_url = coalesce(v.page_url, excluded.page_url),
-    referrer = coalesce(v.referrer, excluded.referrer),
-    -- Campanha (utm_* + fbclid + gclid) é UM bloco de primeiro toque: se a primeira visita tinha
-    -- qualquer um deles, fica o bloco dela inteiro; senão entra o bloco da visita nova. Campo a
-    -- campo misturaria visitas diferentes numa atribuição que não existiu.
-    utm_source = case when (v.utm_source, v.utm_medium, v.utm_campaign, v.utm_content, v.utm_term, v.fbclid, v.gclid) is null then excluded.utm_source else v.utm_source end,
-    utm_medium = case when (v.utm_source, v.utm_medium, v.utm_campaign, v.utm_content, v.utm_term, v.fbclid, v.gclid) is null then excluded.utm_medium else v.utm_medium end,
-    utm_campaign = case when (v.utm_source, v.utm_medium, v.utm_campaign, v.utm_content, v.utm_term, v.fbclid, v.gclid) is null then excluded.utm_campaign else v.utm_campaign end,
-    utm_content = case when (v.utm_source, v.utm_medium, v.utm_campaign, v.utm_content, v.utm_term, v.fbclid, v.gclid) is null then excluded.utm_content else v.utm_content end,
-    utm_term = case when (v.utm_source, v.utm_medium, v.utm_campaign, v.utm_content, v.utm_term, v.fbclid, v.gclid) is null then excluded.utm_term else v.utm_term end,
-    fbclid = case when (v.utm_source, v.utm_medium, v.utm_campaign, v.utm_content, v.utm_term, v.fbclid, v.gclid) is null then excluded.fbclid else v.fbclid end,
-    gclid = case when (v.utm_source, v.utm_medium, v.utm_campaign, v.utm_content, v.utm_term, v.fbclid, v.gclid) is null then excluded.gclid else v.gclid end,
-    dispositivo = coalesce(v.dispositivo, excluded.dispositivo);
+    -- A visita é a do ÚLTIMO evento, em bloco: campanha de uma visita nunca se mistura com a de
+    -- outra. Evento sem endereço (não veio de uma página aberta) não mexe na visita guardada.
+    page_url = coalesce(excluded.page_url, v.page_url),
+    referrer = case when excluded.page_url is not null then excluded.referrer else v.referrer end,
+    utm_source = case when excluded.page_url is not null then excluded.utm_source else v.utm_source end,
+    utm_medium = case when excluded.page_url is not null then excluded.utm_medium else v.utm_medium end,
+    utm_campaign = case when excluded.page_url is not null then excluded.utm_campaign else v.utm_campaign end,
+    utm_content = case when excluded.page_url is not null then excluded.utm_content else v.utm_content end,
+    utm_term = case when excluded.page_url is not null then excluded.utm_term else v.utm_term end,
+    fbclid = case when excluded.page_url is not null then excluded.fbclid else v.fbclid end,
+    gclid = case when excluded.page_url is not null then excluded.gclid else v.gclid end,
+    dispositivo = coalesce(excluded.dispositivo, v.dispositivo);
 end;
 $$;
 
@@ -390,14 +388,14 @@ $$;
 --
 -- `p` já vem inteiro calculado pelo servidor (contato validado, respostas sanitizadas, progresso,
 -- posição). Aqui mora só o que PRECISA ser atômico: a ordem dos salvamentos (seq), o que nunca
--- regride (posição máxima, status concluída, data de conclusão) e o primeiro toque do rastreio.
+-- regride (posição máxima, status concluída, data de conclusão) e a visita do rastreio.
 --
 -- Devolve {novo, aplicado, concluiu_agora, finalizou_agora, status} e, SÓ quando finalizou_agora,
 -- `linha` = a linha inteira gravada. `finalizou` (o servidor manda true quando a pessoa chegou à
 -- tela de fim com tudo respondido) grava finalizado_em uma vez só; finalizou_agora é true só nessa
 -- transição, dentro da trava da linha — é o que garante UM aviso ao n8n por tentativa, mesmo com
--- dois salvamentos simultâneos. A `linha` leva o rastreio de PRIMEIRO toque e as datas do banco
--- para o aviso, em vez do que veio no último salvamento.
+-- dois salvamentos simultâneos. A `linha` leva o rastreio gravado (o da última visita) e as datas
+-- do banco para o aviso.
 -- --------------------------------------------------------------------------------------------
 create or replace function public.pesquisa_salvar(p jsonb)
 returns json
@@ -413,6 +411,15 @@ declare
   v_finalizou boolean := coalesce((p ->> 'finalizou')::boolean, false) and coalesce((p ->> 'completa')::boolean, false);
   v_posicao smallint := coalesce((p ->> 'posicao')::smallint, 0);
   v_etapa_posicao smallint := coalesce((p ->> 'etapa_posicao')::smallint, 0);
+  -- Este salvamento traz uma VISITA? (o navegador sempre manda o endereço; uma integração que
+  -- decide a origem, como a DM do Instagram, manda a campanha). Então a visita guardada passa a
+  -- ser a dele, em bloco. Salvamento sem nada disso não mexe na origem.
+  v_visita boolean := nullif(btrim(p ->> 'page_url'), '') is not null
+    or coalesce(
+      nullif(btrim(p ->> 'utm_source'), ''), nullif(btrim(p ->> 'utm_medium'), ''),
+      nullif(btrim(p ->> 'utm_campaign'), ''), nullif(btrim(p ->> 'utm_content'), ''),
+      nullif(btrim(p ->> 'utm_term'), ''), nullif(btrim(p ->> 'fbclid'), ''), nullif(btrim(p ->> 'gclid'), '')
+    ) is not null;
   v_status_antes text;
   v_status_depois text;
   v_finalizado_antes timestamptz;
@@ -534,17 +541,17 @@ begin
         then greatest(0, extract(epoch from now() - r.criado_em))::int
       else r.tempo_total_segundos
     end,
-    page_url = coalesce(r.page_url, nullif(btrim(p ->> 'page_url'), '')),
-    referrer = coalesce(r.referrer, nullif(btrim(p ->> 'referrer'), '')),
-    -- Campanha como UM bloco de primeiro toque (ver pesquisa_registrar_evento).
-    utm_source = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then nullif(btrim(p ->> 'utm_source'), '') else r.utm_source end,
-    utm_medium = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then nullif(btrim(p ->> 'utm_medium'), '') else r.utm_medium end,
-    utm_campaign = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then nullif(btrim(p ->> 'utm_campaign'), '') else r.utm_campaign end,
-    utm_content = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then nullif(btrim(p ->> 'utm_content'), '') else r.utm_content end,
-    utm_term = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then nullif(btrim(p ->> 'utm_term'), '') else r.utm_term end,
-    fbclid = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then nullif(btrim(p ->> 'fbclid'), '') else r.fbclid end,
-    gclid = case when (r.utm_source, r.utm_medium, r.utm_campaign, r.utm_content, r.utm_term, r.fbclid, r.gclid) is null then nullif(btrim(p ->> 'gclid'), '') else r.gclid end,
-    dispositivo = coalesce(r.dispositivo, nullif(btrim(p ->> 'dispositivo'), ''))
+    -- A visita é a do ÚLTIMO salvamento que trouxe uma (ver v_visita), em bloco.
+    page_url = case when v_visita then coalesce(nullif(btrim(p ->> 'page_url'), ''), r.page_url) else r.page_url end,
+    referrer = case when v_visita then nullif(btrim(p ->> 'referrer'), '') else r.referrer end,
+    utm_source = case when v_visita then nullif(btrim(p ->> 'utm_source'), '') else r.utm_source end,
+    utm_medium = case when v_visita then nullif(btrim(p ->> 'utm_medium'), '') else r.utm_medium end,
+    utm_campaign = case when v_visita then nullif(btrim(p ->> 'utm_campaign'), '') else r.utm_campaign end,
+    utm_content = case when v_visita then nullif(btrim(p ->> 'utm_content'), '') else r.utm_content end,
+    utm_term = case when v_visita then nullif(btrim(p ->> 'utm_term'), '') else r.utm_term end,
+    fbclid = case when v_visita then nullif(btrim(p ->> 'fbclid'), '') else r.fbclid end,
+    gclid = case when v_visita then nullif(btrim(p ->> 'gclid'), '') else r.gclid end,
+    dispositivo = coalesce(nullif(btrim(p ->> 'dispositivo'), ''), r.dispositivo)
   where r.id = v_id
     and r.seq < v_seq
   returning r.status, r.finalizado_em into v_status_depois, v_finalizado_depois;

@@ -157,7 +157,7 @@
   }
 
   /* ================================================================== */
-  /* Rastreio de primeiro toque                                          */
+  /* Rastreio da visita                                                  */
   /* ================================================================== */
 
   function dispositivo() {
@@ -187,20 +187,16 @@
     return dados;
   }
 
-  /** O que já estava guardado ganha; a visita nova só preenche o que faltava. */
-  // Campanha (utm_* + fbclid + gclid) é um bloco só de primeiro toque: se a primeira visita tinha
-  // qualquer um, fica o bloco dela inteiro; senão, o da visita nova. Misturar campo a campo
-  // creditaria uma campanha do Facebook à bio do Instagram, por exemplo.
   const CAMPOS_CAMPANHA = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid", "gclid"];
 
-  function mesclarRastreio(antigo, novo) {
+  /**
+   * A visita que vale é a DESTA abertura da página: endereço, referência e campanha inteiros, da
+   * URL aberta agora. Nada guardado de visita anterior entra no lugar — sem UTM na URL, sem UTM.
+   * (O rastreio antigo do rascunho é ignorado de propósito; o parâmetro fica só pela assinatura.)
+   */
+  function mesclarRastreio(_antigo, novo) {
     const saida = {};
-    const texto = (fonte, campo) => (fonte && typeof fonte[campo] === "string" && fonte[campo] ? fonte[campo] : null);
-    const blocoAntigo = CAMPOS_CAMPANHA.some((campo) => texto(antigo, campo));
-    for (const campo of CAMPOS_RASTREIO) {
-      if (CAMPOS_CAMPANHA.includes(campo)) saida[campo] = blocoAntigo ? texto(antigo, campo) : (novo && novo[campo]) || null;
-      else saida[campo] = texto(antigo, campo) || (novo && novo[campo]) || null;
-    }
+    for (const campo of CAMPOS_RASTREIO) saida[campo] = (novo && typeof novo[campo] === "string" && novo[campo]) || null;
     if (!["mobile", "tablet", "desktop"].includes(saida.dispositivo)) saida.dispositivo = dispositivo();
     return saida;
   }
@@ -1721,10 +1717,7 @@
     return (perfil && P.PERFIL_CODIGO && P.PERFIL_CODIGO[perfil]) || "";
   }
 
-  /**
-   * UTMs e ids de clique para a página de obrigado: os da URL atual; sem nenhum na URL, o bloco de
-   * primeiro toque do rascunho (inteiro, sem misturar campanhas, como em mesclarRastreio).
-   */
+  /** UTMs e ids de clique para a página de obrigado: exatamente os da URL atual (sem nenhum, nenhum). */
   function consultaDeOrigem() {
     let query;
     try {
@@ -1732,10 +1725,7 @@
     } catch {
       query = new URLSearchParams();
     }
-    const daUrl = CAMPOS_CAMPANHA.map((campo) => [campo, textoRastreio(query.get(campo), campo)]);
-    const usar = daUrl.some(([, valor]) => valor)
-      ? daUrl
-      : CAMPOS_CAMPANHA.map((campo) => [campo, textoRastreio(r.rastreio && r.rastreio[campo], campo)]);
+    const usar = CAMPOS_CAMPANHA.map((campo) => [campo, textoRastreio(query.get(campo), campo)]);
     const saida = new URLSearchParams();
     for (const [campo, valor] of usar) if (valor) saida.set(campo, valor);
     const texto = saida.toString();

@@ -639,7 +639,7 @@ test("a) banco: a linha da técnica está exata", async () => {
   assert.ok(l.concluido_em && l.finalizado_em && l.webhook_enviado_em);
   assert.ok(Number(l.tempo_total_segundos) >= 0);
   conferirTempos(l, JOANA.respostas);
-  // Rastreio de primeiro toque, gravado junto da resposta e na visita.
+  // Rastreio da última visita (a URL aberta), gravado junto da resposta e na visita.
   assert.equal(l.utm_source, "instagram");
   assert.equal(l.utm_campaign, "icp-teste");
   assert.equal(l.utm_medium, null);

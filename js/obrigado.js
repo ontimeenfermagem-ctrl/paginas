@@ -94,25 +94,20 @@
   }
 
   /**
-   * UTMs e ids de clique da URL atual (o formulário repassa os dele no redirecionamento). Sem
-   * nenhum na URL, vale o bloco de primeiro toque guardado no rascunho — inteiro, sem misturar
-   * campanha de uma visita com a de outra (mesma regra do formulário).
+   * UTMs e ids de clique da URL atual — o formulário repassa os dele no redirecionamento. Sem
+   * nenhum na URL, nenhum: nada guardado de outra visita entra no lugar.
    */
-  function rastreio(rascunho) {
+  function rastreio(_rascunho) {
     const query = new URLSearchParams(window.location.search);
     const daUrl = {};
     for (const campo of CAMPANHA) daUrl[campo] = texto(query.get(campo), campo);
-    const salvo = rascunho && rascunho.rastreio && typeof rascunho.rastreio === "object" ? rascunho.rastreio : {};
-    const usarUrl = CAMPANHA.some((campo) => daUrl[campo]);
     const dados = {
       // Sem o #: âncora não diz nada sobre a origem.
       page_url: texto(window.location.origin + window.location.pathname + window.location.search, "page_url"),
       referrer: texto(document.referrer, "referrer"),
       dispositivo: dispositivo()
     };
-    for (const campo of CAMPANHA) {
-      dados[campo] = usarUrl ? daUrl[campo] : typeof salvo[campo] === "string" ? texto(salvo[campo], campo) : null;
-    }
+    for (const campo of CAMPANHA) dados[campo] = daUrl[campo];
     return dados;
   }
 

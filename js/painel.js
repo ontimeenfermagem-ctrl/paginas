@@ -117,7 +117,7 @@
           nome: sala.nome,
           rota: sala.rota,
           lista: `replay-${sala.id}`,
-          sub: "Quem preencheu o formulário para liberar a sala de aula: nome, WhatsApp, e-mail, profissão e a origem de primeiro toque. Cada pessoa entra uma vez, mesmo voltando à página depois.",
+          sub: "Quem preencheu o formulário para liberar a sala de aula: nome, WhatsApp, e-mail, profissão e a origem da última visita. Cada pessoa entra uma vez, mesmo voltando à página depois.",
           entrar: null,
           atualizar: null,
           sair: null,
