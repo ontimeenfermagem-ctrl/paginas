@@ -288,3 +288,65 @@ test("desktop: a foto de abertura rompe a margem e o texto fica na coluna de lei
   assert.deepEqual(erros, []);
   await ctx.close();
 });
+
+/* ------------------------------------------------------------------ a oferta (o botão do minuto 20) */
+
+/*
+ * A API do YouTube é trocada por uma falsa, servida no MESMO endereço da verdadeira (e portanto
+ * passando pela CSP de verdade do servidor): o player falso devolve o minuto que o teste mandar.
+ */
+async function youtubeFalso(page) {
+  await page.route("https://www.youtube.com/iframe_api", (rota) =>
+    rota.fulfill({
+      status: 200,
+      contentType: "text/javascript",
+      body: `window.YT = { Player: function (el, opts) {
+        this.getCurrentTime = function () { return window.__minutoDoVideo || 0; };
+        var self = this;
+        setTimeout(function () { opts.events.onReady({ target: self }); }, 0);
+      } };
+      if (typeof window.onYouTubeIframeAPIReady === "function") window.onYouTubeIframeAPIReady();`
+    })
+  );
+  await page.route(/youtube-nocookie\.com/, (rota) => rota.fulfill({ status: 200, contentType: "text/html", body: "<title>aula</title>" }));
+}
+
+test("oferta: o botão só aparece quando o VÍDEO chega aos 20 minutos, com o link do checkout", async () => {
+  const { page, ctx, erros } = await abrir({ acesso: ACESSO_LIBERADO });
+  await youtubeFalso(page);
+  assert.ok(await page.isHidden("#oferta"), "antes do play não existe botão");
+
+  await page.click("#quadro");
+  const src = await page.getAttribute("#aula iframe", "src");
+  assert.match(src, /youtube-nocookie\.com\/embed\/JlocdK7VGpU\?/, "a aula certa");
+  assert.match(src, /enablejsapi=1/, "sem isto a página não sabe o minuto do vídeo");
+
+  // Aos 10 minutos, nada.
+  await page.evaluate(() => (window.__minutoDoVideo = 600));
+  await page.waitForTimeout(1600);
+  assert.ok(await page.isHidden("#oferta"), "aos 10 minutos o botão ainda não existe");
+
+  // Aos 20, o botão aparece.
+  await page.evaluate(() => (window.__minutoDoVideo = 1200));
+  await page.waitForSelector("#oferta:not([hidden])", { timeout: 4000 });
+  assert.equal(await page.getAttribute("#oferta-botao", "href"), "https://www.io.tecnicodevalor.com.br/10Vad");
+  assert.equal((await page.textContent("#oferta-rotulo")).trim(), "Quero ser técnica de enfermagem");
+  assert.equal(await page.getAttribute("#oferta-botao", "target"), "_blank", "a aula continua aberta atrás");
+  await tela(page, "oferta-390");
+  assert.deepEqual(erros, [], "a API do YouTube passa pela CSP da página");
+
+  // Voltou depois: o botão já está lá, sem precisar assistir de novo.
+  await page.reload();
+  await page.waitForSelector("#oferta:not([hidden])", { timeout: 4000 });
+  assert.ok(await page.isVisible("#oferta-botao"));
+  await ctx.close();
+});
+
+test("oferta: sala trancada não mostra o botão, mesmo para quem já chegou nele antes", async () => {
+  const { page, ctx } = await abrir();
+  await page.evaluate(() => localStorage.setItem("ev_replay_oferta_afericao", "1"));
+  await page.reload();
+  await page.waitForSelector("#sala-titulo");
+  assert.ok(await page.isHidden("#oferta"));
+  await ctx.close();
+});

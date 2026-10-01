@@ -27,7 +27,9 @@
     youtube: Object.freeze({
       nome: "YouTube",
       // nocookie: não grava cookie de rastreio antes do play.
-      url: (id) => `https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}?autoplay=1&rel=0&modestbranding=1`,
+      // enablejsapi: é o que deixa a página saber em que minuto a aula está (o botão da oferta).
+      url: (id) =>
+        `https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}?autoplay=1&rel=0&modestbranding=1&playsinline=1&enablejsapi=1`,
       capa: (id) => `https://i.ytimg.com/vi/${encodeURIComponent(id)}/maxresdefault.jpg`,
       idValido: (id) => /^[A-Za-z0-9_-]{6,20}$/.test(String(id || ""))
     }),
@@ -136,9 +138,22 @@
           id: "aula-1",
           titulo: "Aferição da profissão por tempo de serviço",
           capa: "",
-          video: Object.freeze({ provedor: "youtube", id: "" })
+          video: Object.freeze({ provedor: "youtube", id: "JlocdK7VGpU" })
         })
       ]),
+
+      /*
+       * A OFERTA: o botão que aparece logo abaixo da aula quando o VÍDEO chega em `aposSegundos`
+       * (o momento em que a Iza abre a oferta). Antes disso ele não existe na tela. Pausar não
+       * conta; adiantar o vídeo até lá conta. Quem já chegou lá uma vez neste aparelho encontra
+       * o botão aberto ao voltar. `link` só https. `ativo: false` = sem botão.
+       */
+      oferta: Object.freeze({
+        ativo: true,
+        rotulo: "Quero ser técnica de enfermagem",
+        link: "https://www.io.tecnicodevalor.com.br/10Vad",
+        aposSegundos: 20 * 60
+      }),
 
       /*
        * O SUMÁRIO ("O que você vai ver"): a lista numerada que dá vontade de assistir. Entrou no
@@ -259,6 +274,20 @@
     return Boolean(c && c.ativo === true && linkValido(c.link));
   }
 
+  /**
+   * A oferta da página, pronta para usar: {rotulo, link, aposSegundos}, ou null quando está
+   * desligada ou o config está torto (link que não é https, tempo que não é número).
+   */
+  function ofertaDaPagina(pagina) {
+    const o = pagina && pagina.oferta ? pagina.oferta : null;
+    if (!o || o.ativo !== true) return null;
+    const rotulo = typeof o.rotulo === "string" ? o.rotulo.trim() : "";
+    const link = typeof o.link === "string" ? o.link.trim() : "";
+    const aposSegundos = Number(o.aposSegundos);
+    if (!rotulo || !linkValido(link) || !Number.isFinite(aposSegundos) || aposSegundos < 0) return null;
+    return Object.freeze({ rotulo, link, aposSegundos });
+  }
+
   /** O mural aparece? */
   function comentariosAtivos(pagina) {
     const c = pagina && pagina.comentarios ? pagina.comentarios : null;
@@ -280,6 +309,7 @@
     linkValido,
     materialDaPagina,
     certificadoVisivel,
-    comentariosAtivos
+    comentariosAtivos,
+    ofertaDaPagina
   });
 })(typeof globalThis !== "undefined" ? globalThis : window);

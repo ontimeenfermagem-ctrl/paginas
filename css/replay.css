@@ -532,6 +532,37 @@ body.sala {
 }
 
 /* ================================================================== */
+/* A oferta (o botão que a aula libera)                               */
+/* ================================================================== */
+
+.oferta {
+  width: 100%;
+  max-width: var(--estreita);
+  margin: 22px auto 28px;
+}
+
+.oferta-botao {
+  width: 100%;
+  text-decoration: none;
+}
+
+/* Entra uma vez, quando a aula chega no momento dela (quem volta já encontra parado). */
+.oferta.chegando {
+  animation: oferta-chega 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes oferta-chega {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ================================================================== */
 /* A porta (o formulário de acesso)                                   */
 /* ================================================================== */
 

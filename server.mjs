@@ -153,7 +153,8 @@ function hashDoPixel(pixelId) {
 function cspDoReplay(pixelId) {
   return [
     "default-src 'self'",
-    `script-src 'self'${hashDoPixel(pixelId)} https://connect.facebook.net`,
+    // www.youtube.com: a API oficial do player, que diz em que minuto a aula está (o botão da oferta).
+    `script-src 'self'${hashDoPixel(pixelId)} https://connect.facebook.net https://www.youtube.com`,
     // As capas: i.ytimg (YouTube) e i.vimeocdn (Vimeo).
     "img-src 'self' data: https://www.facebook.com https://i.ytimg.com https://i.vimeocdn.com",
     "connect-src 'self' https://www.facebook.com https://connect.facebook.net",

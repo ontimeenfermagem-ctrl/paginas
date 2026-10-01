@@ -394,6 +394,103 @@
 
     quadro.append(centro);
     alvo.append(quadro);
+    // Quem já chegou no momento da oferta neste aparelho encontra o botão aberto.
+    if (liberada && lerStorage(CHAVE_OFERTA) === "1") abrirOferta({ chegando: false });
+  }
+
+  /* ================================================================== */
+  /* A oferta: o botão que a aula libera                                 */
+  /* ================================================================== */
+  /*
+   * O botão nasce escondido e aparece quando o VÍDEO passa de `aposSegundos` (js/replay-config.js,
+   * oferta). Quem mede é a API oficial do YouTube: pausar não conta, adiantar até lá conta. Se a
+   * API não carregar (bloqueador de anúncio, rede ruim, Vimeo/Panda), o plano B é o relógio — o
+   * mesmo tempo contado desde o play. O relógio é cancelado assim que a API responde, para quem
+   * pausou não ganhar o botão antes da hora.
+   */
+  const OFERTA = R.ofertaDaPagina(pagina);
+  const CHAVE_OFERTA = `ev_replay_oferta_${pagina.id}`;
+  const API_YOUTUBE = "https://www.youtube.com/iframe_api";
+  let ofertaAberta = false;
+  let relogioOferta = 0;
+  let vigiaOferta = 0;
+
+  function abrirOferta({ chegando = true } = {}) {
+    if (!OFERTA || ofertaAberta) return;
+    const caixa = $("oferta");
+    const botao = $("oferta-botao");
+    if (!caixa || !botao) return;
+    ofertaAberta = true;
+    window.clearTimeout(relogioOferta);
+    window.clearInterval(vigiaOferta);
+    botao.href = OFERTA.link;
+    escreverTexto("oferta-rotulo", OFERTA.rotulo);
+    caixa.classList.toggle("chegando", chegando);
+    caixa.hidden = false;
+    gravarStorage(CHAVE_OFERTA, "1");
+    if (chegando) {
+      pixel("trackCustom", "replay_oferta", { pagina: pagina.id, aula: aula ? aula.id : "" });
+      anunciar(`Liberado logo abaixo da aula: ${OFERTA.rotulo}.`);
+    }
+  }
+
+  function carregarApiDoYoutube(pronto) {
+    if (window.YT && typeof window.YT.Player === "function") {
+      pronto();
+      return;
+    }
+    // A API chama esta função global quando termina de carregar; uma anterior (de outro script)
+    // continua sendo chamada.
+    const anterior = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      if (typeof anterior === "function") {
+        try {
+          anterior();
+        } catch {
+          // O erro de outro script não pode impedir o botão.
+        }
+      }
+      pronto();
+    };
+    if (document.querySelector(`script[src="${API_YOUTUBE}"]`)) return;
+    const script = document.createElement("script");
+    script.src = API_YOUTUBE;
+    script.async = true;
+    document.head.append(script);
+  }
+
+  function vigiarOferta(frame) {
+    if (!OFERTA || ofertaAberta || !aula) return;
+    relogioOferta = window.setTimeout(() => abrirOferta(), OFERTA.aposSegundos * 1000);
+    if (aula.video.provedor !== "youtube") return;
+    try {
+      carregarApiDoYoutube(() => {
+        try {
+          const player = new window.YT.Player(frame, {
+            events: {
+              onReady: () => {
+                // A API respondeu: quem manda agora é o minuto do vídeo, e não o relógio.
+                window.clearTimeout(relogioOferta);
+                window.clearInterval(vigiaOferta);
+                vigiaOferta = window.setInterval(() => {
+                  let segundos = 0;
+                  try {
+                    segundos = Number(player.getCurrentTime()) || 0;
+                  } catch {
+                    segundos = 0;
+                  }
+                  if (segundos >= OFERTA.aposSegundos) abrirOferta();
+                }, 1000);
+              }
+            }
+          });
+        } catch {
+          // A API carregou mas não aceitou o player: fica o relógio.
+        }
+      });
+    } catch {
+      // Script bloqueado: fica o relógio.
+    }
   }
 
   function tocar(quadro) {
@@ -404,11 +501,14 @@
     const frame = document.createElement("iframe");
     frame.src = url;
     frame.title = aula.titulo;
-    frame.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture; fullscreen";
+    // Tela cheia só pelo allowfullscreen: com "fullscreen" também no allow, o Chrome avisa que um
+    // dos dois é ignorado.
+    frame.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture";
     frame.setAttribute("allowfullscreen", "");
     frame.setAttribute("referrerpolicy", "strict-origin-when-cross-origin");
     moldura.append(frame);
     quadro.replaceWith(moldura);
+    vigiarOferta(frame);
     // A decoração sai da frente enquanto a aula roda (só decoração: texto nenhum perde contraste).
     document.body.classList.add("assistindo");
     pixel("trackCustom", "replay_play", { pagina: pagina.id, aula: aula.id });
