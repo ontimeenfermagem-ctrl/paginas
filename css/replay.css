@@ -218,6 +218,7 @@ body.sala {
   min-height: var(--topo-altura);
   margin-inline: auto;
   padding-inline: var(--gutter);
+  transition: opacity 260ms ease;
 }
 
 .expediente-marca {
@@ -520,6 +521,49 @@ body.sala {
 /* A trava, enquanto a sala não foi liberada. */
 .abertura-trava svg {
   color: var(--gold-soft);
+}
+
+/*
+ * A aula agendada (a live antes da hora): a thumb inteira, sem o véu da capa e sem nada por cima
+ * da arte, e o selo escuro logo EMBAIXO dela com a data — no dia, a contagem regressiva. Nada a
+ * tocar até lá.
+ */
+.abertura-quadro.agendada {
+  cursor: default;
+}
+
+.abertura-quadro.agendada .abertura-capa {
+  opacity: 1;
+}
+
+.abertura-agenda {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  max-width: calc(100% - 2 * var(--gutter));
+  margin: 14px auto 0;
+  padding: 9px 16px 9px 13px;
+  border-radius: 999px;
+  background: var(--ink);
+  box-shadow: 0 12px 26px -16px rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: clamp(11px, 3vw, 12.5px);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.abertura-agenda svg {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  color: var(--gold-soft);
+}
+
+.abertura-agenda-texto {
+  min-width: 0;
 }
 
 .abertura-quadro[aria-disabled="true"] {
@@ -2024,7 +2068,7 @@ a.conteudo-cartao:hover .conteudo-arte {
  * (WCAG 1.4.3). Se alguém "melhorar" isto depois, é aqui que quebra.
  */
 body.assistindo .luz,
-body.assistindo .expediente,
+body.assistindo .expediente-linha,
 body.assistindo .colofao {
   opacity: 0.35;
 }

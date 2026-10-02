@@ -307,12 +307,28 @@
     escreverTexto("botao-acesso-texto", acesso.cta);
   }
 
+  /*
+   * A PORTA ANTES DE TUDO (acesso.portaPrimeiro): trancada, a página é só a capa e o formulário —
+   * nada de quadro com cadeado, de sumário nem de vitrine. Preenchida, o resto aparece. Sem a
+   * opção (a aferição), vale o desenho de sempre: a foto de abertura trancada dá vontade.
+   */
+  const PORTA_PRIMEIRO = Boolean(pagina.acesso && pagina.acesso.portaPrimeiro === true);
+  const portaFechada = () => PORTA_PRIMEIRO && !liberada;
+
+  function mostrarSala() {
+    if (!PORTA_PRIMEIRO) return;
+    for (const id of ["aula", "abertura-legenda"]) {
+      const el = $(id);
+      if (el) el.hidden = portaFechada();
+    }
+  }
+
   function desenharSumario() {
     const secao = $("sumario");
     const lista = $("sumario-lista");
     const itens = Array.isArray(pagina.sumario) ? pagina.sumario : [];
     if (!secao || !lista) return;
-    if (!itens.length) {
+    if (!itens.length || portaFechada()) {
       secao.hidden = true;
       return;
     }
@@ -334,6 +350,8 @@
   // O que o quadro mostra agora: a aula ou um dos conteúdos do dia (o card que a pessoa tocou).
   let emCartaz = aula;
   let tocando = false;
+  // A aula estava aberta da última vez que o quadro a desenhou? Na hora da live, muda sozinho.
+  let quadroDaAulaAberto = true;
 
   function desenharQuadro() {
     const alvo = $("abertura-quadro");
@@ -373,6 +391,10 @@
     const centro = document.createElement("div");
     centro.className = "abertura-centro";
     const temVideo = R.videoValido(atual.video);
+    let seloDaAgenda = null;
+    // A aula com hora para abrir (a live): até lá, a thumb inteira e o selo com a data.
+    const agendada = atual === aula && !R.aulaAberta(aula, Date.now());
+    quadroDaAulaAberto = atual === aula ? !agendada : quadroDaAulaAberto;
 
     if (!liberada) {
       // Trancada: a foto de abertura aparece SEMPRE. É ela que dá vontade.
@@ -384,6 +406,20 @@
       centro.append(legenda);
       quadro.setAttribute("aria-label", "Liberar o acesso para assistir à aula");
       quadro.addEventListener("click", irParaPorta);
+    } else if (agendada) {
+      // Ainda não é a hora: nada a tocar. A thumb é a estrela — inteira, sem nada por cima — e o
+      // selo logo EMBAIXO dela diz quando abre (a contagem regressiva troca só o texto dele).
+      quadro.classList.add("agendada");
+      quadro.setAttribute("aria-disabled", "true");
+      const libera = R.instanteDe(aula.liberaEm);
+      seloDaAgenda = document.createElement("p");
+      seloDaAgenda.className = "abertura-agenda";
+      seloDaAgenda.dataset.libera = String(libera);
+      const texto = document.createElement("span");
+      texto.className = "abertura-agenda-texto";
+      texto.textContent = `Ao vivo · ${R.rotuloDaLiberacao(libera, Date.now())}`;
+      seloDaAgenda.append(icone(ICONE_CADEADO, ""), texto);
+      quadro.setAttribute("aria-label", `${atual.titulo}: abre ${R.rotuloDaLiberacao(libera, Date.now())}`);
     } else if (temVideo) {
       const play = document.createElement("span");
       play.className = "abertura-play";
@@ -408,21 +444,24 @@
 
     quadro.append(centro);
     alvo.append(quadro);
+    if (seloDaAgenda) alvo.append(seloDaAgenda);
 
     // Um conteúdo tomou o quadro, mas a aula tem vídeo: o caminho de volta fica sempre à mão (o
     // tocar() troca só o quadro, então este botão continua embaixo do player).
-    if (liberada && atual !== aula && aula && R.videoValido(aula.video)) {
+    if (liberada && atual !== aula && aula) {
       const voltar = document.createElement("button");
       voltar.type = "button";
       voltar.className = "abertura-voltar";
-      voltar.textContent = "Voltar para a aula";
+      voltar.textContent = "Voltar para a aula principal";
       voltar.addEventListener("click", () => {
         emCartaz = aula;
         desenharQuadro();
+        // A aula toca na hora se já abriu e tem vídeo; senão, o quadro mostra a capa dela.
         const quadroDaAula = $("quadro");
-        if (quadroDaAula) tocar(quadroDaAula);
+        if (quadroDaAula && R.aulaAberta(aula, Date.now()) && R.videoValido(aula.video)) tocar(quadroDaAula);
         desenharConteudos({ forcar: true });
-        focarPlayer();
+        if (playerAtual) focarPlayer();
+        else if ($("quadro")) $("quadro").focus({ preventScroll: true });
       });
       alvo.append(voltar);
     }
@@ -993,7 +1032,8 @@
    * liberado mais recente (o do dia); senão a aula, com o aviso dela.
    */
   function escolherEmCartaz() {
-    if (aula && R.videoValido(aula.video)) return aula;
+    // A aula principal vem PRIMEIRO, mesmo antes da hora dela (o quadro mostra a capa e a data).
+    if (aula) return aula;
     let melhor = null;
     for (const item of conteudosAgora()) {
       if (item.estado === "liberado" && item.video && (!melhor || item.liberaEm >= melhor.liberaEm)) melhor = item;
@@ -1263,6 +1303,11 @@
 
   function atualizarContagem() {
     const agora = Date.now();
+    for (const selo of document.querySelectorAll(".abertura-agenda[data-libera]")) {
+      const quando = R.rotuloDaLiberacao(Number(selo.dataset.libera), agora);
+      const texto = selo.querySelector(".abertura-agenda-texto");
+      if (texto && quando && texto.textContent !== `Ao vivo · ${quando}`) texto.textContent = `Ao vivo · ${quando}`;
+    }
     for (const li of document.querySelectorAll('#conteudos-lista > li[data-estado="trancado"], #conteudos-destaque > li[data-estado="trancado"]')) {
       const quando = R.rotuloDaLiberacao(Number(li.dataset.libera), agora);
       const estado = li.querySelector(".conteudo-estado");
@@ -1273,7 +1318,11 @@
   /** Quando o próximo conteúdo abre com a página aberta, o card destrava sem recarregar. */
   function agendarConteudos() {
     window.clearTimeout(relogioConteudos);
-    const proxima = R.proximaLiberacao(pagina, Date.now());
+    const agora = Date.now();
+    let proxima = R.proximaLiberacao(pagina, agora);
+    // A hora da aula principal (a live) também redesenha a sala, sem ninguém atualizar a página.
+    const daAula = aula ? R.instanteDe(aula.liberaEm) : NaN;
+    if (Number.isFinite(daAula) && daAula > agora && (proxima === null || daAula < proxima)) proxima = daAula;
     if (proxima === null) return;
     const espera = proxima - Date.now() + 1000;
     // O setTimeout não aguenta mais de ~24 dias: o que abre depois disso fica para a próxima visita.
@@ -1288,6 +1337,23 @@
     const nav = $("nav-conteudos");
     const itens = conteudosAgora();
     agendarConteudos();
+
+    // A porta fechada esconde a vitrine inteira (e o card em destaque).
+    if (portaFechada()) {
+      secao.hidden = true;
+      if (fio) fio.hidden = true;
+      if (nav) nav.hidden = true;
+      for (const id of ["conteudos-destaque", "fio-destaque"]) {
+        const el = $(id);
+        if (el) el.hidden = true;
+      }
+      return;
+    }
+
+    // Chegou a hora da aula principal com o quadro parado nela: o quadro troca a capa pelo play.
+    if (liberada && !tocando && emCartaz === aula && aula && R.aulaAberta(aula, Date.now()) !== quadroDaAulaAberto) {
+      desenharQuadro();
+    }
 
     if (!itens.length) {
       secao.hidden = true;
@@ -1999,6 +2065,8 @@
     liberada = true;
     const porta = $("porta");
     if (porta) porta.hidden = true;
+    mostrarSala();
+    desenharSumario();
     emCartaz = escolherEmCartaz();
     desenharQuadro();
     desenharConteudos({ forcar: true });
@@ -2322,6 +2390,7 @@
   if (acessoValido()) {
     abrirSala();
   } else {
+    mostrarSala();
     desenharQuadro();
     desenharConteudos();
     // Trancada, o mural serve só para a contagem (prova social) — nenhum texto de terceiro chega.

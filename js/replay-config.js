@@ -256,10 +256,11 @@
     }),
 
     /*
-     * A SALA DA IMERSÃO GPS (/pagina-de-aula-gps): a mesma matéria da aferição, com as 6 mini aulas
-     * (Shorts do YouTube) que abrem uma por dia, às 20h, numa vitrine que desliza de lado, e a live
-     * principal (07/10, 20h) em destaque embaixo dela. A chave do objeto TEM que ser igual ao `id`
-     * (é por ela que o servidor acha a sala quando o formulário chega).
+     * A SALA DA IMERSÃO GPS (/pagina-de-aula-gps): a porta PRIMEIRO (sem o formulário, a página é
+     * só a capa e ele); preenchida, a sala abre com a aula principal no topo — a live de quarta,
+     * 07/10, às 20h — e, embaixo, a vitrine das 6 mini aulas (Shorts do YouTube) que abrem uma por
+     * dia, às 20h, e os comentários. A chave do objeto TEM que ser igual ao `id` (é por ela que o
+     * servidor acha a sala quando o formulário chega).
      */
     "aula-gps": Object.freeze({
       id: "aula-gps",
@@ -272,7 +273,7 @@
       eyebrow: "Sala de aula",
       titulo: "Imersão <em>GPS</em>",
       apoio: "O GPS do Plantão Sem Medo começa antes da live: seis mini aulas, uma por dia, para você chegar pronta.",
-      legenda: "Grave este link: as mini aulas abrem aqui, uma por dia às 20h, até a live de quarta, 07/10.",
+      legenda: "Grave este link: a live de quarta, 07/10, às 20h, é aqui. Até lá, uma mini aula nova por dia, logo abaixo.",
 
       /*
        * O PLAYER LIMPO: o vídeo do YouTube toca sem NADA do YouTube na tela — sem os controles, o
@@ -285,27 +286,32 @@
       acesso: Object.freeze({
         rotulo: "Acesso à sala",
         titulo: "Destrave esta tela",
-        apoio: "Preencha uma vez e a sala abre, com as mini aulas que chegam uma por dia até a live.",
+        apoio: "Preencha uma vez e a sala abre: a live de quarta, 07/10, e as mini aulas que chegam uma por dia até lá.",
         cta: "QUERO ENTRAR NA SALA",
         perguntaPerfil: "Hoje você é:",
         lembrarDias: 90,
-        trava: "As mini aulas estão aqui dentro"
+        trava: "As mini aulas estão aqui dentro",
+        // A PORTA ANTES DE TUDO: trancada, a página é só a capa e o formulário — nada de quadro com
+        // cadeado nem vitrine. Preenchido (uma vez por aparelho, por `lembrarDias`), abre o resto.
+        portaPrimeiro: true
       }),
 
       /*
-       * A aula da imersão. Sem vídeo aqui, o quadro lá de cima toca a mini aula do dia (a mais
-       * recente já liberada) e, enquanto nenhuma tem vídeo, mostra a capa da live e o `aviso`. A
-       * LIVE em si é o card de destaque (abre sozinha no dia e na hora dela). Vídeo aqui passaria
-       * na frente de tudo — e a página de venda promete o replay por 48h SÓ para quem comprou,
-       * então isso só com o ok do cliente.
+       * A AULA PRINCIPAL: a live de quarta, 07/10, às 20h. É a primeira coisa da sala, logo que a
+       * porta abre, com a thumb dela (`capa`). Até `liberaEm`, o quadro mostra a thumb inteira e o
+       * selo "Ao vivo" com a data (no dia, a contagem regressiva); na hora, abre sozinha, sem
+       * ninguém atualizar a página: com o `video` (o id do YouTube da live), toca no player limpo;
+       * sem ele, mostra o `aviso`. A página de venda promete o replay por 48h SÓ para quem comprou,
+       * e esta sala abre para qualquer lead: o vídeo entra aqui só com o ok do cliente.
        */
       aulas: Object.freeze([
         Object.freeze({
-          id: "aula-gps",
-          titulo: "Imersão GPS do Plantão Sem Medo",
+          id: "live",
+          titulo: "Ao vivo com Izabel Gonçalves",
           capa: "/img/aula-gps/live.jpg",
+          liberaEm: "2026-10-07T20:00:00-03:00",
           video: Object.freeze({ provedor: "youtube", id: "" }),
-          aviso: "As mini aulas abrem aqui, uma por dia às 20h, até a live de quarta, 07/10."
+          aviso: "A live com a Iza vai passar aqui."
         })
       ]),
 
@@ -396,20 +402,6 @@
             imagem: "/img/aula-gps/mini-aula-6.jpg",
             liberaEm: "2026-10-06T20:00:00-03:00",
             video: Object.freeze({ provedor: "youtube", id: "f9ipe2ttj4w" }),
-            link: ""
-          }),
-          // A live principal: o card de destaque, embaixo da vitrine, com rótulo e formato próprios.
-          Object.freeze({
-            id: "live",
-            rotulo: "Live principal",
-            titulo: "Ao vivo com Izabel Gonçalves",
-            imagem: "/img/aula-gps/live.jpg",
-            // O que o card mostra enquanto a thumb da live não subiu.
-            marca: "07/10",
-            formato: "horizontal",
-            destaque: true,
-            liberaEm: "2026-10-07T20:00:00-03:00",
-            video: Object.freeze({ provedor: "youtube", id: "" }),
             link: ""
           })
         ])
@@ -560,6 +552,18 @@
     });
   }
 
+  /**
+   * A aula (o quadro de abertura) já abriu? Sem `liberaEm`, sempre — é o caso da aferição. Com ele,
+   * só do instante dele em diante; data torta (sem fuso) deixa fechada, como nos cards.
+   */
+  function aulaAberta(aula, agora) {
+    if (!aula) return false;
+    if (aula.liberaEm === undefined || aula.liberaEm === null || aula.liberaEm === "") return true;
+    const libera = instanteDe(aula.liberaEm);
+    const t = Number(agora);
+    return Number.isFinite(libera) && Number.isFinite(t) && t >= libera;
+  }
+
   /** O próximo instante (ms) em que algum conteúdo abre, ou null. É quando a página se redesenha. */
   function proximaLiberacao(pagina, agora) {
     const t = Number(agora);
@@ -639,6 +643,8 @@
     proximaLiberacao,
     nomeDoConteudo,
     rotuloDaData,
-    rotuloDaLiberacao
+    rotuloDaLiberacao,
+    aulaAberta,
+    instanteDe
   });
 })(typeof globalThis !== "undefined" ? globalThis : window);

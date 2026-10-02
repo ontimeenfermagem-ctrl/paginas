@@ -5,20 +5,23 @@
 // POST da inscrição e o GET do mural são interceptados no navegador. O RELÓGIO é sempre o do
 // teste (page.clock): data de verdade aqui viraria bomba-relógio. Os cards também são do teste: o
 // js/replay-config.js servido tem o bloco `conteudos` trocado por um fixo (6 Shorts de 30/09 a
-// 05/10 e a live em 06/10, à meia-noite; vídeo, nome e link só onde o cenário pede), e as thumbs
-// respondem 404 — então o arquivo do projeto pode mudar de vídeo, de nome e de data sem quebrar
-// nada aqui. E o YouTube é um falso no MESMO endereço da API de verdade (passa pela CSP de verdade),
+// 05/10, à meia-noite; vídeo, nome e link só onde o cenário pede), e as thumbs respondem 404 —
+// então o arquivo do projeto pode mudar de vídeo, de nome e de data sem quebrar nada aqui. A aula
+// principal (a live) é a do config de verdade, a não ser que o cenário troque a hora ou o vídeo. E o YouTube é um falso no MESMO endereço da API de verdade (passa pela CSP de verdade),
 // que toca, pausa, avança e pode recusar o play ou nem carregar. O que este arquivo protege:
 //
+//   - a porta antes de tudo: sem o formulário, só a capa e ele; depois, a aula principal (a live,
+//     agendada até a hora dela) e, embaixo, a vitrine;
 //   - a vitrine: desliza de lado (setas no computador, dedo no celular), pontinhos, os Shorts em
 //     pé; trancado em preto e branco, com cadeado e sem link; liberado colorido e sem cadeado;
 //   - a data de cada card é a de Brasília, em qualquer fuso, com a contagem regressiva andando;
 //   - o player limpo: nada do YouTube recebe toque, os controles são os da página, a capa cobre o
 //     vídeo pausado; o play que o navegador recusa vira "toque no vídeo"; sem a API, volta o player
 //     do YouTube;
-//   - o card liberado antes do formulário começa a tocar depois dele; conteúdo não abre a oferta, e
-//     a aula com vídeo tem sempre o caminho de volta;
-//   - os comentários logo embaixo das mini aulas; a live em destaque;
+//   - na sala sem a porta primeiro, o card liberado tocado antes do formulário toca depois dele;
+//     conteúdo não abre a oferta; a aula principal tem sempre o caminho de volta e abre sozinha na
+//     hora dela, sem atualizar a página;
+//   - os comentários logo embaixo das mini aulas;
 //   - nada de rolagem horizontal, e nenhum erro de CSP no console.
 //
 //   node --test tests/e2e/aula-gps.e2e.mjs        (precisa só do Playwright; sem Docker)
@@ -48,7 +51,7 @@ const CHAVE_ACESSO = "ev_replay_acesso_aula-gps_v1";
 
 // 03/10, sábado, 10h em Brasília: os conteúdos 1 a 4 já passaram da data, o 5 abre no domingo.
 const SABADO = new Date("2026-10-03T10:00:00-03:00");
-const DIAS = ["2026-09-30", "2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06"];
+const DIAS = ["2026-09-30", "2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05"];
 
 let servidor;
 let BASE;
@@ -80,19 +83,17 @@ function trocar(texto, padrao, novo) {
 
 /**
  * O js/replay-config.js como o navegador recebe neste teste. `conteudos` = { 1: { titulo, video,
- * link } } (o resto vazio); `aulaVideo` = id do YouTube da aula; `oferta` = segundos até o botão;
- * `material` = um item com link no "Para levar". O arquivo do projeto não muda.
+ * link } } (o resto vazio); `aulaVideo` = id do YouTube da aula principal; `aulaLiberaEm` = a hora
+ * dela; `oferta` = segundos até o botão; `material` = um item com link no "Para levar";
+ * `portaPrimeiro: false` = a sala sem a porta antes de tudo. O arquivo do projeto não muda.
  */
-function configDoTeste({ conteudos = {}, aulaVideo = "", oferta = null, material = false } = {}) {
+function configDoTeste({ conteudos = {}, aulaVideo = "", aulaLiberaEm = "", oferta = null, material = false, portaPrimeiro = true } = {}) {
   const itens = DIAS.map((dia, i) => {
     const m = conteudos[i + 1] || {};
-    // O 7º é como a live da sala de verdade: deitado, rótulo próprio, a marca e o card em destaque.
-    const live = i === DIAS.length - 1;
     return {
-      id: live ? "live" : `conteudo-${i + 1}`,
-      ...(live ? { rotulo: "Live principal", destaque: true, formato: "horizontal", marca: "06/10" } : {}),
+      id: `conteudo-${i + 1}`,
       titulo: m.titulo || "",
-      imagem: live ? "/img/aula-gps/live.jpg" : `/img/aula-gps/conteudo-${i + 1}.jpg`,
+      imagem: `/img/aula-gps/conteudo-${i + 1}.jpg`,
       liberaEm: `${dia}T00:00:00-03:00`,
       video: { provedor: "youtube", id: m.video || "" },
       link: m.link || ""
@@ -103,8 +104,12 @@ function configDoTeste({ conteudos = {}, aulaVideo = "", oferta = null, material
     // O bloco INTEIRO dos conteúdos (nome da série, formato, textos e itens) é do teste.
     let saida = trocar(texto, /conteudos: Object\.freeze\(\{[\s\S]*?\n {6}\}\),/, () => `conteudos: ${JSON.stringify(bloco)},`);
     if (aulaVideo) {
-      saida = trocar(saida, /(id: "aula-gps",[\s\S]*?video: Object\.freeze\(\{ provedor: "youtube", id: )""/, `$1${JSON.stringify(aulaVideo)}`);
+      saida = trocar(saida, /(aulas: Object\.freeze\(\[[\s\S]*?video: Object\.freeze\(\{ provedor: "youtube", id: )""/, `$1${JSON.stringify(aulaVideo)}`);
     }
+    if (aulaLiberaEm) {
+      saida = trocar(saida, /(aulas: Object\.freeze\(\[[\s\S]*?liberaEm: )"[^"]*"/, `$1${JSON.stringify(aulaLiberaEm)}`);
+    }
+    if (!portaPrimeiro) saida = trocar(saida, "portaPrimeiro: true", "portaPrimeiro: false");
     if (oferta !== null) {
       saida = trocar(
         saida,
@@ -258,47 +263,100 @@ const noMeioDoPlayer = (page) =>
     return el ? el.className || el.tagName : "";
   });
 
-/* ------------------------------------------------------------------ a vitrine trancada */
+/* ------------------------------------------------------------------ a porta antes de tudo */
 
-test("trancada: a vitrine mostra os 6 Shorts em pé e a live em destaque, cada um com a sua data", async () => {
-  const { page, ctx, erros } = await abrir();
+test("trancada: a porta vem antes de tudo — só a capa e o formulário, nada de quadro nem vitrine", async () => {
+  const { page, ctx, erros } = await abrir({ config: COM_VIDEOS });
   assert.equal(await page.textContent("#sala-titulo"), GPS.titulo.replace(/<\/?em>/g, ""));
-  assert.equal(await page.locator(".abertura-quadro .abertura-trava").count(), 1, "o quadro aparece trancado");
   assert.ok(await page.isVisible("#porta"), "o formulário está na tela");
-  assert.ok(await page.isHidden("#mural"), "o mural não aparece trancado");
+  assert.ok(await page.isHidden("#aula"), "o quadro (com cadeado ou não) não aparece antes da porta");
+  assert.ok(await page.isHidden("#abertura-legenda"));
+  assert.ok(await page.isHidden("#conteudos"), "a vitrine também não");
+  assert.ok(await page.isHidden("#fio-conteudos"));
+  assert.ok(await page.isHidden("#mural"), "nem o mural");
+  // O formulário é a primeira coisa depois da capa.
+  const primeiraCoisa = await page.evaluate(() => {
+    const capa = document.querySelector(".capa").getBoundingClientRect().bottom;
+    const porta = document.querySelector("#porta").getBoundingClientRect().top;
+    return Math.round(porta - capa);
+  });
+  assert.ok(primeiraCoisa >= 0 && primeiraCoisa < 80, `a porta logo depois da capa (${primeiraCoisa}px)`);
+  // A profissão continua no formulário.
+  assert.equal(await page.locator("#opcoes-perfil .opcao").count(), 4);
+  assert.ok(await semRolagemLateral(page));
+  await tela(page, "porta-390");
+  assert.deepEqual(erros, []);
+  await ctx.close();
+});
 
+test("liberar: a inscrição vai como aula-gps, e a sala abre com a aula principal no topo e as mini aulas embaixo", async () => {
+  const { page, ctx, erros, enviados } = await abrir({ config: COM_VIDEOS, arte: true });
+  await page.fill("#campo-nome", "joana de souza");
+  await page.fill("#campo-whatsapp", "21998765432");
+  await page.fill("#campo-email", "joana@gmail.com");
+  await page.click('#opcoes-perfil .opcao:has-text("Técnico")');
+  await page.click("#botao-acesso");
+  await page.waitForSelector("#porta", { state: "hidden" });
+
+  assert.equal(enviados.length, 1);
+  assert.equal(enviados[0].pagina, "aula-gps", "é o id que acha a sala no servidor");
+  assert.equal(enviados[0].contato.nome, "Joana de Souza");
+  assert.equal(enviados[0].perfil, "Técnico(a) de enfermagem", "a profissão continua no formulário");
+  assert.equal(enviados[0].rastreio.utm_source, "whatsapp");
+  assert.equal(enviados[0].rastreio.utm_campaign, "gps");
+
+  // A aula principal (a live) é a primeira coisa: agendada, com a thumb e o selo da data.
+  assert.ok(await page.isVisible("#aula"));
+  assert.equal(await page.locator(".abertura-quadro.agendada").count(), 1);
+  assert.equal(await page.getAttribute(".abertura-quadro .abertura-capa", "src"), GPS.aulas[0].capa);
+  assert.equal((await page.textContent(".abertura-agenda-texto")).trim(), "Ao vivo · quarta, 07/10, às 20h");
+  assert.equal(await page.getAttribute(".abertura-quadro", "aria-disabled"), "true", "nada a tocar antes da hora");
+
+  // Embaixo dela, a vitrine; o card do dia é só um card (o quadro é da aula principal).
   await page.waitForSelector("#conteudos:not([hidden])");
-  assert.equal(await page.locator("#conteudos-lista > li").count(), 6, "seis na vitrine");
-  assert.equal(await page.locator("#conteudos-destaque > li").count(), 1, "a live fora dela, em destaque");
-  assert.ok(await page.isVisible("#fio-destaque"));
-  // 1 a 4 já passaram da data, mas ainda não têm vídeo: "em breve". 5 em diante: o dia de Brasília.
-  assert.deepEqual(await estados(page), ["chegando", "chegando", "chegando", "chegando", "trancado", "trancado", "trancado"]);
-  assert.deepEqual(await rotulosDeEstado(page), [
-    "Em breve",
-    "Em breve",
-    "Em breve",
-    "Em breve",
-    "Abre em 14h",
-    "Abre segunda, 05/10",
-    "Abre terça, 06/10"
-  ]);
-  assert.deepEqual(
-    await page.$$eval("#conteudos-lista .conteudo-rotulo, #conteudos-destaque .conteudo-rotulo", (els) => els.map((el) => el.textContent)),
-    ["Conteúdo 1", "Conteúdo 2", "Conteúdo 3", "Conteúdo 4", "Conteúdo 5", "Conteúdo 6", "Live principal"]
-  );
-  assert.equal(await page.locator("#conteudos-lista a, #conteudos-lista button, #conteudos-destaque a, #conteudos-destaque button").count(), 0, "nada para tocar sem conteúdo");
-  assert.equal(await page.locator('.conteudo-icone[data-icone="cadeado"]').count(), 7, "todos com o cadeado");
+  assert.deepEqual(await estados(page), ["liberado", "liberado", "liberado", "liberado", "trancado", "trancado"]);
+  assert.equal(await card(page, 4).locator(".conteudo-novo").count(), 1, "o do dia leva o selo Novo");
+  assert.match(await card(page, 4).textContent(), /Assistir agora/);
+  assert.ok(await page.isVisible("#nav-conteudos"), "o atalho das mini aulas aparece no topo");
+  const ordem = await page.evaluate(() => {
+    const depois = (a, b) => Boolean(document.querySelector(a).compareDocumentPosition(document.querySelector(b)) & Node.DOCUMENT_POSITION_FOLLOWING);
+    return { vitrineDepoisDaAula: depois("#aula", "#conteudos"), muralDepoisDaVitrine: depois("#conteudos", "#mural") };
+  });
+  assert.deepEqual(ordem, { vitrineDepoisDaAula: true, muralDepoisDaVitrine: true });
+  await page.waitForSelector("#mural:not([hidden])");
+  await tela(page, "aberta-390");
+  assert.deepEqual(erros, []);
+  await ctx.close();
+});
 
-  // A thumb ainda não subiu (404): o card fica com o número da marca (ou a marca da live).
+test("voltando depois: a sala já abre direto (o aparelho lembra), sem o formulário", async () => {
+  const { page, ctx, enviados } = await abrir({ config: COM_VIDEOS, acesso: acessoEm(SABADO) });
+  await page.waitForSelector("#conteudos:not([hidden])");
+  assert.ok(await page.isHidden("#porta"));
+  assert.ok(await page.isVisible("#aula"));
+  assert.deepEqual(enviados, [], "nada é gravado de novo");
+  await ctx.close();
+});
+
+/* ------------------------------------------------------------------ a vitrine */
+
+test("a vitrine: os Shorts em pé, cada um com a sua data; trancado em preto e branco, com cadeado e sem clique", async () => {
+  const { page, ctx, erros } = await abrir({ acesso: acessoEm(SABADO) });
+  await page.waitForSelector("#conteudos:not([hidden])");
+  assert.equal(await page.locator("#conteudos-lista > li").count(), 6);
+  assert.ok(await page.isHidden("#conteudos-destaque"), "sem card em destaque: a live é a aula principal");
+  // 1 a 4 já passaram da data, mas ainda não têm vídeo: "em breve". 5 e 6: o dia de Brasília.
+  assert.deepEqual(await estados(page), ["chegando", "chegando", "chegando", "chegando", "trancado", "trancado"]);
+  assert.deepEqual(await rotulosDeEstado(page), ["Em breve", "Em breve", "Em breve", "Em breve", "Abre em 14h", "Abre segunda, 05/10"]);
+  assert.equal(await page.locator("#conteudos-lista a, #conteudos-lista button").count(), 0, "nada para tocar sem conteúdo");
+  assert.equal(await page.locator('#conteudos-lista .conteudo-icone[data-icone="cadeado"]').count(), 6, "todos com o cadeado");
   await page.waitForFunction(() => !document.querySelector("#conteudos-lista > li:first-child img"));
-  assert.deepEqual(await page.$$eval(".conteudo-numero", (els) => els.map((el) => el.textContent)), ["01", "02", "03", "04", "05", "06", "06/10"]);
+  assert.deepEqual(await page.$$eval("#conteudos-lista .conteudo-numero", (els) => els.map((el) => el.textContent)), ["01", "02", "03", "04", "05", "06"]);
 
-  // Os Shorts em pé (9:16); a live deitada (16:9).
-  const proporcoes = await page.$$eval(".conteudo-arte", (els) =>
+  const proporcoes = await page.$$eval("#conteudos-lista .conteudo-arte", (els) =>
     els.map((el) => Math.round((el.getBoundingClientRect().height / el.getBoundingClientRect().width) * 100) / 100)
   );
-  assert.ok(proporcoes.slice(0, 6).every((p) => Math.abs(p - 16 / 9) < 0.03), `em pé: ${proporcoes}`);
-  assert.ok(Math.abs(proporcoes[6] - 9 / 16) < 0.03, `a live deitada: ${proporcoes[6]}`);
+  assert.ok(proporcoes.every((p) => Math.abs(p - 16 / 9) < 0.03), `em pé: ${proporcoes}`);
 
   // A vitrine vai de borda a borda da tela, com o primeiro card na coluna do texto, e desliza.
   const vitrine = await page.evaluate(() => {
@@ -317,18 +375,18 @@ test("trancada: a vitrine mostra os 6 Shorts em pé e a live em destaque, cada u
   assert.equal(vitrine.tab, "0", "transbordando, a vitrine entra no Tab (é o que deixa o Safari rolar pelo teclado)");
   assert.equal(vitrine.esquerda, 20, "o primeiro card começa no gutter");
   assert.ok(await semRolagemLateral(page), "sem rolagem horizontal na página");
-
-  await tela(page, "trancada-390");
+  await tela(page, "vitrine-390");
   assert.deepEqual(erros, [], "nenhum erro de JS nem recusa de CSP");
   await ctx.close();
 });
 
-test("trancada: o card liberado é colorido e sem cadeado; tocado, leva ao formulário e toca DEPOIS dele", async () => {
-  const { page, ctx, erros, enviados } = await abrir({ config: COM_VIDEOS, arte: true });
+test("sala sem a porta primeiro: o card liberado é colorido e sem cadeado; tocado, leva ao formulário e toca DEPOIS dele", async () => {
+  const config = configDoTeste({ conteudos: { 3: { titulo: "Domínio emocional", video: "aaaaaaaaaa3" } }, portaPrimeiro: false });
+  const { page, ctx, erros, enviados } = await abrir({ config, arte: true });
   await page.waitForSelector("#conteudos:not([hidden])");
+  assert.ok(await page.isVisible("#aula"), "sem a porta primeiro, o quadro trancado aparece (como na aferição)");
   const terceiro = card(page, 3);
   assert.equal(await terceiro.getAttribute("data-estado"), "liberado");
-  assert.match(await terceiro.textContent(), /Domínio emocional/);
   assert.match(await terceiro.textContent(), /Assistir agora/);
   assert.equal(await terceiro.locator('.conteudo-icone[data-icone="play"]').count(), 1, "o play, e não o cadeado");
   await page.waitForFunction(() => {
@@ -336,13 +394,10 @@ test("trancada: o card liberado é colorido e sem cadeado; tocado, leva ao formu
     return img && img.complete && img.naturalWidth > 0;
   });
   assert.equal(await terceiro.locator("img").evaluate((img) => getComputedStyle(img).filter), "none", "em cor");
-  // O card do link também não entrega o link a quem não liberou a sala.
-  assert.equal(await page.locator("#conteudos-lista a").count(), 0);
 
   await terceiro.locator("button").click();
   await page.waitForFunction(() => document.activeElement && document.activeElement.id === "campo-nome");
   assert.equal(await page.locator("#aula iframe").count(), 0, "nenhum player nasce com a sala trancada");
-
   await page.fill("#campo-nome", "joana de souza");
   await page.fill("#campo-whatsapp", "21998765432");
   await page.fill("#campo-email", "joana@gmail.com");
@@ -355,53 +410,74 @@ test("trancada: o card liberado é colorido e sem cadeado; tocado, leva ao formu
   await ctx.close();
 });
 
-/* ------------------------------------------------------------------ liberando */
+/* ------------------------------------------------------------------ a aula principal */
 
-test("liberar: a inscrição vai como aula-gps, e o quadro em pé já mostra o conteúdo do dia", async () => {
-  const { page, ctx, erros, enviados } = await abrir({ config: COM_VIDEOS });
-  await page.fill("#campo-nome", "joana de souza");
-  await page.fill("#campo-whatsapp", "21998765432");
-  await page.fill("#campo-email", "joana@gmail.com");
-  await page.click('#opcoes-perfil .opcao:has-text("Técnico")');
-  await page.click("#botao-acesso");
-  await page.waitForSelector("#porta", { state: "hidden" });
-
-  assert.equal(enviados.length, 1);
-  assert.equal(enviados[0].pagina, "aula-gps", "é o id que acha a sala no servidor");
-  assert.equal(enviados[0].contato.nome, "Joana de Souza");
-  assert.equal(enviados[0].perfil, "Técnico(a) de enfermagem", "a profissão continua no formulário");
-  assert.equal(enviados[0].rastreio.utm_source, "whatsapp");
-  assert.equal(enviados[0].rastreio.utm_campaign, "gps");
-
-  // A aula ainda não tem vídeo: o quadro toca o conteúdo liberado mais recente (o 4, de hoje), EM PÉ.
-  assert.match(await page.textContent(".abertura-quadro"), /Assistir · Conteúdo 4/);
-  const quadro = await page.locator(".abertura-quadro").boundingBox();
+test("a mini aula toca no quadro do topo, e 'Voltar para a aula principal' devolve a live agendada", async () => {
+  const { page, ctx, erros } = await abrir({ config: COM_VIDEOS, acesso: acessoEm(SABADO) });
+  await page.waitForSelector("#conteudos:not([hidden])");
+  await card(page, 1).locator("button").click();
+  await page.waitForSelector(".player-limpo");
+  assert.match(await page.getAttribute("#aula iframe", "src"), /aaaaaaaaaa1/);
+  const quadro = await page.locator(".player-limpo").boundingBox();
   assert.ok(quadro.height > quadro.width * 1.6, "o Short toca em pé");
-  assert.equal(await card(page, 4).locator(".conteudo-novo").count(), 1, "o do dia leva o selo Novo");
-  assert.equal(await card(page, 4).locator("button").getAttribute("aria-current"), "true");
-  assert.match(await card(page, 4).textContent(), /No quadro lá em cima/);
-  assert.ok(await page.isVisible("#nav-conteudos"), "o atalho das mini aulas aparece no topo");
-  assert.equal(await page.locator(".abertura-voltar").count(), 0, "sem vídeo da aula, não há para onde voltar");
-  assert.deepEqual(await estados(page), ["liberado", "liberado", "liberado", "liberado", "trancado", "trancado", "trancado"]);
+  assert.equal(await card(page, 1).locator("button").getAttribute("aria-current"), "true");
+  assert.match(await card(page, 1).textContent(), /No quadro lá em cima/);
 
-  // Os comentários vêm logo embaixo das mini aulas, e a live depois deles.
-  await page.waitForSelector("#mural:not([hidden])");
-  const ordem = await page.evaluate(() => {
-    const depois = (a, b) => Boolean(document.querySelector(a).compareDocumentPosition(document.querySelector(b)) & Node.DOCUMENT_POSITION_FOLLOWING);
-    return { muralDepoisDaVitrine: depois("#conteudos", "#mural"), liveDepoisDoMural: depois("#mural", "#conteudos-destaque") };
-  });
-  assert.deepEqual(ordem, { muralDepoisDaVitrine: true, liveDepoisDoMural: true });
-  await tela(page, "aberta-390");
+  await page.click(".abertura-voltar");
+  assert.equal(await page.locator(".abertura-quadro.agendada").count(), 1, "a live de volta no topo");
+  assert.equal(await page.locator("#aula iframe").count(), 0, "o Short saiu do quadro");
+  assert.equal(await page.locator(".abertura-voltar").count(), 0);
+  assert.equal(await page.locator('#conteudos-lista [aria-current="true"]').count(), 0);
   assert.deepEqual(erros, []);
   await ctx.close();
 });
 
-test("liberada sem nenhum conteúdo cadastrado: o quadro mostra o aviso da aula, e não promete replay", async () => {
-  const { page, ctx, erros } = await abrir({ acesso: acessoEm(SABADO) });
+test("na hora da live, com a página aberta: o selo conta o tempo e o quadro abre sozinho, sem atualizar a página", async () => {
+  const config = configDoTeste({ aulaVideo: "cccccccccc7", aulaLiberaEm: "2026-10-03T20:00:00-03:00" });
+  const { page, ctx, erros } = await abrir({
+    config,
+    acesso: acessoEm(new Date("2026-10-03T19:58:00-03:00")),
+    agora: new Date("2026-10-03T19:58:00-03:00"),
+    relogio: "instalado"
+  });
+  await page.clock.pauseAt(new Date("2026-10-03T19:58:30-03:00"));
   await page.waitForSelector("#conteudos:not([hidden])");
-  const quadro = await page.textContent(".abertura-quadro");
-  assert.equal(quadro.trim(), GPS.aulas[0].aviso);
-  assert.doesNotMatch(quadro, /replay/i);
+  assert.equal((await page.textContent(".abertura-agenda-texto")).trim(), "Ao vivo · em 2min");
+  await page.clock.runFor(61000);
+  assert.equal((await page.textContent(".abertura-agenda-texto")).trim(), "Ao vivo · em instantes");
+
+  await page.clock.runFor(30000);
+  await page.waitForFunction(() => !document.querySelector(".abertura-quadro.agendada"));
+  assert.match(await page.textContent(".abertura-quadro"), /Assistir a aula/);
+  await page.click("#quadro");
+  assert.match(await page.getAttribute("#aula iframe", "src"), /\/embed\/cccccccccc7\?/);
+  assert.deepEqual(erros, []);
+  await ctx.close();
+});
+
+test("aula principal com vídeo e oferta: conteúdo não abre o botão, e a volta devolve a aula com a oferta", async () => {
+  const config = configDoTeste({
+    conteudos: { 1: { titulo: "Os dispositivos sem medo", video: "aaaaaaaaaa1" } },
+    aulaVideo: "bbbbbbbbbb0",
+    aulaLiberaEm: "2026-10-01T20:00:00-03:00",
+    oferta: 2
+  });
+  const { page, ctx, erros } = await abrir({ config, acesso: acessoEm(SABADO) });
+  await page.evaluate(() => (window.__minutoDoVideo = 30));
+  await page.waitForSelector("#conteudos:not([hidden])");
+  assert.match(await page.textContent(".abertura-quadro"), /Assistir a aula/, "aberta e com vídeo, a aula vem primeiro");
+
+  // O conteúdo toma o quadro: a oferta (que é da AULA) não abre, nem passados os 2 segundos dela.
+  await card(page, 1).locator("button").click();
+  assert.match(await page.getAttribute("#aula iframe", "src"), /aaaaaaaaaa1/);
+  await page.waitForTimeout(2600);
+  assert.ok(await page.isHidden("#oferta"), "conteúdo de aquecimento não abre o botão da oferta");
+
+  // E a volta: o botão embaixo do player devolve a aula, que já toca e volta a vigiar a oferta.
+  await page.click(".abertura-voltar");
+  assert.match(await page.getAttribute("#aula iframe", "src"), /bbbbbbbbbb0/);
+  await page.waitForSelector("#oferta:not([hidden])", { timeout: 4000 });
+  assert.equal(await page.getAttribute("#oferta-botao", "href"), "https://pay.hotmart.com/teste");
   assert.deepEqual(erros, []);
   await ctx.close();
 });
@@ -439,7 +515,6 @@ test("player limpo: o YouTube sem os controles dele, a camada da página por cim
   assert.equal(await estadoDoPlayer(page), "pausado");
   assert.equal(await page.$eval(".player-capa", (el) => getComputedStyle(el).visibility), "visible");
   assert.equal(await page.getAttribute(".player-botao-tocar", "aria-label"), "Tocar");
-  // Tocar pelo botão.
   await page.click(".player-botao-tocar");
   assert.equal(await estadoDoPlayer(page), "tocando");
   assert.equal(await page.getAttribute(".player-botao-tocar", "aria-label"), "Pausar");
@@ -456,15 +531,12 @@ test("player limpo: o YouTube sem os controles dele, a camada da página por cim
   });
   assert.equal(await page.evaluate(() => window.__yt.seek), 45);
 
-  // O som.
   await page.click(".player-botao-som");
   assert.equal(await page.getAttribute(".player-botao-som", "aria-label"), "Ligar o som");
   assert.equal(await page.evaluate(() => window.__yt.players.at(-1).isMuted()), true);
   await page.click(".player-botao-som");
   assert.equal(await page.getAttribute(".player-botao-som", "aria-label"), "Tirar o som");
   assert.equal(await page.locator(".player-botao-tela").count(), 1, "tela cheia onde o navegador deixa");
-
-  assert.ok(await page.isHidden("#oferta"), "conteúdo de aquecimento não abre o botão da oferta");
   await tela(page, "player-1280");
   assert.deepEqual(erros, []);
   await ctx.close();
@@ -481,8 +553,6 @@ test("player limpo: com o play recusado pelo navegador, a camada fura e o toque 
   await page.waitForFunction(() => document.querySelector(".player-limpo")?.dataset.estado === "aguardando", null, { timeout: 5000 });
   assert.equal(await page.textContent(".player-dica"), "Toque no vídeo para começar");
   assert.equal(await noMeioDoPlayer(page), "IFRAME", "o toque passa para o vídeo (o único jeito de o iPhone aceitar som)");
-
-  // O vídeo começou (pelo toque dentro dele): a camada volta a cobrir tudo.
   await page.evaluate(() => window.__yt.players.at(-1).playVideo());
   assert.equal(await estadoDoPlayer(page), "tocando");
   assert.equal(await noMeioDoPlayer(page), "player-camada");
@@ -511,33 +581,21 @@ test("player limpo: sem a API do YouTube, volta o player do YouTube com os contr
   await ctx.close();
 });
 
-test("card de vídeo toca no quadro lá de cima; card de link abre em outra aba", async () => {
+test("card de link abre em outra aba; tocar de novo o card que está tocando não volta o vídeo ao zero", async () => {
   const { page, ctx, erros } = await abrir({ config: COM_VIDEOS, acesso: acessoEm(SABADO) });
   await page.waitForSelector("#conteudos:not([hidden])");
-  assert.ok(await page.isHidden("#porta"), "quem já liberou volta com a sala aberta");
-
-  await card(page, 1).locator("button").click();
-  assert.match(await page.getAttribute("#aula iframe", "src"), /youtube-nocookie\.com\/embed\/aaaaaaaaaa1\?/);
-  assert.equal(await card(page, 1).locator("button").getAttribute("aria-current"), "true");
-  assert.equal(await page.locator('#conteudos-lista [aria-current="true"]').count(), 1, "só um no quadro");
-
   const link = card(page, 2).locator("a");
   assert.equal(await link.getAttribute("href"), "https://drive.google.com/file/d/abc/view");
   assert.equal(await link.getAttribute("target"), "_blank");
   assert.match(await link.getAttribute("rel"), /noopener/);
   assert.equal(await card(page, 2).locator('.conteudo-icone[data-icone="fora"]').count(), 1);
-  assert.deepEqual(erros, []);
-  await ctx.close();
-});
 
-test("tocar de novo o card que está tocando não volta o vídeo ao zero", async () => {
-  const { page, ctx } = await abrir({ config: COM_VIDEOS, acesso: acessoEm(SABADO) });
-  await page.waitForSelector("#conteudos:not([hidden])");
   await card(page, 3).locator("button").click();
   await page.$eval("#aula iframe", (frame) => (frame.dataset.marca = "o-mesmo"));
   await card(page, 3).locator("button").click();
   assert.equal(await page.getAttribute("#aula iframe", "data-marca"), "o-mesmo", "o player não foi recriado");
   assert.match(await page.getAttribute("#aula iframe", "src"), /aaaaaaaaaa3/);
+  assert.deepEqual(erros, []);
   await ctx.close();
 });
 
@@ -549,39 +607,15 @@ test("pelo teclado: ativar um card leva o foco aos controles do player, e o rede
   await page.waitForFunction(() => document.activeElement && document.activeElement.classList.contains("player-botao-tocar"));
   assert.match(await page.getAttribute("#aula iframe", "src"), /aaaaaaaaaa1/);
 
-  // Redesenho por visibilitychange (o mesmo caminho da hora de abrir): o foco continua no card 3.
   await card(page, 3).locator("button").focus();
   await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
   assert.equal(await page.evaluate(() => document.activeElement.closest("li")?.dataset.conteudo), "conteudo-3");
   await ctx.close();
 });
 
-test("aula com vídeo e oferta: conteúdo não abre o botão, e 'Voltar para a aula' devolve a aula com a oferta", async () => {
-  const config = configDoTeste({ conteudos: { 1: { titulo: "Os dispositivos sem medo", video: "aaaaaaaaaa1" } }, aulaVideo: "bbbbbbbbbb0", oferta: 2 });
-  const { page, ctx, erros } = await abrir({ config, acesso: acessoEm(SABADO) });
-  await page.evaluate(() => (window.__minutoDoVideo = 30));
-  await page.waitForSelector("#conteudos:not([hidden])");
-  assert.match(await page.textContent(".abertura-quadro"), /Assistir a aula/, "com vídeo, a aula vem primeiro");
+/* ------------------------------------------------------------------ o relógio dos cards */
 
-  // O conteúdo toma o quadro: a oferta (que é da AULA) não abre, nem passados os 2 segundos dela.
-  await card(page, 1).locator("button").click();
-  assert.match(await page.getAttribute("#aula iframe", "src"), /aaaaaaaaaa1/);
-  await page.waitForTimeout(2600);
-  assert.ok(await page.isHidden("#oferta"), "conteúdo de aquecimento não abre o botão da oferta");
-
-  // E a volta: o botão embaixo do player devolve a aula, que volta a vigiar a oferta.
-  await page.click(".abertura-voltar");
-  assert.match(await page.getAttribute("#aula iframe", "src"), /bbbbbbbbbb0/);
-  assert.equal(await page.locator(".abertura-voltar").count(), 0, "com a aula no quadro, o botão some");
-  await page.waitForSelector("#oferta:not([hidden])", { timeout: 4000 });
-  assert.equal(await page.getAttribute("#oferta-botao", "href"), "https://pay.hotmart.com/teste");
-  assert.deepEqual(erros, []);
-  await ctx.close();
-});
-
-/* ------------------------------------------------------------------ o relógio */
-
-test("na hora, com a página aberta: o card do dia destrava sozinho e o quadro parado passa para ele", async () => {
+test("na hora, com a página aberta: o card do dia destrava sozinho, sem atualizar a página", async () => {
   const { page, ctx, erros } = await abrir({
     config: COM_VIDEOS,
     acesso: acessoEm(new Date("2026-10-03T23:59:00-03:00")),
@@ -593,16 +627,13 @@ test("na hora, com a página aberta: o card do dia destrava sozinho e o quadro p
   await page.waitForSelector("#conteudos:not([hidden])");
   assert.equal(await card(page, 5).getAttribute("data-estado"), "trancado");
   assert.match(await card(page, 5).textContent(), /Abre em instantes/);
-  assert.match(await page.textContent(".abertura-quadro"), /Assistir · Conteúdo 4/, "o do dia, antes da virada");
 
   await page.clock.runFor(5000);
   await page.waitForFunction(() => document.querySelectorAll("#conteudos-lista > li")[4].dataset.estado === "liberado");
   assert.equal(await card(page, 5).locator(".conteudo-novo").count(), 1);
   assert.equal(await card(page, 5).locator('.conteudo-icone[data-icone="play"]').count(), 1, "liberado: sem cadeado");
-  // Nada tocando: o quadro passa sozinho para o conteúdo que acabou de abrir.
-  assert.match(await page.textContent(".abertura-quadro"), /Assistir · Conteúdo 5/);
-  assert.match(await card(page, 5).textContent(), /No quadro lá em cima/);
-  assert.match(await card(page, 4).textContent(), /Assistir agora/);
+  assert.match(await card(page, 5).textContent(), /Assistir agora/);
+  assert.equal(await page.locator(".abertura-quadro.agendada").count(), 1, "a aula principal continua no topo");
   assert.deepEqual(erros, []);
   await ctx.close();
 });
@@ -630,15 +661,16 @@ test("na hora, com um vídeo tocando: o card novo abre, e o vídeo da pessoa con
 
 test("aparelho em outro fuso: as datas e o que abriu continuam os de Brasília", async () => {
   // 10h de sábado em Brasília são 22h de sábado em Tóquio.
-  const { page, ctx } = await abrir({ fuso: "Asia/Tokyo" });
+  const { page, ctx } = await abrir({ fuso: "Asia/Tokyo", acesso: acessoEm(SABADO) });
   await page.waitForSelector("#conteudos:not([hidden])");
-  assert.deepEqual(await estados(page), ["chegando", "chegando", "chegando", "chegando", "trancado", "trancado", "trancado"]);
-  assert.deepEqual((await rotulosDeEstado(page)).slice(4), ["Abre em 14h", "Abre segunda, 05/10", "Abre terça, 06/10"]);
+  assert.deepEqual(await estados(page), ["chegando", "chegando", "chegando", "chegando", "trancado", "trancado"]);
+  assert.deepEqual((await rotulosDeEstado(page)).slice(4), ["Abre em 14h", "Abre segunda, 05/10"]);
+  assert.equal((await page.textContent(".abertura-agenda-texto")).trim(), "Ao vivo · quarta, 07/10, às 20h");
   await ctx.close();
 });
 
 test("a contagem regressiva anda sozinha, trocando só o texto", async () => {
-  const { page, ctx } = await abrir({ relogio: "instalado", agora: new Date(SABADO.getTime() - 60000) });
+  const { page, ctx } = await abrir({ relogio: "instalado", agora: new Date(SABADO.getTime() - 60000), acesso: acessoEm(SABADO) });
   await page.clock.pauseAt(SABADO);
   await page.waitForSelector("#conteudos:not([hidden])");
   const quinto = card(page, 5);
@@ -658,15 +690,13 @@ test("computador: as setas deslizam a vitrine, e os pontinhos dizem onde ela est
   await page.locator("#vitrine").scrollIntoViewIfNeeded();
   assert.ok(await page.isVisible("#vitrine-depois"), "com mouse, as setas aparecem");
   assert.equal(await page.isDisabled("#vitrine-antes"), true, "no começo, a seta de voltar some");
-  assert.equal(await page.locator(".vitrine-ponto").count(), 6, "um pontinho por aula da vitrine (a live é à parte)");
+  assert.equal(await page.locator(".vitrine-ponto").count(), 6, "um pontinho por aula");
   const acesosNoComeco = await page.$$eval('.vitrine-ponto[aria-current="true"]', (els) => els.map((el) => el.dataset.conteudo));
   assert.ok(acesosNoComeco.includes("conteudo-1"));
 
   await page.click("#vitrine-depois");
   await page.waitForFunction(() => document.querySelector("#conteudos-lista").scrollLeft > 100);
   await page.waitForFunction(() => !document.querySelector("#vitrine-antes").disabled);
-
-  // O último pontinho leva até a última aula, e a seta de avançar some no fim.
   await page.locator(".vitrine-ponto").last().click();
   await page.waitForFunction(() => {
     const lista = document.querySelector("#conteudos-lista");
@@ -681,14 +711,6 @@ test("computador: as setas deslizam a vitrine, e os pontinhos dizem onde ela est
   assert.equal(filtros[0], "none");
   assert.match(filtros[4], /grayscale\(1\)/);
   assert.equal(await card(page, 5).locator("a, button").count(), 0);
-
-  // A live, em destaque, na largura da coluna e deitada.
-  const live = await page.$eval("#conteudos-destaque .conteudo-arte", (el) => {
-    const r = el.getBoundingClientRect();
-    return { largura: Math.round(r.width), proporcao: Math.round((r.height / r.width) * 100) / 100 };
-  });
-  assert.ok(live.largura >= 600 && live.largura <= 680, `na coluna (${live.largura}px)`);
-  assert.ok(Math.abs(live.proporcao - 9 / 16) < 0.03);
   assert.ok(await semRolagemLateral(page));
   await tela(page, "vitrine-1280");
   assert.deepEqual(erros, []);
@@ -703,15 +725,12 @@ test("celular: sem setas (o dedo desliza), com os pontinhos; e o primeiro toque 
 
   await card(page, 1).locator("button").tap();
   await page.waitForFunction(() => document.querySelector(".player-limpo")?.dataset.estado === "tocando");
-  // Controles escondidos (ocioso): o primeiro toque só os traz de volta, e o vídeo segue.
   await page.$eval(".player-limpo", (el) => el.classList.add("ocioso"));
   await page.tap(".player-camada");
   assert.equal(await estadoDoPlayer(page), "tocando");
   assert.equal(await page.$eval(".player-limpo", (el) => el.classList.contains("ocioso")), false);
-  // Com os controles na tela, o toque pausa.
   await page.tap(".player-camada");
   assert.equal(await estadoDoPlayer(page), "pausado");
-  assert.equal(await page.locator(".player-botao-tela").count(), 1);
   assert.ok(await semRolagemLateral(page));
   assert.deepEqual(erros, []);
   await ctx.close();
@@ -729,7 +748,6 @@ test("320px: título com palavra longa quebra dentro do card, e o topo com quatr
   const { page, ctx, erros } = await abrir({ largura: 320, altura: 800, config, acesso: acessoEm(SABADO) });
   await page.waitForSelector("#conteudos:not([hidden])");
   assert.ok(await page.isVisible("#nav-material"), "o quarto atalho está no topo");
-
   const vazamentos = await page.$$eval("#conteudos-lista > li", (lis) =>
     lis.flatMap((li) => {
       const borda = li.getBoundingClientRect().right;
@@ -738,9 +756,16 @@ test("320px: título com palavra longa quebra dentro do card, e o topo com quatr
     })
   );
   assert.deepEqual(vazamentos, [], "nenhum título passa da borda do card");
-
   const logo = await page.$eval(".expediente-marca", (img) => Math.round(img.getBoundingClientRect().width));
   assert.ok(logo >= 40, `o logo não é esmagado (${logo}px)`);
+  // O selo da live fica EMBAIXO da thumb (nada por cima da arte), inteiro e dentro da tela.
+  const selo = await page.evaluate(() => {
+    const s = document.querySelector(".abertura-agenda").getBoundingClientRect();
+    const q = document.querySelector(".abertura-quadro").getBoundingClientRect();
+    const texto = document.querySelector(".abertura-agenda-texto");
+    return { abaixo: s.top >= q.bottom - 0.5, dentro: s.left >= 0 && s.right <= document.documentElement.clientWidth, inteiro: texto.scrollWidth <= texto.clientWidth + 1 };
+  });
+  assert.deepEqual(selo, { abaixo: true, dentro: true, inteiro: true });
   assert.ok(await semRolagemLateral(page), "o topo não empurra a página para o lado");
   await tela(page, "aberta-320");
   assert.deepEqual(erros, []);

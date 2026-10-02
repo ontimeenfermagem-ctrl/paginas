@@ -171,6 +171,14 @@ test("a sala do GPS vem depois da aferição, com id, rota e pesquisa próprios"
   // O player sem nada do YouTube é desta sala; a aferição continua com o player de sempre.
   assert.equal(GPS.playerLimpo, true);
   assert.notEqual(RPL.PAGINAS.afericao.playerLimpo, true);
+  // A porta antes de tudo é desta sala; na aferição, a foto de abertura trancada continua.
+  assert.equal(GPS.acesso.portaPrimeiro, true);
+  assert.notEqual(RPL.PAGINAS.afericao.acesso.portaPrimeiro, true);
+  // A aula principal é a live: a thumb dela, e a hora com o fuso escrito.
+  const live = GPS.aulas[0];
+  assert.equal(RPL.imagemValida(live.capa), true, live.capa);
+  assert.match(live.liberaEm, /T\d{2}:\d{2}(:\d{2})?(Z|[+-]\d{2}:\d{2})$/);
+  if (live.video && live.video.id) assert.equal(RPL.videoValido(live.video), true, "o id da live, e não a URL inteira");
   assert.equal(RPL.certificadoVisivel(GPS), false);
   assert.equal(RPL.comentariosAtivos(GPS), true);
 });
@@ -217,10 +225,10 @@ test("o formulário da sala do GPS grava o lead com a pesquisa DELA (é o que vi
 
 /* ------------------------------------------------------------------ os 7 conteúdos do GPS */
 
-test("os 7 conteúdos do GPS estão bem escritos: data com fuso e em ordem, arte do projeto, vídeo e link válidos", () => {
+test("as mini aulas do GPS estão bem escritas: data com fuso e em ordem, arte do projeto, vídeo e link válidos", () => {
   const itens = GPS.conteudos.itens;
-  assert.equal(itens.length, 7);
-  assert.equal(new Set(itens.map((item) => item.id)).size, 7, "ids únicos");
+  assert.equal(itens.length, 6, "seis mini aulas (a live é a aula principal, não um card)");
+  assert.equal(new Set(itens.map((item) => item.id)).size, 6, "ids únicos");
   let anterior = -Infinity;
   for (const item of itens) {
     // Sem o fuso escrito o card nunca abre (é o lado seguro da régua): aqui isso vira erro de teste.
@@ -406,6 +414,20 @@ test("formato e marca: os Shorts em pé (da lista ou do item), a live deitada, e
   );
 });
 
+test("aulaAberta: sem liberaEm, sempre (a aferição); com ele, só da hora em diante; data torta, fechada", () => {
+  assert.equal(RPL.aulaAberta(RPL.PAGINAS.afericao.aulas[0], Date.now()), true);
+  const live = { liberaEm: "2026-10-07T20:00:00-03:00" };
+  assert.equal(RPL.aulaAberta(live, em("2026-10-07T19:59:59.999")), false);
+  assert.equal(RPL.aulaAberta(live, em("2026-10-07T20:00:00")), true);
+  // 23h UTC do dia 7 são 20h em Brasília: abre, em qualquer fuso do aparelho.
+  assert.equal(RPL.aulaAberta(live, Date.parse("2026-10-07T23:00:00Z")), true);
+  assert.equal(RPL.aulaAberta({ liberaEm: "2026-10-07T20:00:00" }, em("2030-01-01T00:00:00")), false, "sem fuso: fechada");
+  assert.equal(RPL.aulaAberta(live, NaN), false);
+  assert.equal(RPL.aulaAberta(null, Date.now()), false);
+  assert.equal(RPL.instanteDe("2026-10-07T20:00:00-03:00"), em("2026-10-07T20:00:00"));
+  assert.ok(Number.isNaN(RPL.instanteDe("07/10/2026 20h")));
+});
+
 test("nomeDoConteudo e imagemValida", () => {
   assert.equal(RPL.nomeDoConteudo({ numero: 3, titulo: "" }), "Conteúdo 3");
   assert.equal(RPL.nomeDoConteudo({ numero: 3, titulo: "Dispositivos" }), "Conteúdo 3: Dispositivos");
@@ -435,7 +457,7 @@ test("o config dos conteúdos roda num contexto VAZIO (o do servidor: sem window
   }
   const R = vazio.EVReplay;
   const itens = R.conteudosDaPagina(R.PAGINAS["aula-gps"], em("2026-10-03T08:00:00"));
-  assert.equal(itens.length, 7);
+  assert.equal(itens.length, R.PAGINAS["aula-gps"].conteudos.itens.length);
   assert.ok(itens.every((item) => Number.isFinite(item.liberaEm)), "as datas do config viram instante também lá");
   assert.equal(R.rotuloDaData(em("2026-10-06T00:00:00")), "terça, 06/10");
 });
