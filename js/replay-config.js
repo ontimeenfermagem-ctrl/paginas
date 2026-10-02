@@ -273,7 +273,7 @@
       eyebrow: "Sala de aula",
       titulo: "Imersão <em>GPS</em>",
       apoio: "O GPS do Plantão Sem Medo começa antes da live: seis mini aulas, uma por dia, para você chegar pronta.",
-      legenda: "Grave este link: a live de quarta, 07/10, às 20h, é aqui. Até lá, uma mini aula nova por dia, logo abaixo.",
+      legenda: "Grave este link: as mini aulas abrem aqui, uma por dia às 20h, até a live de quarta, 07/10.",
 
       /*
        * O PLAYER LIMPO: o vídeo do YouTube toca sem NADA do YouTube na tela — sem os controles, o
@@ -286,7 +286,7 @@
       acesso: Object.freeze({
         rotulo: "Acesso à sala",
         titulo: "Destrave esta tela",
-        apoio: "Preencha uma vez e a sala abre: a live de quarta, 07/10, e as mini aulas que chegam uma por dia até lá.",
+        apoio: "Preencha uma vez e a sala abre, com as mini aulas que chegam uma por dia até a live de quarta, 07/10.",
         cta: "QUERO ENTRAR NA SALA",
         perguntaPerfil: "Hoje você é:",
         lembrarDias: 90,
@@ -300,9 +300,10 @@
        * A AULA PRINCIPAL: a live de quarta, 07/10, às 20h. É a primeira coisa da sala, logo que a
        * porta abre, com a thumb dela (`capa`). Até `liberaEm`, o quadro mostra a thumb inteira e o
        * selo "Ao vivo" com a data (no dia, a contagem regressiva); na hora, abre sozinha, sem
-       * ninguém atualizar a página: com o `video` (o id do YouTube da live), toca no player limpo;
-       * sem ele, mostra o `aviso`. A página de venda promete o replay por 48h SÓ para quem comprou,
-       * e esta sala abre para qualquer lead: o vídeo entra aqui só com o ok do cliente.
+       * ninguém atualizar a página: com o `video` (o id do YouTube), toca no player limpo; sem ele,
+       * mostra o `aviso`. O cliente manda o link da gravação DEPOIS do evento — até lá, o aviso
+       * diz isso. (A página de venda promete o replay por 48h SÓ para quem comprou, e esta sala
+       * abre para qualquer lead: quem decide é o cliente.)
        */
       aulas: Object.freeze([
         Object.freeze({
@@ -311,7 +312,7 @@
           capa: "/img/aula-gps/live.jpg",
           liberaEm: "2026-10-07T20:00:00-03:00",
           video: Object.freeze({ provedor: "youtube", id: "" }),
-          aviso: "A live com a Iza vai passar aqui."
+          aviso: "A live de 07/10 começou! A gravação aparece aqui logo depois do evento."
         })
       ]),
 
