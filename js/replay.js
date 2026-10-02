@@ -55,6 +55,8 @@
     '<svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true"><path d="M7 11V8a5 5 0 0 1 10 0v3M5 11h14v9H5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   const ICONE_BAIXAR =
     '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const ICONE_FORA =
+    '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M14 5h5v5m0-5-8 8M10 5H5v14h14v-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   // O selo de verificado: um só desenho, sempre o mesmo, sempre do código.
   const ICONE_SELO =
     '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 1.6l2.3 2.1 3.1-.3.9 3 2.7 1.6-1.1 2.9 1.1 2.9-2.7 1.6-.9 3-3.1-.3L12 20.4l-2.3-2.1-3.1.3-.9-3L3 14l1.1-2.9L3 8.2l2.7-1.6.9-3 3.1.3z"/><path fill="#fff" d="m10.9 14.7-2.7-2.6 1.1-1.1 1.6 1.5 3.9-3.9 1.1 1.1z"/></svg>';
@@ -327,19 +329,35 @@
   /* Desenho: a foto de abertura                                         */
   /* ================================================================== */
 
+  // A aula da página: é ela que dá o título da matéria e que o botão da oferta vigia.
   const aula = (Array.isArray(pagina.aulas) && pagina.aulas[0]) || null;
+  // O que o quadro mostra agora: a aula ou um dos conteúdos do dia (o card que a pessoa tocou).
+  let emCartaz = aula;
+  let tocando = false;
 
   function desenharQuadro() {
     const alvo = $("abertura-quadro");
-    if (!alvo || !aula) return;
+    const atual = emCartaz;
+    if (!alvo || !atual) return;
+    // O player que estava aqui sai da tela: o player limpo para os relógios dele, e o vigia da
+    // oferta não tem mais o que medir.
+    if (playerAtual) {
+      playerAtual.destruir();
+      playerAtual = null;
+    }
     alvo.textContent = "";
+    tocando = false;
+    window.clearTimeout(relogioOferta);
+    window.clearInterval(vigiaOferta);
 
     const quadro = document.createElement("button");
     quadro.type = "button";
     quadro.className = "abertura-quadro";
+    // Short (9:16) em pé; aula e vídeo deitado no 16:9 de sempre.
+    if (atual.vertical) quadro.classList.add("vertical");
     quadro.id = "quadro";
 
-    const capa = R.capaDaAula(aula);
+    const capa = R.capaDaAula(atual);
     if (capa) {
       const img = document.createElement("img");
       img.className = "abertura-capa";
@@ -354,7 +372,7 @@
 
     const centro = document.createElement("div");
     centro.className = "abertura-centro";
-    const temVideo = R.videoValido(aula.video);
+    const temVideo = R.videoValido(atual.video);
 
     if (!liberada) {
       // Trancada: a foto de abertura aparece SEMPRE. É ela que dá vontade.
@@ -365,13 +383,7 @@
       legenda.textContent = (pagina.acesso && pagina.acesso.trava) || "A aula inteira está aqui";
       centro.append(legenda);
       quadro.setAttribute("aria-label", "Liberar o acesso para assistir à aula");
-      quadro.addEventListener("click", () => {
-        const porta = $("porta");
-        if (!porta) return;
-        porta.scrollIntoView({ behavior: "smooth", block: "center" });
-        const primeiro = $("campo-nome");
-        if (primeiro) window.setTimeout(() => primeiro.focus({ preventScroll: true }), 320);
-      });
+      quadro.addEventListener("click", irParaPorta);
     } else if (temVideo) {
       const play = document.createElement("span");
       play.className = "abertura-play";
@@ -379,21 +391,41 @@
       centro.append(play);
       const legenda = document.createElement("p");
       legenda.className = "abertura-texto";
-      legenda.textContent = "Assistir a aula";
+      legenda.textContent = atual === aula ? "Assistir a aula" : `Assistir · ${atual.rotulo}`;
       centro.append(legenda);
-      quadro.setAttribute("aria-label", `Assistir: ${aula.titulo}`);
+      quadro.setAttribute("aria-label", `Assistir: ${atual.titulo}`);
       quadro.addEventListener("click", () => tocar(quadro));
     } else {
-      // Liberada, mas sem vídeo no config: o quadro avisa, não finge.
+      // Liberada, mas sem vídeo no config: o quadro avisa, não finge. A aula que ainda não
+      // aconteceu diz o que acontece (o `aviso` dela, no config) em vez de prometer replay.
       quadro.setAttribute("aria-disabled", "true");
       const legenda = document.createElement("p");
       legenda.className = "abertura-texto";
-      legenda.textContent = "Estamos preparando o replay desta aula. Volte em instantes 💜";
+      const aviso = typeof atual.aviso === "string" ? atual.aviso.trim() : "";
+      legenda.textContent = aviso || "Estamos preparando o replay desta aula. Volte em instantes 💜";
       centro.append(legenda);
     }
 
     quadro.append(centro);
     alvo.append(quadro);
+
+    // Um conteúdo tomou o quadro, mas a aula tem vídeo: o caminho de volta fica sempre à mão (o
+    // tocar() troca só o quadro, então este botão continua embaixo do player).
+    if (liberada && atual !== aula && aula && R.videoValido(aula.video)) {
+      const voltar = document.createElement("button");
+      voltar.type = "button";
+      voltar.className = "abertura-voltar";
+      voltar.textContent = "Voltar para a aula";
+      voltar.addEventListener("click", () => {
+        emCartaz = aula;
+        desenharQuadro();
+        const quadroDaAula = $("quadro");
+        if (quadroDaAula) tocar(quadroDaAula);
+        desenharConteudos({ forcar: true });
+        focarPlayer();
+      });
+      alvo.append(voltar);
+    }
     // Quem já chegou no momento da oferta neste aparelho encontra o botão aberto.
     if (liberada && lerStorage(CHAVE_OFERTA) === "1") abrirOferta({ chegando: false });
   }
@@ -459,31 +491,36 @@
     document.head.append(script);
   }
 
-  function vigiarOferta(frame) {
+  /**
+   * `controle` é o player limpo, quando é ele que está no quadro: ele já tem o player da API, e um
+   * segundo YT.Player no mesmo iframe brigaria com o primeiro.
+   */
+  function vigiarOferta(frame, controle) {
     if (!OFERTA || ofertaAberta || !aula) return;
     relogioOferta = window.setTimeout(() => abrirOferta(), OFERTA.aposSegundos * 1000);
     if (aula.video.provedor !== "youtube") return;
+    // A API respondeu: quem manda agora é o minuto do vídeo, e não o relógio.
+    const medir = (player) => {
+      window.clearTimeout(relogioOferta);
+      window.clearInterval(vigiaOferta);
+      vigiaOferta = window.setInterval(() => {
+        let segundos = 0;
+        try {
+          segundos = Number(player.getCurrentTime()) || 0;
+        } catch {
+          segundos = 0;
+        }
+        if (segundos >= OFERTA.aposSegundos) abrirOferta();
+      }, 1000);
+    };
+    if (controle) {
+      controle.quandoPronto(medir);
+      return;
+    }
     try {
       carregarApiDoYoutube(() => {
         try {
-          const player = new window.YT.Player(frame, {
-            events: {
-              onReady: () => {
-                // A API respondeu: quem manda agora é o minuto do vídeo, e não o relógio.
-                window.clearTimeout(relogioOferta);
-                window.clearInterval(vigiaOferta);
-                vigiaOferta = window.setInterval(() => {
-                  let segundos = 0;
-                  try {
-                    segundos = Number(player.getCurrentTime()) || 0;
-                  } catch {
-                    segundos = 0;
-                  }
-                  if (segundos >= OFERTA.aposSegundos) abrirOferta();
-                }, 1000);
-              }
-            }
-          });
+          const player = new window.YT.Player(frame, { events: { onReady: () => medir(player) } });
         } catch {
           // A API carregou mas não aceitou o player: fica o relógio.
         }
@@ -493,27 +530,839 @@
     }
   }
 
-  function tocar(quadro) {
-    const url = R.urlDoVideo(aula.video);
-    if (!url) return;
-    const moldura = document.createElement("div");
-    moldura.className = "abertura-quadro";
+  /* ================================================================== */
+  /* O player limpo: o YouTube sem nada do YouTube                       */
+  /* ================================================================== */
+  /*
+   * Liga com `playerLimpo: true` no config da sala, e só para vídeo do YouTube. O iframe nasce sem
+   * os controles do YouTube (controls=0) e MAIS ALTO que o quadro: o vídeo se ajusta pela largura, e
+   * as faixas de cima e de baixo — onde o YouTube desenha o título, o logo e o "assistir no
+   * YouTube" — ficam fora da área visível. Por cima vai uma camada da página, que recebe todos os
+   * toques: ninguém clica em nada do YouTube. Pausado ou no fim, a capa da aula cobre o vídeo (e,
+   * com ela, as sugestões que o YouTube mostra). Os controles são os da Escola: tocar e pausar, a
+   * barra do tempo, o som e a tela cheia.
+   *
+   * Duas saídas de emergência, de propósito:
+   *  - o navegador não deixou o vídeo começar sozinho (o iPhone, às vezes): a camada fica "furada"
+   *    até o vídeo começar, e o toque passa para o próprio vídeo — é o único jeito de o iPhone
+   *    aceitar o play com som. Começou, a camada volta a cobrir tudo;
+   *  - a API do YouTube não carregou (bloqueador, rede ruim): sem ela os nossos botões não mandam em
+   *    nada, então o player volta a ser o do YouTube, com os controles dele. A aula toca do mesmo jeito.
+   */
+  const ICONE_PAUSA = '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M7 5h3.6v14H7zm6.4 0H17v14h-3.6z" fill="currentColor"/></svg>';
+  const ICONE_SOM =
+    '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/><path d="M15.5 9a4.2 4.2 0 0 1 0 6m2.6-8.6a7.8 7.8 0 0 1 0 11.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+  const ICONE_MUDO =
+    '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/><path d="m16 9.5 5 5m0-5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+  const ICONE_TELA =
+    '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 9V4h5m6 0h5v5m0 6v5h-5m-6 0H4v-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const ICONE_TELA_SAIR =
+    '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M9 4v5H4m16 0h-5V4m0 16v-5h5M4 15h5v5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const ICONE_DE_NOVO =
+    '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4v4.7h4.7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+  // O player limpo que está no quadro agora (a página tem um quadro só).
+  let playerAtual = null;
+
+  function tempoLegivel(segundos) {
+    const total = Math.max(0, Math.floor(Number(segundos) || 0));
+    return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+  }
+
+  function trocarIcone(botao, iconeHtml, rotulo) {
+    botao.textContent = "";
+    botao.append(icone(iconeHtml, ""));
+    botao.setAttribute("aria-label", rotulo);
+    botao.title = rotulo;
+  }
+
+  function botaoDoPlayer(classe, rotulo, iconeHtml) {
+    const botao = document.createElement("button");
+    botao.type = "button";
+    botao.className = `player-botao ${classe}`;
+    trocarIcone(botao, iconeHtml, rotulo);
+    return botao;
+  }
+
+  /** Foco de TECLADO dentro do player: com ele, os controles não se escondem. */
+  function focoDeTeclado(caixa) {
+    const ativo = document.activeElement;
+    if (!ativo || ativo === caixa || !caixa.contains(ativo)) return false;
+    try {
+      return ativo.matches(":focus-visible");
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Monta o player limpo no lugar do `quadro` e devolve o controle dele: { frame, quandoPronto(fn),
+   * focar(), destruir() }. Devolve null quando o vídeo não é do YouTube (o tocar() usa o comum).
+   */
+  function montarPlayerLimpo(quadro, atual) {
+    const url = atual.video && atual.video.provedor === "youtube" ? R.urlDoVideo(atual.video, { limpo: true }) : "";
+    if (!url) return null;
+
+    const caixa = document.createElement("div");
+    caixa.className = "abertura-quadro player-limpo";
+    if (atual.vertical) caixa.classList.add("vertical");
+    caixa.dataset.estado = "carregando";
+
     const frame = document.createElement("iframe");
-    frame.src = url;
-    frame.title = aula.titulo;
-    // Tela cheia só pelo allowfullscreen: com "fullscreen" também no allow, o Chrome avisa que um
-    // dos dois é ignorado.
+    // O origin faz o YouTube só aceitar ordem DESTA página.
+    frame.src = `${url}&origin=${encodeURIComponent(window.location.origin)}`;
+    frame.title = atual.titulo;
     frame.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture";
-    frame.setAttribute("allowfullscreen", "");
     frame.setAttribute("referrerpolicy", "strict-origin-when-cross-origin");
-    moldura.append(frame);
-    quadro.replaceWith(moldura);
-    vigiarOferta(frame);
+    // O teclado não entra no player do YouTube: quem manda são os nossos botões.
+    frame.tabIndex = -1;
+
+    const capa = document.createElement("div");
+    capa.className = "player-capa";
+    const fonteDaCapa = R.capaDaAula(atual);
+    if (fonteDaCapa) {
+      const img = document.createElement("img");
+      img.src = fonteDaCapa;
+      img.alt = "";
+      img.decoding = "async";
+      img.addEventListener("error", () => img.remove());
+      capa.append(img);
+    }
+
+    const camada = document.createElement("div");
+    camada.className = "player-camada";
+
+    const centro = document.createElement("div");
+    centro.className = "player-centro";
+    const grande = document.createElement("span");
+    grande.className = "player-grande";
+    grande.setAttribute("aria-hidden", "true");
+    const giro = document.createElement("span");
+    giro.className = "player-giro";
+    giro.setAttribute("aria-hidden", "true");
+    const dica = document.createElement("p");
+    dica.className = "player-dica";
+    centro.append(grande, giro, dica);
+
+    const controles = document.createElement("div");
+    controles.className = "player-controles";
+    const botaoTocar = botaoDoPlayer("player-botao-tocar", "Tocar", ICONE_PLAY);
+    const barra = document.createElement("input");
+    barra.type = "range";
+    barra.className = "player-barra";
+    barra.min = "0";
+    barra.max = "1000";
+    barra.step = "1";
+    barra.value = "0";
+    barra.setAttribute("aria-label", "Posição do vídeo");
+    const tempo = document.createElement("span");
+    tempo.className = "player-tempo";
+    tempo.textContent = "0:00";
+    const botaoSom = botaoDoPlayer("player-botao-som", "Tirar o som", ICONE_SOM);
+    controles.append(botaoTocar, barra, tempo, botaoSom);
+    // Tela cheia só onde o navegador deixa pôr uma <div> em tela cheia (o iPhone não deixa).
+    const podeTelaCheia = Boolean(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+    const botaoTela = podeTelaCheia ? botaoDoPlayer("player-botao-tela", "Tela cheia", ICONE_TELA) : null;
+    if (botaoTela) controles.append(botaoTela);
+
+    caixa.append(frame, capa, camada, centro, controles);
+    quadro.replaceWith(caixa);
+
+    let player = null;
+    let pronto = false;
+    let destruido = false;
+    let duracao = 0;
+    let arrastando = false;
+    let ultimoToque = "";
+    let vigia = 0;
+    let relogioOcioso = 0;
+    let relogioEspera = 0;
+    let relogioApi = 0;
+    let relogioRecem = 0;
+    // O último estado que o YouTube contou: "carregando" (3) quer dizer que o play automático veio
+    // e o vídeo só está baixando — não é hora de pedir o toque.
+    let ultimoCodigo = -2;
+    const naFila = [];
+
+    const chamar = (acao) => {
+      try {
+        acao();
+      } catch {
+        // O player ainda não respondeu: o próximo toque tenta de novo.
+      }
+    };
+
+    function pintarTempo(segundos) {
+      const fracao = duracao > 0 ? Math.min(1, Math.max(0, segundos / duracao)) : 0;
+      barra.value = String(Math.round(fracao * 1000));
+      barra.style.setProperty("--feito", `${(fracao * 100).toFixed(2)}%`);
+      const texto = `${tempoLegivel(segundos)} / ${tempoLegivel(duracao)}`;
+      if (tempo.textContent !== texto) tempo.textContent = texto;
+      barra.setAttribute("aria-valuetext", `${tempoLegivel(segundos)} de ${tempoLegivel(duracao)}`);
+    }
+
+    function lerTempo() {
+      if (!player || arrastando) return;
+      let segundos = 0;
+      try {
+        segundos = Number(player.getCurrentTime()) || 0;
+        duracao = Number(player.getDuration()) || duracao;
+      } catch {
+        return;
+      }
+      pintarTempo(segundos);
+    }
+
+    function pararVigia() {
+      window.clearInterval(vigia);
+      vigia = 0;
+    }
+
+    function acordar() {
+      caixa.classList.remove("ocioso");
+      window.clearTimeout(relogioOcioso);
+      if (caixa.dataset.estado !== "tocando") return;
+      relogioOcioso = window.setTimeout(() => {
+        if (!destruido && caixa.dataset.estado === "tocando" && !focoDeTeclado(caixa)) caixa.classList.add("ocioso");
+      }, 2600);
+    }
+
+    function estado(novo) {
+      caixa.dataset.estado = novo;
+      const tocandoAgora = novo === "tocando";
+      if (tocandoAgora) trocarIcone(botaoTocar, ICONE_PAUSA, "Pausar");
+      else if (novo === "fim") trocarIcone(botaoTocar, ICONE_DE_NOVO, "Assistir de novo");
+      else trocarIcone(botaoTocar, ICONE_PLAY, "Tocar");
+      grande.textContent = "";
+      grande.append(icone(tocandoAgora ? ICONE_PAUSA : novo === "fim" ? ICONE_DE_NOVO : ICONE_PLAY, ""));
+      /*
+       * A cada play, o YouTube mostra o botão de pausa DELE no meio do vídeo (medido: de 0,3 s até
+       * ~3,8 s depois do play, no começo e na volta da pausa). Nesse tempo o nosso fica por cima, no
+       * mesmo lugar (o centro do iframe é o centro do quadro), e some devagar depois — para quem
+       * assiste, é o player da página dizendo "está tocando".
+       */
+      window.clearTimeout(relogioRecem);
+      caixa.classList.toggle("recem", tocandoAgora);
+      if (tocandoAgora) {
+        relogioRecem = window.setTimeout(() => {
+          if (!destruido) caixa.classList.remove("recem");
+        }, 4600);
+      }
+      dica.textContent =
+        novo === "aguardando"
+          ? "Toque no vídeo para começar"
+          : novo === "fim"
+            ? "Assistir de novo"
+            : novo === "erro"
+              ? "Não deu para carregar este vídeo agora. Tente de novo em instantes."
+              : "";
+      if (tocandoAgora) {
+        if (!vigia) vigia = window.setInterval(lerTempo, 250);
+        acordar();
+      } else {
+        pararVigia();
+        window.clearTimeout(relogioOcioso);
+        caixa.classList.remove("ocioso");
+      }
+    }
+
+    function tocarOuPausar() {
+      if (!player || !pronto) return;
+      const agora = caixa.dataset.estado;
+      if (agora === "tocando") {
+        chamar(() => player.pauseVideo());
+        return;
+      }
+      if (agora === "fim") chamar(() => player.seekTo(0, true));
+      chamar(() => player.playVideo());
+      // Se o navegador não deixar (o play não vem), o próximo toque vai direto para o vídeo.
+      window.clearTimeout(relogioEspera);
+      relogioEspera = window.setTimeout(() => {
+        if (!destruido && caixa.dataset.estado !== "tocando") estado("aguardando");
+      }, 1500);
+    }
+
+    camada.addEventListener("pointerdown", (evento) => {
+      ultimoToque = evento.pointerType || "";
+    });
+    camada.addEventListener("click", () => {
+      // No celular, com os controles escondidos, o primeiro toque só traz os controles de volta.
+      if (ultimoToque === "touch" && caixa.dataset.estado === "tocando" && caixa.classList.contains("ocioso")) {
+        acordar();
+        return;
+      }
+      tocarOuPausar();
+      acordar();
+    });
+    botaoTocar.addEventListener("click", tocarOuPausar);
+    caixa.addEventListener("pointermove", acordar);
+    caixa.addEventListener("focusin", acordar);
+
+    barra.addEventListener("input", () => {
+      arrastando = true;
+      pintarTempo((Number(barra.value) / 1000) * duracao);
+      acordar();
+    });
+    barra.addEventListener("change", () => {
+      arrastando = false;
+      if (player && duracao > 0) chamar(() => player.seekTo((Number(barra.value) / 1000) * duracao, true));
+    });
+
+    botaoSom.addEventListener("click", () => {
+      if (!player || !pronto) return;
+      let mudo = false;
+      try {
+        mudo = Boolean(player.isMuted());
+      } catch {
+        mudo = false;
+      }
+      chamar(() => (mudo ? player.unMute() : player.mute()));
+      trocarIcone(botaoSom, mudo ? ICONE_SOM : ICONE_MUDO, mudo ? "Tirar o som" : "Ligar o som");
+    });
+
+    const emTelaCheia = () => (document.fullscreenElement || document.webkitFullscreenElement) === caixa;
+    const aoMudarTela = () => {
+      if (!destruido && botaoTela) {
+        const cheia = emTelaCheia();
+        trocarIcone(botaoTela, cheia ? ICONE_TELA_SAIR : ICONE_TELA, cheia ? "Sair da tela cheia" : "Tela cheia");
+      }
+    };
+    if (botaoTela) {
+      botaoTela.addEventListener("click", () => {
+        try {
+          const pedido = emTelaCheia()
+            ? (document.exitFullscreen || document.webkitExitFullscreen).call(document)
+            : (caixa.requestFullscreen || caixa.webkitRequestFullscreen).call(caixa);
+          if (pedido && typeof pedido.catch === "function") pedido.catch(() => {});
+        } catch {
+          // Sem tela cheia neste navegador: o vídeo continua no quadro.
+        }
+      });
+      document.addEventListener("fullscreenchange", aoMudarTela);
+      document.addEventListener("webkitfullscreenchange", aoMudarTela);
+    }
+
+    function aoFicarPronto(evento) {
+      if (destruido) return;
+      window.clearTimeout(relogioApi);
+      if (evento && evento.target) player = evento.target;
+      pronto = true;
+      try {
+        duracao = Number(player.getDuration()) || 0;
+      } catch {
+        duracao = 0;
+      }
+      pintarTempo(0);
+      for (const avisar of naFila.splice(0)) chamar(() => avisar(player));
+      esperarOPlay();
+    }
+
+    // O play automático não veio (o navegador não deixou): o toque passa a ir para o vídeo. Se o
+    // YouTube ainda está baixando o vídeo, espera mais um pouco antes de pedir o toque.
+    function esperarOPlay() {
+      window.clearTimeout(relogioEspera);
+      relogioEspera = window.setTimeout(() => {
+        if (destruido || caixa.dataset.estado !== "carregando") return;
+        if (ultimoCodigo === 3) esperarOPlay();
+        else estado("aguardando");
+      }, 2200);
+    }
+
+    function aoMudarEstado(evento) {
+      if (destruido) return;
+      const codigo = evento && typeof evento.data === "number" ? evento.data : -2;
+      ultimoCodigo = codigo;
+      caixa.classList.toggle("carregando-video", codigo === 3);
+      if (codigo === 1) {
+        window.clearTimeout(relogioEspera);
+        estado("tocando");
+      } else if (codigo === 2) {
+        estado("pausado");
+        lerTempo();
+      } else if (codigo === 0) {
+        estado("fim");
+        pintarTempo(duracao);
+      }
+    }
+
+    // Sem a API, os nossos botões não mandam em nada: volta o player do YouTube, com os controles dele.
+    function semApi() {
+      if (destruido || pronto) return;
+      caixa.classList.add("sem-api");
+      caixa.dataset.estado = "sem-api";
+      frame.tabIndex = 0;
+      frame.setAttribute("allowfullscreen", "");
+      frame.src = R.urlDoVideo(atual.video);
+    }
+
+    relogioApi = window.setTimeout(semApi, 6000);
+    try {
+      carregarApiDoYoutube(() => {
+        if (destruido || caixa.classList.contains("sem-api")) return;
+        try {
+          player = new window.YT.Player(frame, {
+            events: { onReady: aoFicarPronto, onStateChange: aoMudarEstado, onError: () => estado("erro") }
+          });
+        } catch {
+          semApi();
+        }
+      });
+    } catch {
+      semApi();
+    }
+    estado("carregando");
+
+    return {
+      frame,
+      quandoPronto(avisar) {
+        if (pronto && player) chamar(() => avisar(player));
+        else naFila.push(avisar);
+      },
+      focar() {
+        if (caixa.classList.contains("sem-api")) frame.focus({ preventScroll: true });
+        else botaoTocar.focus({ preventScroll: true });
+      },
+      destruir() {
+        destruido = true;
+        pararVigia();
+        window.clearTimeout(relogioOcioso);
+        window.clearTimeout(relogioEspera);
+        window.clearTimeout(relogioApi);
+        window.clearTimeout(relogioRecem);
+        document.removeEventListener("fullscreenchange", aoMudarTela);
+        document.removeEventListener("webkitfullscreenchange", aoMudarTela);
+      }
+    };
+  }
+
+  function tocar(quadro) {
+    const atual = emCartaz;
+    const url = atual ? R.urlDoVideo(atual.video) : "";
+    if (!url) return;
+    // A sala com player limpo e vídeo do YouTube: o nosso player. Senão, o do provedor.
+    const controle = pagina.playerLimpo === true ? montarPlayerLimpo(quadro, atual) : null;
+    let frame = controle ? controle.frame : null;
+    if (!controle) {
+      const moldura = document.createElement("div");
+      moldura.className = "abertura-quadro";
+      if (atual.vertical) moldura.classList.add("vertical");
+      frame = document.createElement("iframe");
+      frame.src = url;
+      frame.title = atual.titulo;
+      // Tela cheia só pelo allowfullscreen: com "fullscreen" também no allow, o Chrome avisa que um
+      // dos dois é ignorado.
+      frame.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture";
+      frame.setAttribute("allowfullscreen", "");
+      frame.setAttribute("referrerpolicy", "strict-origin-when-cross-origin");
+      moldura.append(frame);
+      quadro.replaceWith(moldura);
+    }
+    playerAtual = controle;
+    tocando = true;
+    // A oferta é o momento da AULA: conteúdo de aquecimento não abre o botão.
+    if (atual === aula) vigiarOferta(frame, controle);
     // A decoração sai da frente enquanto a aula roda (só decoração: texto nenhum perde contraste).
     document.body.classList.add("assistindo");
-    pixel("trackCustom", "replay_play", { pagina: pagina.id, aula: aula.id });
-    anunciar("A aula começou.");
+    pixel("trackCustom", "replay_play", { pagina: pagina.id, aula: atual.id });
+    anunciar(atual === aula ? "A aula começou." : `${atual.titulo} começou.`);
   }
+
+  /* ================================================================== */
+  /* Os conteúdos: um card por dia                                       */
+  /* ================================================================== */
+  /*
+   * Os cards de js/replay-config.js (conteudos). Cada um abre sozinho na data dele (o config diz
+   * quando, R.conteudosDaPagina diz o estado). Com a sala trancada, os cards aparecem mesmo assim —
+   * a vitrine dá vontade, como a foto de abertura — e o toque leva ao formulário. Liberada, o card
+   * de vídeo toca NO QUADRO lá de cima (o mesmo player da aula); o de link abre em outra aba.
+   */
+  let assinaturaConteudos = "";
+  let relogioConteudos = 0;
+
+  function conteudosAgora() {
+    return R.conteudosDaPagina(pagina, Date.now());
+  }
+
+  /** O conteúdo no formato que o quadro entende: a thumb do card vira a capa do player. */
+  function comoAula(item) {
+    return { id: item.id, titulo: R.nomeDoConteudo(item), rotulo: item.rotulo, capa: item.imagem, video: item.video, vertical: item.vertical };
+  }
+
+  /**
+   * O que o quadro mostra quando a sala abre: a aula, se ela já tem vídeo; senão o conteúdo
+   * liberado mais recente (o do dia); senão a aula, com o aviso dela.
+   */
+  function escolherEmCartaz() {
+    if (aula && R.videoValido(aula.video)) return aula;
+    let melhor = null;
+    for (const item of conteudosAgora()) {
+      if (item.estado === "liberado" && item.video && (!melhor || item.liberaEm >= melhor.liberaEm)) melhor = item;
+    }
+    return melhor ? comoAula(melhor) : aula;
+  }
+
+  function irParaPorta() {
+    const porta = $("porta");
+    if (!porta) return;
+    porta.scrollIntoView({ behavior: "smooth", block: "center" });
+    const primeiro = $("campo-nome");
+    if (primeiro) window.setTimeout(() => primeiro.focus({ preventScroll: true }), 320);
+  }
+
+  /** O foco vai para o player que acabou de nascer: é lá que a pessoa está agora. */
+  function focarPlayer() {
+    if (playerAtual) {
+      playerAtual.focar();
+      return;
+    }
+    const frame = document.querySelector("#aula iframe");
+    if (frame) frame.focus({ preventScroll: true });
+  }
+
+  function assistirConteudo(item) {
+    const secao = $("aula");
+    // O card que já está tocando só leva até o player: tocar de novo voltaria o vídeo ao zero.
+    if (!(tocando && emCartaz && emCartaz !== aula && emCartaz.id === item.id)) {
+      emCartaz = comoAula(item);
+      desenharQuadro();
+      const quadro = $("quadro");
+      if (quadro) tocar(quadro);
+      // Os cards só depois do play: com nada tocando, o redesenho trocaria a escolha da pessoa
+      // pelo conteúdo do dia.
+      desenharConteudos({ forcar: true });
+    }
+    if (secao) secao.scrollIntoView({ behavior: "smooth", block: "center" });
+    focarPlayer();
+  }
+
+  function cardDoConteudo(item) {
+    const li = document.createElement("li");
+    li.className = "conteudo";
+    li.dataset.conteudo = item.id;
+    li.dataset.estado = item.estado;
+    // O instante em que abre, para a contagem regressiva trocar só o texto, sem redesenhar o card.
+    li.dataset.libera = String(item.liberaEm);
+    if (item.destaque) li.classList.add("conteudo--destaque");
+    if (item.vertical) li.classList.add("conteudo--vertical");
+    const noQuadro = Boolean(emCartaz && emCartaz.id === item.id);
+
+    let cartao;
+    let acao = "";
+    let iconeHtml = ICONE_CADEADO;
+    if (item.estado === "liberado" && !liberada) {
+      // Já abriu, mas a sala está trancada: o card é o da aula liberada (colorido, com o play, sem
+      // cadeado nenhum), e o toque leva ao formulário — preenchido, ESTA aula começa a tocar.
+      cartao = document.createElement("button");
+      cartao.type = "button";
+      cartao.addEventListener("click", () => {
+        conteudoPedido = item.id;
+        irParaPorta();
+      });
+      acao = "Assistir agora";
+      iconeHtml = item.video ? ICONE_PLAY : ICONE_FORA;
+    } else if (item.estado === "liberado" && item.video) {
+      cartao = document.createElement("button");
+      cartao.type = "button";
+      if (noQuadro) cartao.setAttribute("aria-current", "true");
+      cartao.addEventListener("click", () => assistirConteudo(item));
+      acao = noQuadro ? "No quadro lá em cima" : "Assistir agora";
+      iconeHtml = ICONE_PLAY;
+    } else if (item.estado === "liberado") {
+      cartao = document.createElement("a");
+      cartao.href = item.link;
+      cartao.target = "_blank";
+      cartao.rel = "noopener noreferrer";
+      cartao.addEventListener("click", () => pixel("trackCustom", "replay_conteudo", { pagina: pagina.id, conteudo: item.id }));
+      acao = "Abrir";
+      iconeHtml = ICONE_FORA;
+    } else {
+      // Trancado (ainda não é a hora) ou chegando (é a hora, mas o vídeo não subiu): preto e
+      // branco, com o cadeado, e nada a tocar — um <div>, não botão nem link.
+      cartao = document.createElement("div");
+      const quando = R.rotuloDaLiberacao(item.liberaEm, Date.now());
+      acao = item.estado === "chegando" || !quando ? "Em breve" : `Abre ${quando}`;
+    }
+    cartao.className = "conteudo-cartao";
+
+    // A arte: o número da marca fica SEMPRE por baixo; a imagem do config cobre quando existe, e
+    // some se o arquivo ainda não subiu — o card nunca mostra buraco.
+    const arte = document.createElement("span");
+    arte.className = "conteudo-arte";
+    const numero = document.createElement("span");
+    numero.className = "conteudo-numero";
+    numero.setAttribute("aria-hidden", "true");
+    numero.textContent = item.marca || String(item.numero).padStart(2, "0");
+    arte.append(numero);
+    if (item.imagem) {
+      const img = document.createElement("img");
+      img.src = item.imagem;
+      img.alt = "";
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.addEventListener("error", () => img.remove());
+      arte.append(img);
+    }
+    if (item.novo) {
+      const selo = document.createElement("span");
+      selo.className = "conteudo-novo";
+      selo.textContent = "Novo";
+      arte.append(selo);
+    }
+    const marcaDoIcone = icone(iconeHtml, "conteudo-icone");
+    marcaDoIcone.dataset.icone = iconeHtml === ICONE_PLAY ? "play" : iconeHtml === ICONE_FORA ? "fora" : "cadeado";
+    arte.append(marcaDoIcone);
+
+    const texto = document.createElement("span");
+    texto.className = "conteudo-texto";
+    const rotulo = document.createElement("span");
+    rotulo.className = "conteudo-rotulo";
+    rotulo.textContent = item.rotulo;
+    texto.append(rotulo);
+    if (item.titulo) {
+      const titulo = document.createElement("strong");
+      titulo.className = "conteudo-titulo";
+      titulo.textContent = item.titulo;
+      texto.append(titulo);
+    }
+    const estado = document.createElement("span");
+    estado.className = "conteudo-estado";
+    estado.textContent = acao;
+    texto.append(estado);
+
+    cartao.append(arte, texto);
+    li.append(cartao);
+    return li;
+  }
+
+  /*
+   * A VITRINE: os cards deslizam de lado em qualquer tela — no celular com o dedo, no computador com
+   * as setas (ou a roda e o trackpad). Ela vai de borda a borda da tela, com o primeiro card
+   * alinhado à coluna do texto; os pontinhos embaixo dizem onde a pessoa está e levam a cada aula.
+   */
+  let conteudoPedido = "";
+  let quadroDeRolagem = 0;
+
+  const semMovimento = () => {
+    try {
+      return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    } catch {
+      return false;
+    }
+  };
+
+  function atualizarSetas() {
+    const lista = $("conteudos-lista");
+    const antes = $("vitrine-antes");
+    const depois = $("vitrine-depois");
+    if (!lista || !antes || !depois) return;
+    const transborda = lista.scrollWidth > lista.clientWidth + 1;
+    antes.hidden = !transborda;
+    depois.hidden = !transborda;
+    if (!transborda) return;
+    antes.disabled = lista.scrollLeft <= 2;
+    depois.disabled = lista.scrollLeft + lista.clientWidth >= lista.scrollWidth - 2;
+  }
+
+  /** Os pontinhos acesos são os cards que estão (quase inteiros) na tela. */
+  function marcarPontos() {
+    const lista = $("conteudos-lista");
+    const pontos = $("vitrine-pontos");
+    if (!lista || !pontos || pontos.hidden) return;
+    const janela = lista.getBoundingClientRect();
+    const naTela = new Set();
+    for (const li of lista.children) {
+      const caixa = li.getBoundingClientRect();
+      const dentro = Math.min(caixa.right, janela.right) - Math.max(caixa.left, janela.left);
+      if (caixa.width > 0 && dentro >= caixa.width * 0.6) naTela.add(li.dataset.conteudo);
+    }
+    for (const ponto of pontos.children) ponto.setAttribute("aria-current", naTela.has(ponto.dataset.conteudo) ? "true" : "false");
+  }
+
+  function irParaCard(id) {
+    const lista = $("conteudos-lista");
+    const li = lista ? Array.from(lista.children).find((el) => el.dataset.conteudo === id) : null;
+    if (!li) return;
+    const respiro = parseFloat(window.getComputedStyle(lista).scrollPaddingLeft) || 0;
+    lista.scrollTo({ left: Math.max(0, li.offsetLeft - respiro), behavior: semMovimento() ? "auto" : "smooth" });
+  }
+
+  function deslizar(sentido) {
+    const lista = $("conteudos-lista");
+    if (!lista) return;
+    const vitrine = $("vitrine");
+    // Um passo é a largura da COLUNA (o que se vê entre as setas), não a da tela inteira.
+    const coluna = vitrine && vitrine.parentElement ? vitrine.parentElement.clientWidth : lista.clientWidth;
+    lista.scrollBy({ left: sentido * Math.max(160, coluna * 0.9), behavior: semMovimento() ? "auto" : "smooth" });
+  }
+
+  function desenharPontos(itens) {
+    const pontos = $("vitrine-pontos");
+    if (!pontos) return;
+    pontos.textContent = "";
+    for (const item of itens) {
+      const ponto = document.createElement("button");
+      ponto.type = "button";
+      ponto.className = "vitrine-ponto";
+      ponto.dataset.conteudo = item.id;
+      ponto.setAttribute("aria-label", `Ir para ${R.nomeDoConteudo(item)}`);
+      ponto.addEventListener("click", () => irParaCard(item.id));
+      pontos.append(ponto);
+    }
+    pontos.hidden = itens.length < 2;
+  }
+
+  /**
+   * Mede a vitrine: quanto ela sangra para cada lado (--borda, da borda da coluna até a borda da
+   * tela), se transborda (aí a lista entra no Tab — o Safari não deixa o teclado rolar um contêiner
+   * sem foco), as setas e os pontinhos.
+   */
+  function ajustarVitrine() {
+    const secao = $("conteudos");
+    const lista = $("conteudos-lista");
+    if (!secao || !lista || secao.hidden) return;
+    const vitrine = $("vitrine");
+    if (vitrine && vitrine.parentElement) {
+      const sobra = Math.max(0, (document.documentElement.clientWidth - vitrine.parentElement.clientWidth) / 2);
+      vitrine.style.setProperty("--borda", `${Math.floor(sobra)}px`);
+    }
+    if (lista.scrollWidth > lista.clientWidth + 1) lista.tabIndex = 0;
+    else lista.removeAttribute("tabindex");
+    atualizarSetas();
+    marcarPontos();
+  }
+
+  window.addEventListener("resize", ajustarVitrine);
+  (() => {
+    const lista = $("conteudos-lista");
+    if (lista) {
+      lista.addEventListener(
+        "scroll",
+        () => {
+          if (quadroDeRolagem) return;
+          quadroDeRolagem = window.requestAnimationFrame(() => {
+            quadroDeRolagem = 0;
+            atualizarSetas();
+            marcarPontos();
+          });
+        },
+        { passive: true }
+      );
+    }
+    const antes = $("vitrine-antes");
+    const depois = $("vitrine-depois");
+    if (antes) antes.addEventListener("click", () => deslizar(-1));
+    if (depois) depois.addEventListener("click", () => deslizar(1));
+  })();
+
+  /*
+   * A CONTAGEM REGRESSIVA: de tempos em tempos, só o texto dos cards trancados muda ("Abre em
+   * 1h 09min" → "Abre em 1h 08min"). Nada é redesenhado — quem destrava o card na hora certa é o
+   * agendarConteudos.
+   */
+  let relogioContagem = 0;
+
+  function atualizarContagem() {
+    const agora = Date.now();
+    for (const li of document.querySelectorAll('#conteudos-lista > li[data-estado="trancado"], #conteudos-destaque > li[data-estado="trancado"]')) {
+      const quando = R.rotuloDaLiberacao(Number(li.dataset.libera), agora);
+      const estado = li.querySelector(".conteudo-estado");
+      if (estado && quando && estado.textContent !== `Abre ${quando}`) estado.textContent = `Abre ${quando}`;
+    }
+  }
+
+  /** Quando o próximo conteúdo abre com a página aberta, o card destrava sem recarregar. */
+  function agendarConteudos() {
+    window.clearTimeout(relogioConteudos);
+    const proxima = R.proximaLiberacao(pagina, Date.now());
+    if (proxima === null) return;
+    const espera = proxima - Date.now() + 1000;
+    // O setTimeout não aguenta mais de ~24 dias: o que abre depois disso fica para a próxima visita.
+    if (espera > 0 && espera < 2147483647) relogioConteudos = window.setTimeout(() => desenharConteudos(), espera);
+  }
+
+  function desenharConteudos({ forcar = false } = {}) {
+    const secao = $("conteudos");
+    const lista = $("conteudos-lista");
+    if (!secao || !lista) return;
+    const fio = $("fio-conteudos");
+    const nav = $("nav-conteudos");
+    const itens = conteudosAgora();
+    agendarConteudos();
+
+    if (!itens.length) {
+      secao.hidden = true;
+      if (fio) fio.hidden = true;
+      if (nav) nav.hidden = true;
+      return;
+    }
+
+    // Abriu conteúdo novo com a sala aberta e nada tocando: o quadro passa para o do dia. (Com
+    // vídeo tocando, nada muda no quadro — só os cards.)
+    if (liberada && !tocando) {
+      const melhor = escolherEmCartaz();
+      if (melhor && (!emCartaz || melhor.id !== emCartaz.id)) {
+        emCartaz = melhor;
+        desenharQuadro();
+      }
+    }
+
+    // Só redesenha quando algo mudou: o card que está com o foco não o perde à toa.
+    const assinatura = [liberada ? 1 : 0, emCartaz ? emCartaz.id : ""]
+      .concat(itens.map((item) => `${item.id}:${item.estado}:${item.novo ? 1 : 0}`))
+      .join("|");
+    if (!forcar && assinatura === assinaturaConteudos) return;
+    assinaturaConteudos = assinatura;
+
+    const c = pagina.conteudos || {};
+    escreverTexto("conteudos-rotulo", c.titulo || "Conteúdos");
+    const apoio = $("conteudos-apoio");
+    if (apoio) {
+      apoio.textContent = c.apoio || "";
+      apoio.hidden = !c.apoio;
+    }
+    // Redesenhar troca os nós: quem estava com o foco num card volta para o MESMO card (pelo id,
+    // comparado como valor — nada de seletor montado com texto do config).
+    // O card em destaque (a live) sai da vitrine e fica sozinho, largo, no bloco dele.
+    const listaDestaque = $("conteudos-destaque");
+    const ativo = document.activeElement;
+    const liFocado = ativo && ativo.closest ? ativo.closest("li[data-conteudo]") : null;
+    const idFocado =
+      liFocado && (lista.contains(liFocado) || (listaDestaque && listaDestaque.contains(liFocado))) ? liFocado.dataset.conteudo : "";
+
+    const daVitrine = listaDestaque ? itens.filter((item) => !item.destaque) : itens;
+    const emDestaque = listaDestaque ? itens.filter((item) => item.destaque) : [];
+
+    lista.textContent = "";
+    for (const item of daVitrine) lista.append(cardDoConteudo(item));
+    if (listaDestaque) {
+      listaDestaque.textContent = "";
+      for (const item of emDestaque) listaDestaque.append(cardDoConteudo(item));
+      listaDestaque.hidden = emDestaque.length === 0;
+      const fioDestaque = $("fio-destaque");
+      if (fioDestaque) fioDestaque.hidden = emDestaque.length === 0;
+    }
+    const vitrine = $("vitrine");
+    if (vitrine) vitrine.classList.toggle("vitrine--vertical", daVitrine.some((item) => item.vertical));
+    desenharPontos(daVitrine);
+
+    secao.hidden = false;
+    if (fio) fio.hidden = false;
+    if (nav) nav.hidden = false;
+    ajustarVitrine();
+    if (!relogioContagem) relogioContagem = window.setInterval(atualizarContagem, 20000);
+
+    if (idFocado) {
+      const todos = Array.from(lista.children).concat(listaDestaque ? Array.from(listaDestaque.children) : []);
+      const li = todos.find((el) => el.dataset.conteudo === idFocado);
+      const alvo = li ? li.querySelector("button, a") : null;
+      if (alvo) alvo.focus({ preventScroll: true });
+    }
+  }
+
+  // Quem deixa a aba aberta e volta no dia seguinte encontra o card do dia já destravado.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) desenharConteudos();
+  });
 
   /* ================================================================== */
   /* Desenho: a matéria, o material                                      */
@@ -1150,7 +1999,9 @@
     liberada = true;
     const porta = $("porta");
     if (porta) porta.hidden = true;
+    emCartaz = escolherEmCartaz();
     desenharQuadro();
+    desenharConteudos({ forcar: true });
     desenharMateria();
     desenharMaterial();
     desenharCertificado();
@@ -1162,6 +2013,10 @@
       anunciar("Acesso liberado. A aula está aqui em cima.");
       const secao = $("aula");
       if (secao) secao.scrollIntoView({ behavior: "smooth", block: "center" });
+      // Tocou numa aula liberada antes de preencher: é ELA que começa agora.
+      const pedido = conteudoPedido ? conteudosAgora().find((item) => item.id === conteudoPedido) : null;
+      conteudoPedido = "";
+      if (pedido && pedido.estado === "liberado" && pedido.video) assistirConteudo(pedido);
     }
   }
 
@@ -1468,6 +2323,7 @@
     abrirSala();
   } else {
     desenharQuadro();
+    desenharConteudos();
     // Trancada, o mural serve só para a contagem (prova social) — nenhum texto de terceiro chega.
     carregarMural({ reiniciar: true });
   }

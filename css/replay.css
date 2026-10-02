@@ -223,6 +223,9 @@ body.sala {
 .expediente-marca {
   width: auto;
   height: 30px;
+  /* O max-width: 100% herdado do inscricao.css deixava a coluna do logo colapsar a 0 quando a
+     navegação disputava a largura (sala com quatro atalhos num celular). */
+  max-width: none;
 }
 
 .expediente-edicao {
@@ -279,6 +282,11 @@ body.sala {
   }
   .expediente-marca {
     height: 26px;
+  }
+  /* Atalho demais para uma linha: quebra para baixo, alinhado à direita, em vez de estourar. */
+  .expediente-nav {
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
   .expediente-nav a {
     padding: 0 7px;
@@ -529,6 +537,342 @@ body.sala {
   color: var(--ink-soft);
   font-size: 13.5px;
   line-height: 1.5;
+}
+
+/* ================================================================== */
+/* O quadro em pé (Short) e o player limpo                            */
+/* ================================================================== */
+
+/*
+ * O Short toca EM PÉ: o quadro vira 9:16, centrado, do tamanho que cabe na tela sem rolar (78% da
+ * altura), com moldura e canto redondo em qualquer largura — é um celular na página.
+ */
+.abertura-quadro.vertical {
+  width: min(100%, 440px);
+  width: min(100%, 440px, 78svh * 9 / 16);
+  aspect-ratio: 9 / 16;
+  margin-inline: auto;
+  overflow: hidden;
+  border: 1px solid var(--fio);
+  border-radius: 16px;
+  box-shadow: 0 34px 64px -42px rgba(57, 43, 56, 0.55);
+}
+
+/*
+ * O player limpo (js/replay.js, montarPlayerLimpo): o iframe do YouTube é 160px MAIS ALTO que o
+ * quadro e começa 80px acima dele. O vídeo se ajusta pela largura e as duas faixas — onde o YouTube
+ * desenha o título, o logo e o "assistir no YouTube" — ficam fora da área visível. Por cima: a capa
+ * (antes do play, pausado e no fim), a camada que recebe os toques e os controles da Escola.
+ */
+.player-limpo {
+  overflow: hidden;
+  isolation: isolate;
+  cursor: default;
+}
+
+.player-limpo iframe {
+  top: -80px;
+  bottom: auto;
+  height: calc(100% + 160px);
+}
+
+.player-capa {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: radial-gradient(120% 120% at 50% 0%, color-mix(in oklab, var(--ember) 24%, var(--ink)) 0%, var(--ink) 70%);
+}
+
+.player-capa img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* O véu sobre a capa: o play e a dica leem bem em qualquer thumb. */
+.player-capa::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top, rgba(22, 15, 24, 0.62), rgba(22, 15, 24, 0.12) 52%, rgba(22, 15, 24, 0.28));
+}
+
+/*
+ * A capa entra NA HORA (pausou, acabou: as sugestões do YouTube nunca aparecem) e sai DEVAGAR e
+ * com atraso: no começo do play o YouTube pisca o ícone dele no meio do vídeo por meio segundo, e
+ * a capa só sai depois disso.
+ */
+.player-limpo[data-estado="tocando"] .player-capa {
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 280ms ease 720ms,
+    visibility 0s linear 1000ms;
+}
+
+.player-camada {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  cursor: pointer;
+}
+
+/* Sem o play automático (o iPhone, às vezes): a camada fura e o toque chega ao vídeo — é o único
+   jeito de o iPhone começar com som. Começou, ela volta a cobrir tudo. */
+.player-limpo[data-estado="aguardando"] .player-capa,
+.player-limpo[data-estado="aguardando"] .player-camada {
+  pointer-events: none;
+}
+
+.player-centro {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 14px;
+  padding: 20px;
+  pointer-events: none;
+  text-align: center;
+}
+
+.player-grande {
+  display: grid;
+  place-items: center;
+  width: 76px;
+  height: 76px;
+  border-radius: 999px;
+  background: var(--parchment-soft);
+  box-shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.6);
+  color: var(--ember);
+}
+
+.player-grande svg {
+  width: 34px;
+  height: 34px;
+  margin-left: 3px;
+}
+
+.player-limpo[data-estado="fim"] .player-grande svg {
+  margin-left: 0;
+}
+
+.player-limpo[data-estado="carregando"] .player-grande,
+.player-limpo[data-estado="erro"] .player-grande {
+  display: none;
+}
+
+/* Tocando: o nosso botão de pausa fica por cima do do YouTube nos primeiros segundos e some. */
+.player-limpo[data-estado="tocando"] .player-grande {
+  opacity: 0;
+  transition: opacity 320ms ease;
+}
+
+.player-limpo[data-estado="tocando"].recem .player-grande {
+  opacity: 1;
+  transition: none;
+}
+
+.player-limpo[data-estado="tocando"] .player-grande svg {
+  margin-left: 0;
+}
+
+/* O nosso "carregando" — com um disco escuro por trás, que cobre o carregando do YouTube no meio. */
+.player-giro {
+  display: none;
+  width: 42px;
+  height: 42px;
+  border: 3px solid rgba(255, 255, 255, 0.28);
+  border-top-color: #fff;
+  border-radius: 999px;
+  box-shadow: 0 0 0 26px rgba(22, 15, 24, 0.82);
+  animation: player-giro 0.8s linear infinite;
+}
+
+.player-limpo[data-estado="carregando"] .player-giro,
+.player-limpo.carregando-video[data-estado="tocando"] .player-giro {
+  display: block;
+}
+
+@keyframes player-giro {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.player-dica {
+  max-width: 26ch;
+  margin: 0;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  line-height: 1.4;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.55);
+}
+
+.player-dica:empty {
+  display: none;
+}
+
+/* Os controles da Escola: somem enquanto o vídeo toca e ninguém mexe; voltam no toque e no foco. */
+.player-controles {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 34px 8px 8px;
+  background: linear-gradient(to top, rgba(18, 12, 20, 0.84), rgba(18, 12, 20, 0));
+  color: #fff;
+  transition: opacity 220ms ease;
+}
+
+/* Escondidos são só TRANSPARENTES: continuam no Tab, e o foco do teclado os traz de volta. */
+.player-limpo.ocioso .player-controles,
+.player-limpo[data-estado="carregando"] .player-controles {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.player-limpo .player-controles:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.player-limpo.ocioso .player-camada {
+  cursor: none;
+}
+
+.player-botao {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.player-botao:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.player-botao:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 1px;
+}
+
+.player-botao svg {
+  width: 22px;
+  height: 22px;
+}
+
+.player-tempo {
+  flex: 0 0 auto;
+  min-width: 7.6ch;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+/* A barra do tempo: um <input type="range">, que já vem com teclado e leitor de tela. */
+.player-barra {
+  flex: 1 1 auto;
+  min-width: 36px;
+  height: 28px;
+  margin: 0 4px;
+  background: transparent;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.player-barra::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 4px;
+  background: linear-gradient(to right, #fff var(--feito, 0%), rgba(255, 255, 255, 0.32) var(--feito, 0%));
+}
+
+.player-barra::-webkit-slider-thumb {
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.player-barra::-moz-range-track {
+  height: 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.player-barra::-moz-range-progress {
+  height: 4px;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.player-barra::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 999px;
+  background: #fff;
+}
+
+.player-barra:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Tela cheia: o player ocupa a tela, e o vídeo (em pé ou deitado) se ajusta dentro. */
+.player-limpo:fullscreen {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  aspect-ratio: auto;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+}
+
+.player-limpo:-webkit-full-screen {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  aspect-ratio: auto;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+}
+
+/* Sem a API do YouTube (bloqueador, rede ruim): volta o player do YouTube, inteiro e com os
+   controles dele — feio, mas a aula toca. */
+.player-limpo.sem-api iframe {
+  top: 0;
+  height: 100%;
+}
+
+.player-limpo.sem-api .player-capa,
+.player-limpo.sem-api .player-camada,
+.player-limpo.sem-api .player-centro,
+.player-limpo.sem-api .player-controles {
+  display: none;
 }
 
 /* ================================================================== */
@@ -913,6 +1257,393 @@ body.sala {
   letter-spacing: 0.12em;
   text-transform: uppercase;
   white-space: nowrap;
+}
+
+/* ================================================================== */
+/* A vitrine (os cards que abrem um por dia)                          */
+/* ================================================================== */
+
+/*
+ * A vitrine das mini aulas: os cards deslizam de lado, em qualquer tela — no celular com o dedo, no
+ * computador com as setas. Ela vai de borda a borda da TELA (o js/replay.js mede quanto sobra de
+ * cada lado da coluna e põe em --borda), com o primeiro card alinhado à coluna do texto e as
+ * pontas se apagando na borda: a vitrine continua para os lados. O número da marca mora SEMPRE por
+ * baixo da thumb — thumb que ainda não subiu não deixa buraco, vira capa.
+ */
+.conteudos-apoio {
+  margin: -8px 0 16px;
+  color: var(--ink-soft);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.vitrine {
+  /* Card deitado (16:9) por padrão; os Shorts (9:16) em .vitrine--vertical. */
+  --card: min(72vw, 300px);
+  --altura-arte: calc(var(--card) * 9 / 16);
+  position: relative;
+  margin-inline: calc(-1 * var(--borda, var(--gutter)));
+}
+
+.vitrine--vertical {
+  --card: clamp(148px, 40vw, 212px);
+  --altura-arte: calc(var(--card) * 16 / 9);
+}
+
+.conteudos-lista {
+  --apaga: min(var(--borda, var(--gutter)), 72px);
+  position: relative;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: var(--card);
+  gap: 16px;
+  margin: 0;
+  padding: 10px var(--borda, var(--gutter)) 16px;
+  list-style: none;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x mandatory;
+  scroll-padding-inline: var(--borda, var(--gutter));
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 var(--apaga), #000 calc(100% - var(--apaga)), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 var(--apaga), #000 calc(100% - var(--apaga)), transparent 100%);
+}
+
+.conteudos-lista::-webkit-scrollbar {
+  display: none;
+}
+
+.conteudo {
+  min-width: 0;
+  scroll-snap-align: start;
+}
+
+/* As setas: em cima da borda da coluna, no meio das thumbs. Só onde há mouse — no toque, o dedo. */
+.vitrine-seta {
+  position: absolute;
+  z-index: 2;
+  top: calc(10px + var(--altura-arte) / 2 - 24px);
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: 1px solid var(--fio);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--parchment-soft) 94%, transparent);
+  box-shadow: 0 14px 30px -16px rgba(57, 43, 56, 0.6);
+  color: var(--ember);
+  cursor: pointer;
+  transition:
+    transform 140ms ease,
+    opacity 160ms ease,
+    background 140ms ease;
+}
+
+.vitrine-seta--antes {
+  left: max(6px, calc(var(--borda, var(--gutter)) - 24px));
+}
+
+.vitrine-seta--depois {
+  right: max(6px, calc(var(--borda, var(--gutter)) - 24px));
+}
+
+.vitrine-seta:hover:not(:disabled) {
+  background: #fff;
+  transform: scale(1.06);
+}
+
+/* No começo (ou no fim) da vitrine, a seta daquele lado some. */
+.vitrine-seta:disabled {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.vitrine-seta:focus-visible {
+  outline: 2.5px solid var(--ember);
+  outline-offset: 3px;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .vitrine-seta {
+    display: none;
+  }
+}
+
+/* Os pontinhos: um por aula; acesos, os que estão na tela. Cada um leva até a aula dele. */
+.vitrine-pontos {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 2px;
+  margin: 0;
+}
+
+.vitrine-ponto {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.vitrine-ponto::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ember) 26%, transparent);
+  transition:
+    width 180ms ease,
+    background 180ms ease;
+}
+
+.vitrine-ponto[aria-current="true"]::before {
+  width: 18px;
+  background: var(--ember);
+}
+
+.vitrine-ponto:focus-visible {
+  outline: 2.5px solid var(--ember);
+  outline-offset: 0;
+}
+
+/* O card em destaque (a live): sozinho, na largura da coluna. */
+.conteudos-destaque {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conteudos-destaque .conteudo-numero {
+  font-size: clamp(56px, 16vw, 112px);
+}
+
+.conteudo-cartao {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+}
+
+button.conteudo-cartao,
+a.conteudo-cartao {
+  cursor: pointer;
+}
+
+.conteudo-arte {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--fio);
+  border-radius: 12px;
+  /* O mesmo escuro de ameixa da foto de abertura: card sem arte parece capa, e não erro. */
+  background: radial-gradient(120% 120% at 50% 0%, color-mix(in oklab, var(--ember) 30%, var(--ink)) 0%, var(--ink) 75%);
+  box-shadow: var(--sombra-cartao);
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease;
+}
+
+/* O Short: a thumb em pé. */
+.conteudo--vertical .conteudo-arte {
+  aspect-ratio: 9 / 16;
+}
+
+.conteudo-arte img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.conteudo-numero {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: color-mix(in oklab, var(--gold-soft) 80%, transparent);
+  font-size: clamp(40px, 11vw, 60px);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.04em;
+}
+
+/* O selo da aula do dia (liberada há menos de 24 horas). À direita: na esquerda da thumb mora o logo. */
+.conteudo-novo {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: var(--parchment-soft);
+  box-shadow: 0 6px 16px -10px rgba(0, 0, 0, 0.6);
+  color: var(--ember-deep);
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* O botão redondo no canto: play no liberado, seta no link, cadeado no resto. */
+.conteudo-icone {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  background: var(--parchment-soft);
+  box-shadow: 0 10px 22px -12px rgba(0, 0, 0, 0.7);
+  color: var(--ember);
+}
+
+.conteudo-icone svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* Trancado: a thumb aparece (é a vitrine), mas em preto e branco, e o cadeado diz por quê. */
+.conteudo[data-estado="trancado"] .conteudo-arte img,
+.conteudo[data-estado="chegando"] .conteudo-arte img {
+  filter: grayscale(1) brightness(0.94);
+}
+
+/* Sem arte ainda, quem apaga é o número: o card que abre hoje não pode parecer igual ao de amanhã. */
+.conteudo[data-estado="trancado"] .conteudo-numero,
+.conteudo[data-estado="chegando"] .conteudo-numero {
+  color: color-mix(in oklab, var(--gold-soft) 38%, transparent);
+}
+
+.conteudo[data-estado="trancado"] .conteudo-icone,
+.conteudo[data-estado="chegando"] .conteudo-icone {
+  background: color-mix(in oklab, var(--ink) 72%, transparent);
+  color: var(--gold-soft);
+}
+
+.conteudo-texto {
+  display: grid;
+  /* A coluna pode ser mais estreita que a palavra mais longa do título: sem isto, um
+     "Antibioticoterapia" num card de 134px atravessa o card do lado. */
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 3px;
+  min-width: 0;
+}
+
+.conteudo-rotulo {
+  color: var(--ember);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.conteudo-titulo {
+  color: var(--ink);
+  font-size: 15.5px;
+  font-weight: 700;
+  line-height: 1.3;
+  overflow-wrap: break-word;
+  hyphens: auto;
+}
+
+.conteudo-estado {
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.conteudo[data-estado="liberado"] .conteudo-estado {
+  color: var(--ember);
+  font-weight: 700;
+}
+
+button.conteudo-cartao:hover .conteudo-arte,
+a.conteudo-cartao:hover .conteudo-arte {
+  transform: translateY(-3px);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.7) inset,
+    0 22px 40px -24px rgba(57, 43, 56, 0.55);
+}
+
+/* O que está tocando no quadro lá de cima. */
+.conteudo-cartao[aria-current="true"] .conteudo-arte {
+  box-shadow:
+    0 0 0 3px var(--parchment),
+    0 0 0 5px var(--gold);
+}
+
+/*
+ * O foco é OUTLINE na arte, e não box-shadow: a sombra do hover (mais específica) apagaria o anel
+ * com o ponteiro em cima, e o alto contraste do Windows remove sombra mas desenha outline.
+ */
+.conteudo-cartao:focus-visible {
+  outline: none;
+}
+
+.conteudo-cartao:focus-visible .conteudo-arte {
+  outline: 2.5px solid var(--ember);
+  outline-offset: 3px;
+}
+
+/* A fileira transbordando recebe foco (é o que deixa o teclado rolá-la no Safari). Anel por
+   dentro: ela vai de borda a borda da tela, e um anel por fora seria cortado. */
+.conteudos-lista:focus-visible {
+  outline: 2.5px solid var(--ember);
+  outline-offset: -2.5px;
+  border-radius: 12px;
+}
+
+/* O caminho de volta, quando um conteúdo tomou o quadro de uma aula que tem vídeo. */
+.abertura-voltar {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  margin: 10px auto 0;
+  padding: 0 14px;
+  border: 0;
+  border-bottom: 2px solid var(--gold);
+  background: transparent;
+  color: var(--ember-deep);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.abertura-voltar::before {
+  content: "\2190";
+  margin-right: 8px;
+  font-size: 15px;
+  letter-spacing: 0;
+}
+
+.abertura-voltar:hover {
+  border-bottom-color: var(--ember);
+}
+
+.abertura-voltar:focus-visible {
+  outline: 2.5px solid var(--ember);
+  outline-offset: 3px;
 }
 
 /* ================================================================== */
@@ -1346,11 +2077,18 @@ body.assistindo .luz b {
   }
   .abertura-play,
   .material-link,
+  .conteudo-arte,
+  .vitrine-seta,
+  .vitrine-ponto::before,
+  .player-capa,
+  .player-controles,
   .expediente,
   .colofao {
     transition: none;
   }
-  .abertura-quadro:hover .abertura-play {
+  .abertura-quadro:hover .abertura-play,
+  button.conteudo-cartao:hover .conteudo-arte,
+  a.conteudo-cartao:hover .conteudo-arte {
     transform: none;
   }
 }
@@ -1363,7 +2101,8 @@ body.assistindo .luz b {
   .sumario,
   .compositor,
   .porta,
-  .certificado {
+  .certificado,
+  .conteudo-arte {
     border-color: var(--ink-soft);
   }
 }

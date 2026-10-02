@@ -314,6 +314,18 @@ test("?lista= escolhe de qual gravação a aba lê — e a da sala de aula lê s
   assert.equal(corpo.aviso_ativo, false);
 });
 
+test("a aba da sala do GPS lê só a pesquisa dela (o id da aba é o da sala, a consulta é a pesquisa)", async () => {
+  const { get, consultas } = await logado({ contar: () => 2 });
+  const corpo = await (await get("/api/painel/perfis?lista=replay-aula-gps")).json();
+
+  assert.equal(corpo.lista, "replay-aula-gps");
+  assert.ok(consultas().length > 0);
+  for (const chamada of consultas()) {
+    assert.equal(chamada.params.get("pesquisa"), "in.(pagina-de-aula-gps)", "nem a aferição nem o ICP entram");
+  }
+  assert.equal(corpo.aviso_ativo, false);
+});
+
 test("a aba da sala não acusa aviso pendente nem com o webhook configurado", async () => {
   const { get } = await logado({ contar: () => 1, perfilWebhookUrl: "https://n8n-de-teste.invalid/webhook/perfil-atualizado" });
   const daSala = await (await get("/api/painel/perfis?lista=replay-afericao")).json();

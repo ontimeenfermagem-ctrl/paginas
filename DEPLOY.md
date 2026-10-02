@@ -523,7 +523,7 @@ A sala é `https://SEU-DOMINIO/replay-afericao`. A pessoa cai na página, preenc
 | Vimeo | `vimeo` | o número (`123456789`) |
 | Panda Video | `panda` | o endereço inteiro do player (`https://player-vz-….tv.pandavideo.com.br/…/embed`) |
 
-Enquanto o id estiver vazio, a página mostra "estamos preparando o replay desta aula" em vez de um quadro preto. O player é montado **no clique do play**: antes disso nada de terceiro carrega, e a `frame-src` da sala (a única página do site que tem uma) aceita só esses três hosts.
+Enquanto o id estiver vazio, a página mostra "estamos preparando o replay desta aula" em vez de um quadro preto. O player é montado **no clique do play**: antes disso nada de terceiro carrega, e a `frame-src` das salas (as únicas páginas do site que têm uma) aceita só esses três hosts.
 
 **Para publicar o material**, preencha o `link` de cada item de `material.itens` (Drive, site, onde for — só `https`). Item sem link não é desenhado; lista inteira sem link e a seção não aparece.
 
@@ -542,7 +542,29 @@ Hospedado por nós: o texto fica no nosso banco (`replay_comentarios`, seção 7
 
 Para desligar o mural de uma sala: `comentarios.ativo: false` no config.
 
-**Sala nova** (outra aula, outro evento): uma entrada em `PAGINAS` do `js/replay-config.js`, com `rota`, `pesquisa` (um id que não seja de outra gravação) e `nome`, mais o arquivo `<rota>.html` — a rota, a CSP, o endpoint de inscrição e a aba do painel nascem sozinhos.
+### A sala da Imersão GPS: as mini aulas, o player limpo e a live
+
+A segunda sala é `https://SEU-DOMINIO/pagina-de-aula-gps` (`PAGINAS["aula-gps"]` no `js/replay-config.js`): a mesma porta da aferição (nome, WhatsApp, e-mail e a profissão; lembrada no aparelho por 90 dias), com os leads na aba **Sala de aula — Imersão GPS** do painel. Embaixo do player fica a **vitrine** das 6 mini aulas (Shorts do YouTube, em pé), que abrem uma por dia às 20h; logo embaixo dela, os **comentários**; e depois, em destaque, a **live principal** (07/10, 20h). O nome em cima de cada card vem de `conteudos.rotulo` ("Mini aula" → "Mini aula 1", "Mini aula 2"…). Cada item de `conteudos.itens` tem:
+
+| Campo | O que é |
+|---|---|
+| `titulo` | o nome da aula no card (vazio = o card mostra só "Mini aula N") |
+| `imagem` | a thumb, salva no projeto: `img/aula-gps/mini-aula-N.jpg` (Short: 9:16, 720×1280; `.jpg`, `.png` ou `.webp`, nome minúsculo, sem espaço nem acento). É também a capa do player quando a aula toca lá. Enquanto o arquivo não existe, o card desenha o número (ou a `marca`) sobre a cor da marca. Imagem fica um dia no cache do navegador: para **trocar** uma thumb, suba com nome novo (`mini-aula-1b.jpg`) e troque aqui |
+| `liberaEm` | quando o card abre, em Brasília e sempre com o fuso: `2026-10-03T20:00:00-03:00`. Data sem fuso ou torta = card trancado |
+| `video` | o vídeo (do YouTube, **só o id**: em `youtube.com/shorts/u7VIU4L28co`, é `u7VIU4L28co`) — toca no player lá de cima, sem sair da página |
+| `link` | em vez de vídeo, um endereço `https` (PDF, post, live de fora): abre em outra aba |
+| `formato` | `"vertical"` (Short) ou `"horizontal"`; sem ele, vale o `conteudos.formato` (na sala do GPS, `"vertical"`) |
+| `rotulo`, `destaque`, `marca` | para o card que não é da série (a live): o nome em cima do título, o bloco largo embaixo dos comentários, e o texto grande enquanto a thumb não sobe ("07/10") |
+
+**A vitrine** desliza de lado em qualquer tela: no celular com o dedo, no computador com as setas (que só aparecem onde há mouse); os pontinhos embaixo dizem onde ela está e levam a cada aula. Antes da hora, o card fica em **preto e branco, com cadeado e sem clique**, dizendo quando abre: o do próximo dia conta o tempo ("Abre em 1h 05min"), o de amanhã diz "Abre amanhã, às 20h", e os outros o dia ("Abre domingo, 04/10, às 20h"). Liberado, perde o cadeado e o preto e branco: fica colorido, com o play, e o selo **Novo** nas primeiras 24 horas — mesmo para quem ainda não preencheu a porta; tocado assim, ele leva ao formulário e **começa a tocar** assim que a pessoa preenche. Passou da hora sem vídeo nem link, continua trancado e diz "Em breve". Quem está com a página aberta na hora vê o card destravar sozinho — e, se não estiver assistindo nada, o player passa para a aula nova.
+
+**O player limpo** (`playerLimpo: true` na sala; só vídeo do YouTube): ninguém vê nem toca nada do YouTube. O vídeo toca sem os controles dele, com o iframe maior que o quadro (o título e o logo do YouTube ficam fora da área visível) e uma camada da página por cima de tudo; pausado ou no fim, a thumb da aula cobre o vídeo (e as sugestões do YouTube); nos primeiros segundos de cada play, o botão de pausa da página cobre o do YouTube. Os controles são os da Escola: tocar e pausar, a barra do tempo, o som e a tela cheia (onde o navegador deixa — no iPhone, não). Duas saídas de emergência: quando o navegador não deixa o vídeo começar sozinho (o iPhone, às vezes), a dica "Toque no vídeo para começar" aparece e o toque vai direto para o vídeo (é o único jeito de o iPhone tocar com som); e, se a API do YouTube não carregar em 6 segundos (bloqueador, rede ruim), volta o player do YouTube com os controles dele — a aula toca do mesmo jeito. O próprio YouTube tenta mandar estatísticas para servidores de fora: a CSP da sala recusa, e o console mostra esses avisos sem nenhum efeito no vídeo.
+
+Enquanto a aula (`aulas[0]`) não tem vídeo, o player toca a mini aula liberada mais recente, e antes disso mostra a capa da live (`aulas[0].capa`) com o `aviso`. A página de venda promete o replay da imersão por 48 h **só para quem comprou**: esta sala abre para qualquer lead, então o vídeo da aula (e o link da live) só entram aqui com o ok do cliente.
+
+A liberação é na tela, pelo relógio: o `js/replay-config.js` é público, e quem abrir o código vê o que já estiver cadastrado. Conteúdo que não pode vazar antes do dia entra no config só no dia. Depois de mexer: `npm test && node --test tests/e2e/aula-gps.e2e.mjs`.
+
+**Sala nova** (outra aula, outro evento): uma entrada em `PAGINAS` do `js/replay-config.js` com a **chave igual ao `id`** (é pela chave que o servidor acha a sala quando o formulário chega), `rota`, `pesquisa` (um id que não seja de outra gravação, só `a-z`, `0-9`, `-` e `_`, até 60 caracteres — é a régua do banco para o mural) e `nome`, mais o arquivo `<rota>.html` — a rota, a CSP, o endpoint de inscrição e a aba do painel nascem sozinhos. O `tests/replay-gps.test.mjs` confere tudo isso para toda sala do config.
 
 ---
 

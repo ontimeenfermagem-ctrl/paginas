@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!--
+      Sala de aula da Imersão GPS — a mesma matéria de revista da /replay-afericao.
+
+      Esqueleto só. Todo o texto, a aula, as mini aulas (a vitrine), a live, o mural e o certificado
+      vêm de js/replay-config.js (PAGINAS["aula-gps"]), e js/replay.js desenha. Mudar uma mini aula,
+      a data dela ou a thumb é mexer no config. A matéria da aferição ("A aula" + texto) não existe
+      aqui de propósito: sem texto, ela era só um título solto entre a vitrine e os comentários.
+
+      A foto de abertura aparece SEMPRE, trancada, e os cards também: é a vitrine que dá vontade. O
+      formulário de acesso libera a sala, grava no mesmo lugar de todo lead do projeto e aparece no
+      /painel, na aba "Sala de aula — Imersão GPS", com as UTMs.
+    -->
+    <title>Imersão GPS — sala de aula | Escola Enfermagem de Valor</title>
+    <meta
+      name="description"
+      content="A sala da Imersão GPS do Plantão Sem Medo: os conteúdos de aquecimento, um por dia, e a aula da Escola Enfermagem de Valor."
+    />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="theme-color" content="#f4ebdd" />
+    <meta name="format-detection" content="telephone=no" />
+
+    <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/img/apple-touch-icon.png" />
+    <link rel="preload" href="/fonts/parkinsans-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/img/iza-avatar.jpg" as="image" />
+    <!-- A base (tokens, campos, botão) e os cartões de profissão vêm das folhas que já existem;
+         replay.css acrescenta a revista e os cards dos conteúdos. -->
+    <link rel="stylesheet" href="/css/inscricao.css" />
+    <link rel="stylesheet" href="/css/atualizacao.css" />
+    <link rel="stylesheet" href="/css/replay.css" />
+    <noscript><style>.sala-com-js{display:none !important}.sala-sem-js{display:block !important}</style></noscript>
+
+    <script src="/js/lead-rules.js" defer></script>
+    <script src="/js/pesquisa-config.js" defer></script>
+    <script src="/js/replay-config.js" defer></script>
+    <script src="/js/replay.js" defer></script>
+  </head>
+  <body class="grao sala">
+    <!-- A luz que atravessa o papel. Decoração: fora da árvore de acessibilidade. -->
+    <div class="luz" aria-hidden="true"><i></i><b></b></div>
+
+    <a class="pular-link" href="#conteudo">Pular para o conteúdo</a>
+
+    <header class="expediente">
+      <div class="expediente-linha">
+        <img class="expediente-marca" src="/img/ev-logo-color.png" alt="Escola Enfermagem de Valor" width="414" height="252" />
+        <p class="expediente-edicao" id="expediente-edicao"></p>
+        <nav class="expediente-nav" aria-label="Seções da matéria" id="sala-nav" hidden>
+          <a href="#aula">A aula</a>
+          <a href="#conteudos" id="nav-conteudos" hidden>Mini aulas</a>
+          <a href="#material" id="nav-material" hidden>Material</a>
+          <a href="#mural" id="nav-mural" hidden>Comentários</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="conteudo" class="revista">
+      <!-- ---------------------------------------------------------------- A capa -->
+      <section class="capa" aria-labelledby="sala-titulo">
+        <p class="eyebrow" id="sala-eyebrow"></p>
+        <h1 class="capa-titulo" id="sala-titulo" tabindex="-1"></h1>
+        <p class="capa-apoio" id="sala-apoio"></p>
+        <div class="capa-credito" id="capa-credito"></div>
+      </section>
+
+      <!-- ------------------------------------------------- A foto de abertura (o vídeo) -->
+      <section class="abertura sangra" id="aula" aria-label="A aula">
+        <div id="abertura-quadro"></div>
+      </section>
+      <p class="abertura-legenda" id="abertura-legenda"></p>
+
+      <!-- A oferta: aparece quando a aula chega no momento dela (js/replay-config.js, oferta). -->
+      <div class="oferta" id="oferta" hidden>
+        <a class="botao-checkout oferta-botao" id="oferta-botao" href="#" target="_blank" rel="noopener">
+          <span class="botao-checkout-texto" id="oferta-rotulo"></span>
+        </a>
+      </div>
+
+      <!-- ------------------------------------------------- O que você vai ver -->
+      <aside class="sumario" id="sumario" hidden>
+        <p class="sumario-rotulo" id="sumario-rotulo">O que você vai ver</p>
+        <ol id="sumario-lista"></ol>
+      </aside>
+
+      <div class="sala-com-js">
+        <!-- ----------------------------------------------- A porta (o formulário) -->
+        <div class="porta" id="porta">
+          <p class="porta-rotulo" id="porta-rotulo"></p>
+          <h2 id="porta-titulo"></h2>
+          <p class="porta-apoio" id="porta-apoio"></p>
+
+          <form class="ins-form" id="form-acesso" novalidate>
+            <div class="campo" data-campo="nome">
+              <label for="campo-nome">Nome completo</label>
+              <input
+                id="campo-nome"
+                name="nome"
+                type="text"
+                autocomplete="name"
+                autocapitalize="words"
+                enterkeyhint="next"
+                maxlength="120"
+                aria-describedby="erro-nome"
+                placeholder="Como você se chama?"
+              />
+              <p class="campo-erro" id="erro-nome" role="alert" hidden></p>
+            </div>
+
+            <div class="campo" data-campo="whatsapp">
+              <label for="campo-whatsapp">WhatsApp com DDD</label>
+              <input
+                id="campo-whatsapp"
+                name="whatsapp"
+                type="tel"
+                inputmode="numeric"
+                autocomplete="tel-national"
+                enterkeyhint="next"
+                maxlength="25"
+                aria-describedby="erro-whatsapp"
+                placeholder="(00) 00000-0000"
+              />
+              <p class="campo-erro" id="erro-whatsapp" role="alert" hidden></p>
+            </div>
+
+            <div class="campo" data-campo="email">
+              <label for="campo-email">E-mail</label>
+              <input
+                id="campo-email"
+                name="email"
+                type="email"
+                inputmode="email"
+                autocomplete="email"
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck="false"
+                enterkeyhint="done"
+                maxlength="254"
+                aria-describedby="erro-email"
+                placeholder="seuemail@exemplo.com"
+              />
+              <p class="campo-erro" id="erro-email" role="alert" hidden></p>
+              <div class="sugestao" id="sugestao-email" role="group" aria-labelledby="sugestao-texto" hidden>
+                <p id="sugestao-texto">Você quis dizer <strong id="sugestao-valor"></strong>?</p>
+                <div class="sugestao-botoes">
+                  <button type="button" class="sugestao-sim" id="sugestao-sim">Sim, corrigir</button>
+                  <button type="button" class="sugestao-nao" id="sugestao-nao">Não, meu e-mail está certo</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="campo" data-campo="perfil">
+              <p class="opcoes-titulo" id="perfil-titulo"></p>
+              <div class="opcoes" id="opcoes-perfil" role="radiogroup" aria-labelledby="perfil-titulo"></div>
+              <p class="campo-erro" id="erro-perfil" role="alert" hidden></p>
+            </div>
+
+            <p class="form-status" id="acesso-status" role="alert"></p>
+
+            <button type="submit" class="botao-checkout" id="botao-acesso">
+              <span class="botao-checkout-texto" id="botao-acesso-texto">QUERO ENTRAR NA SALA</span>
+              <span class="botao-carregando" aria-hidden="true"></span>
+            </button>
+
+            <p class="porta-seguro">
+              <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+                <path
+                  d="M7 11V8a5 5 0 0 1 10 0v3M5 11h14v9H5z"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+              <span>Seus dados ficam só com a Escola. Sem spam.</span>
+            </p>
+            <p class="porta-conversa" id="porta-conversa" hidden></p>
+          </form>
+        </div>
+
+        <!-- ----------------------------------------------- A vitrine das mini aulas -->
+        <!-- Desliza de lado em qualquer tela: no celular com o dedo, no computador com as setas.
+             As setas e os pontinhos ficam escondidos até o js/replay.js medir a vitrine. -->
+        <div class="fio-rotulo" id="fio-conteudos" hidden><span id="conteudos-rotulo">Mini aulas</span></div>
+        <section class="conteudos" id="conteudos" aria-labelledby="conteudos-rotulo" hidden>
+          <p class="conteudos-apoio" id="conteudos-apoio" hidden></p>
+          <div class="vitrine" id="vitrine">
+            <ol class="conteudos-lista" id="conteudos-lista" aria-labelledby="conteudos-rotulo"></ol>
+            <button type="button" class="vitrine-seta vitrine-seta--antes" id="vitrine-antes" aria-label="Ver as aulas anteriores" hidden>
+              <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+                <path d="m14.5 5-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </button>
+            <button type="button" class="vitrine-seta vitrine-seta--depois" id="vitrine-depois" aria-label="Ver as próximas aulas" hidden>
+              <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+                <path d="m9.5 5 7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </button>
+          </div>
+          <div class="vitrine-pontos" id="vitrine-pontos" hidden></div>
+        </section>
+
+        <!-- ----------------------------------------------- Cartas das alunas (logo embaixo das mini aulas) -->
+        <div class="fio-rotulo" id="fio-mural" hidden><span id="mural-rotulo"></span></div>
+        <section id="mural" aria-labelledby="mural-rotulo" hidden>
+          <p class="mural-apoio" id="mural-apoio"></p>
+          <div id="mural-compositor"></div>
+          <ol class="cartas" id="cartas"></ol>
+          <button type="button" class="mural-mais" id="mural-mais" hidden>Ver comentários mais antigos</button>
+        </section>
+
+        <!-- ----------------------------------------------- A live (o card em destaque) -->
+        <div class="fio-rotulo" id="fio-destaque" hidden><span>A live</span></div>
+        <ol class="conteudos-destaque" id="conteudos-destaque" aria-label="A live principal" hidden></ol>
+
+        <!-- ----------------------------------------------- Para levar -->
+        <div class="fio-rotulo" id="fio-material" hidden><span id="material-rotulo">Para levar</span></div>
+        <p class="material-apoio" id="material-apoio" hidden></p>
+        <ul class="material-lista" id="material-lista" hidden></ul>
+
+        <!-- ----------------------------------------------- Certificado (escondido) -->
+        <div class="fio-rotulo" id="fio-certificado" hidden><span>Certificado</span></div>
+        <section class="certificado" id="certificado" aria-labelledby="certificado-titulo" hidden>
+          <div>
+            <h2 id="certificado-titulo"></h2>
+            <p id="certificado-apoio"></p>
+            <a class="botao-checkout" id="certificado-cta" href="#" target="_blank" rel="noopener noreferrer">
+              <span class="botao-checkout-texto" id="certificado-cta-texto"></span>
+            </a>
+          </div>
+          <!-- Sem src: a arte vem do config (certificado.imagem) só quando a seção liga. -->
+          <img id="certificado-imagem" alt="Modelo do certificado de participação" />
+        </section>
+      </div>
+
+      <!-- Sem JavaScript: a sala não abre, e a página diz o que fazer em vez de ficar vazia. -->
+      <div class="sala-sem-js" style="display: none">
+        <p class="sala-aviso">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path
+              d="M12 8v5m0 3.5v.5M10.3 3.9 2.6 17.4A2 2 0 0 0 4.3 20.4h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          <span>
+            Para abrir a sala, esta página precisa do JavaScript do navegador. Se você abriu pelo Instagram ou pelo
+            WhatsApp, toque nos três pontinhos e escolha “Abrir no navegador”.
+          </span>
+        </p>
+      </div>
+    </main>
+
+    <footer class="colofao">
+      <img src="/img/ev-icone-color.png" alt="" width="155" height="155" />
+      <p id="colofao-texto"></p>
+    </footer>
+
+    <div class="sr-only" id="sala-aviso" aria-live="polite"></div>
+  </body>
+</html>
