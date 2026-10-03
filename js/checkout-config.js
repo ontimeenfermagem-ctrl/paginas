@@ -1,5 +1,6 @@
 /*
- * checkout-config.js — as páginas de inscrição que levam a um checkout da Hotmart.
+ * checkout-config.js — as páginas de inscrição: as que levam a um checkout da Hotmart e as de
+ * captação gratuita (sem checkout: só o contato e as UTMs, para o painel).
  *
  * ESTE É O ÚNICO ARQUIVO PARA MUDAR LINK DE CHECKOUT, ROTA OU TEXTO DESSAS PÁGINAS.
  * A página (js/inscricao.js), o servidor (rotas, gravação, webhook de venda) e o painel leem daqui.
@@ -36,8 +37,10 @@
    *                              nenhum para ela; só libera o POST /api/inscricao vindo de lá (CORS).
    *   checkout                 → o link do checkout, com a oferta (off=) e o modo que o cliente usa.
    *                              A página pode pedir outra oferta do MESMO produto (troca de lote):
-   *                              ver baseDoCheckout.
-   *   sck                      → qual UTM vira o `sck` (utm_term ou utm_content).
+   *                              ver baseDoCheckout. null = captação gratuita (temCheckout): a
+   *                              inscrição é gravada sem link, não há sck nem venda, e a aba do
+   *                              painel mostra só os inscritos e as UTMs.
+   *   sck                    → qual UTM vira o `sck` (utm_term ou utm_content).
    *   emailSomenteComBr        → true = o e-mail precisa terminar em .com ou .com.br.
    *   hotmart.ofertas/produtos → como o aviso de venda da Hotmart é reconhecido como DESTA página:
    *                              pelo código da oferta (purchase.offer.code, o off= do link) ou pelo
@@ -90,6 +93,22 @@
       // O id numérico do produto aparece no primeiro aviso de venda (compras.produto_id): cole aqui
       // quando souber. Até lá, a oferta basta para a venda cair nesta página.
       hotmart: Object.freeze({ ofertas: Object.freeze(["3yiw3399"]), produtos: Object.freeze([]) })
+    }),
+    "bf-out-ls-26": Object.freeze({
+      id: "bf-out-ls-26",
+      // O endereço que já está no ar no outro site e nos anúncios, com as maiúsculas dele.
+      rota: "/BF_out_LS_26-inscricao-a",
+      origem: "https://io.escolaenfermagemdevalor.com.br",
+      nome: "Black Friday — lista VIP",
+      produto: "Black Friday do Vitalício (captação gratuita)",
+      // Captação gratuita: a página leva para o grupo, e não para um checkout. Quem manda a inscrição
+      // para cá é o SERVIDOR do outro site (bf-leads.js), junto com a planilha e o n8n de lá.
+      checkout: null,
+      // Sem checkout, o sck não vai a lugar nenhum; fica o padrão só para a forma da entrada.
+      sck: "utm_term",
+      // A mesma régua da página: qualquer domínio real (ela chama emailError sem somenteComBr).
+      emailSomenteComBr: false,
+      hotmart: Object.freeze({ ofertas: Object.freeze([]), produtos: Object.freeze([]) })
     })
   });
 
@@ -107,6 +126,11 @@
   function paginaPorId(id) {
     const chave = String(id || "");
     return Object.prototype.hasOwnProperty.call(PAGINAS, chave) ? PAGINAS[chave] : null;
+  }
+
+  /** A página leva a um checkout? false = captação gratuita: sem link, sem sck, sem venda. */
+  function temCheckout(pagina) {
+    return Boolean(pagina && typeof pagina.checkout === "string" && pagina.checkout);
   }
 
   /** A UTM que vira `sck` nesta página (utm_term se a página não disser, ou disser algo estranho). */
@@ -289,6 +313,7 @@
     paginaDaRota,
     paginaPorId,
     sckDaPagina,
+    temCheckout,
     montarUrlCheckout,
     ofertaDoLink,
     baseDoCheckout,

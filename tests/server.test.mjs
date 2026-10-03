@@ -19,6 +19,7 @@ import { after, afterEach, before, test } from "node:test";
 import vm from "node:vm";
 import { gunzipSync, brotliDecompressSync } from "node:zlib";
 import {
+  COLUNAS_CSV_INSCRICOES,
   createServerApp,
   respostasLegiveis,
   calcularPosicao,
@@ -2391,6 +2392,92 @@ test("Imersão GPS: grava pagina imersao-gps; o checkout é o do GPS e o sck é 
     fbclid: "IwAR-gps",
     gclid: null
   });
+});
+
+/*
+ * A lista VIP da Black Friday (captação gratuita, sem checkout). Quem manda é o SERVIDOR do outro
+ * site (bf-leads.js do whatsapp-atendimento-centralizado): JSON, sem Origin, sem id nem visitante.
+ */
+const PAGINA_BF = CHECKOUT.PAGINAS["bf-out-ls-26"];
+
+function corpoBf(extra = {}) {
+  return {
+    pagina: PAGINA_BF.id,
+    contato: { nome: "Bia Ramos", whatsapp: "(31) 98877-6655", email: "bia@hospital.org" },
+    rastreio: {
+      utm_source: "facebook",
+      utm_medium: "cpc",
+      utm_campaign: "black-outubro-26",
+      utm_content: "criativo-bf-01",
+      utm_term: "publico-quente",
+      dispositivo: "mobile",
+      page_url: `${PAGINA_BF.origem}${PAGINA_BF.rota}?utm_source=facebook`
+    },
+    ...extra
+  };
+}
+
+test("Black Friday: o servidor do outro site manda em JSON sem Origin; grava sem checkout, responde checkout null e não avisa o n8n", async () => {
+  const backend = backendInscricao();
+  // Mesmo com o webhook do GPS ligado: a Black Friday já vai ao n8n pelo servidor de lá.
+  const appUrl = await listen(
+    app({ backend, webhooksInscricao: { "imersao-gps": "https://n8n.exemplo.com.br/webhook/gps-outubro" }, webhookEsperasMs: [0] }).server
+  );
+
+  const response = await postJson(appUrl, "/api/inscricao", corpoBf());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, checkout: null });
+  assert.equal(response.headers.get("access-control-allow-origin"), null, "sem Origin, sem CORS");
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(backend.chamadas.length, 1, "só a gravação: nenhum aviso ao n8n");
+  const [chamada] = backend.chamadas;
+  assert.match(chamada.url, /\/rest\/v1\/rpc\/inscricao_salvar$/);
+  assert.deepEqual(chamada.body.p, {
+    id: null,
+    pagina: "bf-out-ls-26",
+    visitante_id: null,
+    nome: "Bia Ramos",
+    whatsapp: "(31) 98877-6655",
+    whatsapp_digits: "31988776655",
+    // A régua da página: qualquer domínio real, como a própria página de lá aceita.
+    email: "bia@hospital.org",
+    checkout_url: null,
+    page_url: `${PAGINA_BF.origem}${PAGINA_BF.rota}?utm_source=facebook`,
+    referrer: null,
+    dispositivo: "mobile",
+    utm_source: "facebook",
+    utm_medium: "cpc",
+    utm_campaign: "black-outubro-26",
+    utm_content: "criativo-bf-01",
+    utm_term: "publico-quente",
+    fbclid: null,
+    gclid: null
+  });
+
+  // Um `checkout` no corpo não cria link nenhum: a página não tem checkout.
+  const comLink = await postJson(appUrl, "/api/inscricao", corpoBf({ checkout: PAGINA_GPS.checkout }));
+  assert.deepEqual(await comLink.json(), { ok: true, checkout: null });
+  assert.equal(backend.chamadas.at(-1).body.p.checkout_url, null);
+});
+
+test("Black Friday: contato inválido volta 422 com as mensagens da régua, sem gravar", async () => {
+  const backend = backendInscricao();
+  const appUrl = await listen(app({ backend }).server);
+  const response = await postJson(appUrl, "/api/inscricao", corpoBf({ contato: { nome: "Bia", whatsapp: "319", email: "bia@" } }));
+  assert.equal(response.status, 422);
+  const corpo = await response.json();
+  assert.equal(corpo.error, "invalid_contact");
+  assert.deepEqual(Object.keys(corpo.campos).sort(), ["email", "nome", "whatsapp"]);
+  assert.equal(backend.chamadas.length, 0);
+});
+
+test("CSV de inscrições: a coluna sck fica vazia na captação gratuita e continua a UTM da página nas outras", () => {
+  const sck = COLUNAS_CSV_INSCRICOES.find((coluna) => coluna.cabecalho === "sck").valor;
+  assert.equal(sck({ pagina: "bf-out-ls-26", utm_term: "publico-quente", utm_content: "criativo-bf-01" }), "");
+  assert.equal(sck({ pagina: "imersao-gps", utm_term: "t", utm_content: "criativo-gps-03" }), "criativo-gps-03");
+  assert.equal(sck({ pagina: "viver-de-furo", utm_term: "criativo-07", utm_content: "c" }), "criativo-07");
+  assert.equal(sck({ pagina: "imersao-gps", checkout_url: "https://pay.hotmart.com/R107667362D?off=l0r77by6&sck=do-link", utm_content: "x" }), "do-link");
 });
 
 test("o sck do GPS é o utm_content e o da Viver de Furo continua o utm_term (mesmo rastreio)", async () => {

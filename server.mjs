@@ -1741,7 +1741,10 @@ async function handleInscricao(request, response, options) {
   const rastreio = normalizarRastreio(body.rastreio);
   // `checkout` = o link do botão que a pessoa tocou. Só vale a oferta dele, e só se for do mesmo
   // produto do config (troca de lote sem mexer aqui); qualquer outra coisa usa o link do config.
-  const checkoutUrl = checkout.urlDoCheckout(pagina, { base: body.checkout, utm: rastreio, contato });
+  // Captação gratuita (a Black Friday) não tem checkout: grava sem link e responde checkout null.
+  const checkoutUrl = checkout.temCheckout(pagina)
+    ? checkout.urlDoCheckout(pagina, { base: body.checkout, utm: rastreio, contato })
+    : null;
 
   const gravada = {
     id: normalizarUuid(body.id),
@@ -2870,7 +2873,15 @@ export const COLUNAS_CSV_INSCRICOES = Object.freeze(
     ["utm_content", (l) => l.utm_content],
     // O sck que foi para a Hotmart: o do link aberto (a pessoa pode ter voltado por outro link, com
     // outra UTM, e aberto o checkout de novo); sem link gravado, a UTM que a página escolheu.
-    ["sck", (l) => sckDoLink(l.checkout_url) || l[checkout.sckDaPagina(checkout.paginaPorId(l.pagina))]],
+    // Captação gratuita não manda nada para a Hotmart: a coluna fica vazia.
+    [
+      "sck",
+      (l) => {
+        const pagina = checkout.paginaPorId(l.pagina);
+        if (pagina && !checkout.temCheckout(pagina)) return "";
+        return sckDoLink(l.checkout_url) || l[checkout.sckDaPagina(pagina)];
+      }
+    ],
     ["fbclid", (l) => l.fbclid],
     ["gclid", (l) => l.gclid],
     ["page_url", (l) => l.page_url],

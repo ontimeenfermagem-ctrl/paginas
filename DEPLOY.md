@@ -364,6 +364,31 @@ A página de venda mora no repositório `whatsapp-atendimento-centralizado` (Exp
 - [ ] Painel > aba **Imersão GPS — ingressos** (rota `io.escolaenfermagemdevalor.com.br/igps_set_lp_26-ingresso`, "sck = utm_content"): 1 inscrito, 1 clique no checkout, 1 compra de inscrito; em "Inscritos por UTM e por dia", "Por conteúdo (sck)" com `criativo-07`; o bloco "Vendas na Hotmart" com 1 venda e, na tabela por `sck`, `criativo-07` = 1 venda, 1 com inscrição; "Compras recentes" com o aviso casado e "sck criativo-07". A aba da Viver de Furo não mostra essa compra.
 - [ ] Apague os testes: `delete from public.compras where transacao = 'HP-TESTE-GPS-1';`, `delete from public.inscricoes where pagina = 'imersao-gps' and email = 'SEU-EMAIL@gmail.com';`.
 
+### Lista VIP da Black Friday (captação gratuita do outro site)
+
+A página `https://io.escolaenfermagemdevalor.com.br/BF_out_LS_26-inscricao-a` também mora no `whatsapp-atendimento-centralizado`, mas não leva a checkout nenhum: a pessoa deixa o contato e vai para o grupo. Em `js/checkout-config.js` ela é a página `bf-out-ls-26`, com `checkout: null` (captação gratuita): a inscrição é gravada sem link, sem `sck` e sem venda, e a aba **Black Friday — lista VIP** do painel mostra só os inscritos, as UTMs, os dias, a lista e o CSV.
+
+Quem manda a inscrição para cá é o **servidor** de lá (`bf-leads.js`), e não o navegador: um `POST /api/inscricao` em JSON, sem `Origin`, em paralelo com a planilha e o n8n de lá. Por isso não há aviso ao n8n **daqui** para esta página (o de lá já avisa o webhook `black-outubro-26`), nem SQL novo (o `inscricoes` aceita página nova do config). Todas as inscrições chegam do mesmo IP, então valem 240 por minuto (o limite do `/api/inscricao`); acima disso, o servidor de lá recebe `429` e tenta de novo até ~4 min depois.
+
+**Ordem de publicação:**
+
+1. **Este servidor (paginas):** publique. Confira que a página já existe aqui (o contato vazio é de propósito: nada é gravado):
+
+   ```bash
+   curl -s -X POST https://lp.escolaenfermagemdevalor.com.br/api/inscricao \
+     -H 'Content-Type: application/json' -d '{"pagina":"bf-out-ls-26","contato":{}}'
+   ```
+
+   Tem que voltar `{"ok":false,"error":"invalid_contact",...}`. Com `"error":"invalid_page"`, o servidor novo ainda não está no ar.
+2. **O outro site:** publique depois (com a cópia nova do `js/checkout-config.js` em `public/igps_set_lp_26-ingresso/js/`). Antes do passo 1, o servidor de lá recebe `422 invalid_page` e o lead fica só na planilha e no n8n (e no log de lá, como `BF_PAINEL_RECUSOU`). `BF_PAINEL_URL=off`, lá, desliga o envio.
+
+**Checklist da Black Friday:**
+
+- [ ] Abrir `https://io.escolaenfermagemdevalor.com.br/BF_out_LS_26-inscricao-a?utm_source=teste&utm_medium=cpc&utm_campaign=deploy&utm_content=criativo-07&utm_term=publico`, preencher com um contato seu e enviar: a página vai para a obrigada.
+- [ ] No Supabase, `select nome, email, whatsapp, utm_source, utm_campaign, utm_content, utm_term, checkout_url from public.inscricoes where pagina = 'bf-out-ls-26' order by criado_em desc limit 5;` mostra a inscrição com as 5 UTMs e `checkout_url` vazio.
+- [ ] Painel > aba **Black Friday — lista VIP** (rota `io.escolaenfermagemdevalor.com.br/BF_out_LS_26-inscricao-a`): título "Inscrições", 1 inscrito, "Principal criativo" `criativo-07`, a pessoa na lista com o WhatsApp clicável, e nada de checkout, compra, Hotmart ou `sck`.
+- [ ] Apague o teste: `delete from public.inscricoes where pagina = 'bf-out-ls-26' and email = 'SEU-EMAIL@gmail.com';`.
+
 ---
 
 ## 5.4 UnniChat — atualização de perfil pelo WhatsApp

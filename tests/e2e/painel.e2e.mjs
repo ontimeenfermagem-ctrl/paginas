@@ -1449,6 +1449,74 @@ cenario("inscricoes", async () => {
     return linha;
   }
 
+  /*
+   * Captação gratuita (a lista VIP da Black Friday): página do config sem checkout. A aba fica só
+   * com o lado do formulário — placar de inscritos, divisões por UTM e por dia (sem a coluna de
+   * compras) e a lista —, sem funil, Hotmart, compras recentes, sck nem selo de compra.
+   */
+  const CAPTACOES = CHK.LISTA.filter((pagina) => !CHK.temCheckout(pagina));
+  confere(CAPTACOES.some((pagina) => pagina.id === "bf-out-ls-26"), "a Black Friday é captação gratuita no config");
+  // O placar escolhe o valor com mais inscritos SEM contar "(sem utm)": não é origem nem criativo.
+  const semUtm = (valor) => valor == null || valor === "" || valor === "(sem utm)";
+  const maisInscritos = (itens, campo) =>
+    itens.reduce((melhor, x) => (!semUtm(x[campo]) && x.inscritos > 0 && (!melhor || x.inscritos > melhor.inscritos) ? x : melhor), null);
+  const rotuloUtm = (x, campo) => (x[campo] == null || x[campo] === "" ? "(sem utm)" : String(x[campo]));
+
+  async function conferirCaptacao(page, mock, pagina, recorte, rotulo) {
+    const r = inscricoesResumo(DADOS, { ...recorte, pagina: pagina.id });
+    const linha = r.paginas[0];
+    const c = cartao(pagina);
+    confere(linha.inscritos > 0, `${rotulo}: a fixture tem inscritos (${linha.inscritos})`);
+    const pedido = mock.chamadas.filter((x) => x.rota === "inscricoes").at(-1);
+    confere(new URL(BASE + pedido.url).searchParams.get("pagina") === pagina.id, `${rotulo}: pediu ?pagina=${pagina.id}`);
+    confere((await texto(page, "[data-inscricoes-titulo]")) === "Inscrições", `${rotulo}: o título não fala de vendas`);
+    confere((await texto(page, "[data-inscricoes-sub]")).includes("captação gratuita"), `${rotulo}: o texto diz que é captação gratuita`);
+
+    const placar = await page.$$eval("[data-inscricoes] .ins-placar li", (lis) =>
+      lis.map((li) => ({ chave: li.dataset.placarIns, valor: li.querySelector(".valor").textContent.trim(), detalhe: li.querySelector(".detalhe").textContent.replace(/\s+/g, " ").trim() }))
+    );
+    confere(placar.map((p) => p.chave).join() === "inscritos,dia,origem,conteudo", `${rotulo}: placar da captação (${placar.map((p) => p.chave)})`);
+    confere(placar[0].valor === fmt(linha.inscritos), `${rotulo}: ${linha.inscritos} inscritos no placar`);
+    const origem = maisInscritos(linha.por_origem, "utm_source");
+    confere(placar[2].valor === origem.utm_source && placar[2].detalhe.startsWith(`${fmt(origem.inscritos)} inscrito`), `${rotulo}: principal origem (${placar[2].valor} · ${placar[2].detalhe})`);
+    const conteudo = maisInscritos(linha.por_conteudo, "utm_content");
+    // Na fixture, a maioria chega sem utm_content: o placar mostra o criativo de verdade.
+    confere(
+      linha.por_conteudo.some((x) => semUtm(x.utm_content) && x.inscritos > conteudo.inscritos) && placar[3].valor === conteudo.utm_content && placar[3].detalhe.startsWith(`${fmt(conteudo.inscritos)} inscrito`),
+      `${rotulo}: principal criativo ignora "(sem utm)" (${placar[3].valor} · ${placar[3].detalhe})`
+    );
+    const dia = maisInscritos(linha.por_dia.map((x) => ({ ...x, dia: String(x.dia).slice(0, 10) })), "dia");
+    confere(placar[1].detalhe.startsWith(`${fmt(dia.inscritos)} inscrito`), `${rotulo}: melhor dia (${placar[1].valor} · ${placar[1].detalhe})`);
+
+    for (const seletor of [`${c} [data-etapa]`, `${c} [data-ins-hotmart]`, "[data-inscricoes] .ins-compras", `${c} [data-sck-da-pagina]`, `${c} [data-divisao][data-sck]`, "[data-inscricoes] .pessoa-selos", "[data-inscricoes] .ins-parciais"]) {
+      confere((await page.$$(seletor)).length === 0, `${rotulo}: sem ${seletor}`);
+    }
+    confere(!(await page.textContent("[data-inscricoes]")).includes("(sck)") && !(await page.textContent("[data-inscricoes]")).includes("checkout"), `${rotulo}: nada de sck nem checkout na aba`);
+
+    for (const [divisao, lista, campo] of DIVISOES) {
+      const linhas = await tabela(page, `${c} [data-divisao='${divisao}']`);
+      const dados = linha[lista];
+      confere(
+        linhas.length === dados.length && dados.every((x, i) => linhas[i].length === 2 && linhas[i][0] === rotuloUtm(x, campo) && linhas[i][1] === fmt(x.inscritos)),
+        `${rotulo}: por ${divisao}, só inscritos (${linhas.map((l) => l.join("|")).join(", ")})`
+      );
+    }
+    const cabecas = await page.$$eval(`${c} [data-divisao] thead tr`, (trs) => trs.map((tr) => tr.children.length));
+    confere(cabecas.every((n) => n === 2), `${rotulo}: nenhuma tabela com a coluna de compras (${cabecas})`);
+    const dias = await page.$$eval(`${c} [data-divisao='dia'] tbody tr`, (trs) => trs.length);
+    confere(dias === Math.min(14, linha.por_dia.length), `${rotulo}: por dia até 14 linhas (${dias})`);
+
+    const listaEsperada = listaInscricoes(DADOS, { ...recorte, pagina: pagina.id }, { limite: 50 });
+    const pessoas = await page.$$eval("[data-inscricoes] .ins-pessoa", (els) =>
+      els.map((e) => ({ id: e.dataset.inscrito, meta: e.querySelector(".pessoa-meta").textContent, origem: e.querySelector(".pessoa-origem").textContent, whats: e.querySelector(".pessoa-contato a")?.href || "" }))
+    );
+    confere(pessoas.length === listaEsperada.itens.length && pessoas.every((p, i) => p.id === listaEsperada.itens[i].id), `${rotulo}: lista com os ${listaEsperada.itens.length} mais recentes`);
+    confere(pessoas.every((p) => !p.meta.includes("checkout") && !p.origem.includes("sck ")), `${rotulo}: a pessoa sem clique no checkout nem sck`);
+    confere(pessoas.every((p, i) => p.whats === `https://wa.me/55${listaEsperada.itens[i].whatsapp_digits}`), `${rotulo}: WhatsApp de cada um vira link`);
+    const csv = new URL(BASE + (await page.getAttribute("[data-inscricoes-csv]", "href"))).searchParams;
+    confere(csv.get("pagina") === pagina.id, `${rotulo}: CSV da página`);
+  }
+
   for (const largura of [1280, 390]) {
     const { page, mock, erros } = await novaPagina(browser, { largura, altura: largura < 500 ? 844 : 900 });
     await page.waitForSelector("[data-panel-view]:not([hidden])");
@@ -1520,6 +1588,26 @@ cenario("inscricoes", async () => {
     const transbordamVdf = await page.$$eval("[data-inscricoes] .tabela-rolagem", (els) => els.filter((e) => e.scrollWidth > e.clientWidth + 1).length);
     confere(larguraVdf <= largura && transbordamVdf === 0, `${largura}: Viver de Furo sem rolagem lateral (${larguraVdf}, ${transbordamVdf})`);
 
+    // Captação gratuita: a aba com o host do outro site e só o lado do formulário.
+    for (const pagina of CAPTACOES) {
+      const aba = abas.find((a) => a.id === idAba(pagina));
+      confere(aba && aba.nome === pagina.nome && aba.rota === `rota ${pagina.origem.replace(/^https:\/\//, "")}${pagina.rota}`, `${largura}: aba ${pagina.id} (${aba && aba.rota})`);
+      await page.click(`[data-paginas] [data-pagina='${idAba(pagina)}']`);
+      await page.waitForSelector(`${cartao(pagina)} [data-divisao]`);
+      await esperarCalmo(page);
+      await conferirCaptacao(page, mock, pagina, {}, `${largura} ${pagina.id}`);
+      const larguraCap = await page.evaluate(() => document.documentElement.scrollWidth);
+      const transbordamCap = await page.$$eval("[data-inscricoes] .tabela-rolagem", (els) => els.filter((e) => e.scrollWidth > e.clientWidth + 1).length);
+      const placarVaza = await page.$$eval("[data-inscricoes] .ins-placar li", (lis) => lis.filter((li) => li.scrollWidth > li.clientWidth + 1).length);
+      confere(larguraCap <= largura && transbordamCap === 0 && placarVaza === 0, `${largura}: ${pagina.id} sem rolagem lateral (${larguraCap}, ${transbordamCap}, ${placarVaza})`);
+      await tela(page, `inscricoes-${pagina.id}-${largura}`, { full: true });
+    }
+    // De volta a uma página com checkout: o título e o texto voltam a ser os de vendas.
+    await page.click(`[data-paginas] [data-pagina='${idAba(VDF)}']`);
+    await page.waitForSelector(`${cartao(VDF)} [data-etapa]`);
+    await esperarCalmo(page);
+    confere((await texto(page, "[data-inscricoes-titulo]")) === "Inscrições e vendas" && (await texto(page, "[data-inscricoes-sub]")).includes("Do lado da Hotmart"), `${largura}: a Viver de Furo volta com o título de vendas`);
+
     if (largura === 1280) {
       // "Carregar mais" traz a página seguinte sem perder o que já estava na tela.
       await page.click("[data-ins-mais]");
@@ -1565,7 +1653,8 @@ cenario("inscricoes", async () => {
       await esperarCalmo(page);
       confere((await page.evaluate(() => document.activeElement.id)) === "pagina-pesquisa-icp" && (await page.isVisible("[data-perfis]")), "Home abre a pesquisa");
       await page.keyboard.press("End");
-      await page.waitForSelector(`${cartao(ULTIMA)} [data-etapa]`);
+      // Captação gratuita não tem funil: o que aparece nela são as divisões.
+      await page.waitForSelector(`${cartao(ULTIMA)} ${CHK.temCheckout(ULTIMA) ? "[data-etapa]" : "[data-divisao]"}`);
       confere((await page.evaluate(() => document.activeElement.id)) === `pagina-${idAba(ULTIMA)}`, `End abre a última aba (${ULTIMA.nome})`);
       mock.chamadas.length = 0;
       await page.keyboard.press("ArrowLeft");

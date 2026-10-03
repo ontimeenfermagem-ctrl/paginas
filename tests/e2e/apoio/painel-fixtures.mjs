@@ -543,7 +543,9 @@ export function gerar({ seed = 7, pessoas: totalPessoas = 800, agora = new Date(
     for (let i = 0; i < 24; i++) {
       const criado = carimbo(Math.floor(Math.pow(r4(), 1.3) * 9));
       const origem = origens[Math.floor(r4() * origens.length)];
-      const comprou = r4() < 0.25;
+      // Captação gratuita (a Black Friday) não vende: o sorteio acontece igual, para a sequência
+      // dos números das outras páginas não mudar.
+      const comprou = r4() < 0.25 && CHK.temCheckout(pagina);
       const nome = `${NOMES[Math.floor(r4() * NOMES.length)]} ${SOBRENOMES[Math.floor(r4() * SOBRENOMES.length)]}`;
       const digits = `${DDD[Math.floor(r4() * DDD.length)]}9${String(10000000 + Math.floor(r4() * 89999999))}`.slice(0, 11);
       const compradoEm = comprou ? new Date(Math.min(new Date(criado).getTime() + 360000, agoraMs - 1000)).toISOString() : null;
@@ -571,7 +573,7 @@ export function gerar({ seed = 7, pessoas: totalPessoas = 800, agora = new Date(
         referrer: null,
         dispositivo: i % 7 === 0 ? "desktop" : "mobile"
       };
-      inscricao.checkout_url = linkDoCheckout(pagina, inscricao, i);
+      inscricao.checkout_url = CHK.temCheckout(pagina) ? linkDoCheckout(pagina, inscricao, i) : null;
       inscricoes.push(inscricao);
       if (comprou) {
         aviso({
@@ -604,7 +606,8 @@ export function gerar({ seed = 7, pessoas: totalPessoas = 800, agora = new Date(
    */
   const parciais = [];
   let idParcial = 0;
-  for (const pagina of CHK.LISTA) {
+  // A captação gratuita não grava rascunho (a página da Black Friday não manda): nenhum para ela.
+  for (const pagina of CHK.LISTA.filter((item) => CHK.temCheckout(item))) {
     const estados = [
       { nome: `Rascunho Nome ${pagina.id}`, whatsapp: null, digits: null, email: null, campo: "nome" },
       { nome: `Rascunho Meio ${pagina.id}`, whatsapp: "(11) 98", digits: "1198", email: null, campo: "whatsapp" },

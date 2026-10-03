@@ -3046,6 +3046,33 @@
     return CHK && typeof CHK.sckDaPagina === "function" ? CHK.sckDaPagina(pagina) : "utm_term";
   }
 
+  /**
+   * Captação gratuita (a Black Friday): página do config sem checkout. A aba fica só com o lado do
+   * formulário — inscritos, UTMs, dias e a lista —, sem cliques no checkout, compras nem Hotmart.
+   */
+  function semCheckout(pagina) {
+    if (!pagina) return false;
+    return CHK && typeof CHK.temCheckout === "function" ? !CHK.temCheckout(pagina) : !pagina.checkout;
+  }
+
+  // O título e o texto do bloco mudam com o tipo de página; o de checkout é o que está no HTML.
+  const CABECA_INSCRICOES = Object.freeze({
+    titulo: ($("[data-inscricoes-titulo]") || {}).textContent || "Inscrições e vendas",
+    sub: ($("[data-inscricoes-sub]") || {}).textContent || ""
+  });
+  const CABECA_CAPTACAO = Object.freeze({
+    titulo: "Inscrições",
+    sub: "Quem deixou o contato no formulário desta página, com as UTMs de cada um. É uma captação gratuita: não há checkout nem venda para acompanhar aqui."
+  });
+
+  function pintarCabecaInscricoes() {
+    const cabeca = semCheckout(ins.pagina) ? CABECA_CAPTACAO : CABECA_INSCRICOES;
+    const titulo = $("[data-inscricoes-titulo]");
+    const sub = $("[data-inscricoes-sub]");
+    if (titulo) titulo.textContent = cabeca.titulo;
+    if (sub) sub.textContent = cabeca.sub;
+  }
+
   function limparInscricoes() {
     ins.pagina = null;
     ins.resumo = null;
@@ -3068,6 +3095,7 @@
     if (ins.pagina !== pagina) {
       limparInscricoes();
       ins.pagina = pagina;
+      pintarCabecaInscricoes();
     }
     carregarInscricoes();
   }
@@ -3254,6 +3282,46 @@
     return `<ul class="placar ins-placar" aria-label="Números da página no período">${itens.join("")}</ul>`;
   }
 
+  /**
+   * O valor com mais inscritos de uma divisão do resumo; null = nenhum. "(sem utm)" (o rótulo que o
+   * SQL dá à UTM vazia) não entra: não é origem nem criativo, e a tabela logo abaixo já mostra
+   * quantos chegaram sem a UTM.
+   */
+  function maisInscritos(itens, chave) {
+    let melhor = null;
+    for (const item of Array.isArray(itens) ? itens : []) {
+      const valor = item && typeof item === "object" && item[chave] != null ? String(item[chave]).trim() : "";
+      if (!valor || valor === "(sem utm)") continue;
+      const inscritos = num(item.inscritos);
+      if (inscritos > 0 && (!melhor || inscritos > melhor.inscritos)) melhor = { valor, inscritos };
+    }
+    return melhor;
+  }
+
+  /** O placar da captação gratuita: quantos se inscreveram, o melhor dia e de onde veio a maioria. */
+  function placarCaptacaoHtml(t, linha) {
+    const dias = (Array.isArray(linha.por_dia) ? linha.por_dia : [])
+      .filter((item) => item && typeof item === "object")
+      .map((item) => ({ dia: String(item.dia).slice(0, 10), inscritos: item.inscritos }))
+      .filter((item) => ymdValido(item.dia));
+    const destaques = [
+      { chave: "dia", rotulo: "Melhor dia", melhor: maisInscritos(dias, "dia"), texto: (valor) => `${dataCurta(valor)} · ${diaSemana(valor)}`, nenhum: "sem inscrito no período" },
+      { chave: "origem", rotulo: "Principal origem", melhor: maisInscritos(linha.por_origem, "utm_source"), texto: (valor) => valor, nenhum: "ninguém chegou com utm_source" },
+      { chave: "conteudo", rotulo: "Principal criativo", melhor: maisInscritos(linha.por_conteudo, "utm_content"), texto: (valor) => valor, nenhum: "ninguém chegou com utm_content" }
+    ];
+    const itens = [
+      `<li class="destaque" data-placar-ins="inscritos"><span class="rotulo">Inscritos</span><span class="valor">${n(t.inscritos)}</span><span class="detalhe">deixaram o contato no formulário</span></li>`,
+      ...destaques.map(({ chave, rotulo, melhor, texto, nenhum }) => {
+        const valor = melhor ? texto(melhor.valor) : "—";
+        const detalhe = melhor ? `${plural(melhor.inscritos, "inscrito", "inscritos")} · ${pct(melhor.inscritos, t.inscritos)}` : t.inscritos ? nenhum : "sem inscrito no período";
+        return `<li data-placar-ins="${chave}"><span class="rotulo">${escapeHtml(rotulo)}</span><span class="valor valor-texto" title="${escapeHtml(valor)}">${escapeHtml(
+          valor
+        )}</span><span class="detalhe">${escapeHtml(detalhe)}</span></li>`;
+      })
+    ];
+    return `<ul class="placar ins-placar ins-placar-captacao" aria-label="Números da página no período">${itens.join("")}</ul>`;
+  }
+
   function funilInscricaoHtml(t) {
     const etapas = [
       {
@@ -3339,7 +3407,7 @@
     { chave: "termo", campo: "utm_term", lista: "por_termo", titulo: "Termo", legenda: "utm_term: o público ou a palavra-chave." }
   ];
 
-  function tabelaDivisaoHtml(titulo, chave, itens, legenda) {
+  function tabelaDivisaoHtml(titulo, chave, itens, legenda, comCompras = true) {
     const linhas = (Array.isArray(itens) ? itens : [])
       .filter((item) => item && typeof item === "object")
       .map((item) => ({
@@ -3350,12 +3418,14 @@
     return linhas.length
       ? `<div class="tabela-rolagem"><table>
           <caption>${escapeHtml(legenda)}</caption>
-          <thead><tr><th scope="col">${escapeHtml(titulo)}</th><th scope="col" class="n">Inscritos</th><th scope="col" class="n">Compras</th></tr></thead>
+          <thead><tr><th scope="col">${escapeHtml(titulo)}</th><th scope="col" class="n">Inscritos</th>${comCompras ? '<th scope="col" class="n">Compras</th>' : ""}</tr></thead>
           <tbody>${linhas
             .map(
-              (item) => `<tr><th scope="row">${escapeHtml(item.rotulo)}</th><td class="n">${n(item.inscritos)}</td><td class="n">${n(item.compras)}${
-                item.inscritos ? `<span class="taxa-inline"> · ${pct(item.compras, item.inscritos)}</span>` : ""
-              }</td></tr>`
+              (item) => `<tr><th scope="row">${escapeHtml(item.rotulo)}</th><td class="n">${n(item.inscritos)}</td>${
+                comCompras
+                  ? `<td class="n">${n(item.compras)}${item.inscritos ? `<span class="taxa-inline"> · ${pct(item.compras, item.inscritos)}</span>` : ""}</td>`
+                  : ""
+              }</tr>`
             )
             .join("")}</tbody>
         </table></div>`
@@ -3370,6 +3440,7 @@
       .filter((item) => ymdValido(item.dia))
       .sort((a, b) => b.dia.localeCompare(a.dia));
     if (!dias.length) return vazioHtml("Sem inscrição neste período.", "");
+    const comCompras = !semCheckout(pagina);
     const todos = ins.diasTodos.has(pagina.id);
     const mostrados = todos ? dias : dias.slice(0, DIAS_VISIVEIS);
     const botao =
@@ -3379,20 +3450,24 @@
           }</button>`
         : "";
     return `<div class="tabela-rolagem"><table>
-      <caption>Horário de Brasília${dias.length > mostrados.length ? ` · os ${DIAS_VISIVEIS} dias mais recentes de ${n(dias.length)}` : ""}. Inscritos pelo dia do cadastro, compras pelo dia da compra.</caption>
-      <thead><tr><th scope="col">Dia</th><th scope="col" class="n">Inscritos</th><th scope="col" class="n">Compras</th></tr></thead>
+      <caption>Horário de Brasília${dias.length > mostrados.length ? ` · os ${DIAS_VISIVEIS} dias mais recentes de ${n(dias.length)}` : ""}. ${
+        comCompras ? "Inscritos pelo dia do cadastro, compras pelo dia da compra." : "Inscritos pelo dia do cadastro."
+      }</caption>
+      <thead><tr><th scope="col">Dia</th><th scope="col" class="n">Inscritos</th>${comCompras ? '<th scope="col" class="n">Compras</th>' : ""}</tr></thead>
       <tbody>${mostrados
         .map(
-          (item) => `<tr><th scope="row">${escapeHtml(`${dataCurta(item.dia)} · ${diaSemana(item.dia)}`)}</th><td class="n">${n(item.inscritos)}</td><td class="n">${n(
-            item.compras
-          )}</td></tr>`
+          (item) => `<tr><th scope="row">${escapeHtml(`${dataCurta(item.dia)} · ${diaSemana(item.dia)}`)}</th><td class="n">${n(item.inscritos)}</td>${
+            comCompras ? `<td class="n">${n(item.compras)}</td>` : ""
+          }</tr>`
         )
         .join("")}</tbody>
     </table></div>${botao}`;
   }
 
   function divisoesInscricaoHtml(pagina, linha) {
-    const sck = sckDe(pagina);
+    const captacao = semCheckout(pagina);
+    // Sem checkout não há sck: nenhuma UTM ganha a marca.
+    const sck = captacao ? "" : sckDe(pagina);
     // SQL antigo não manda por_midia nem por_conteudo: a divisão que não veio simplesmente não aparece.
     const divisoes = DIVISOES_INSCRICAO.filter((divisao) => Array.isArray(linha[divisao.lista]))
       .map((divisao) => {
@@ -3400,13 +3475,17 @@
         const legenda = ehSck ? `O ${divisao.campo} vai para a Hotmart como sck: é o criativo que aparece no relatório de vendas de lá.` : divisao.legenda;
         return `<div class="ins-divisao${ehSck ? " ins-divisao-sck" : ""}" data-divisao="${divisao.chave}"${ehSck ? " data-sck" : ""}><h5>Por ${escapeHtml(
           divisao.titulo.toLowerCase()
-        )}${ehSck ? ' <span class="marca-sck">(sck)</span>' : ""}</h5>${tabelaDivisaoHtml(divisao.titulo, divisao.campo, linha[divisao.lista], legenda)}</div>`;
+        )}${ehSck ? ' <span class="marca-sck">(sck)</span>' : ""}</h5>${tabelaDivisaoHtml(divisao.titulo, divisao.campo, linha[divisao.lista], legenda, !captacao)}</div>`;
       })
       .join("");
     return `<section class="ins-bloco" aria-labelledby="ins-divisoes-${escapeHtml(pagina.id)}">
       <div class="ins-bloco-cabeca">
         <h4 id="ins-divisoes-${escapeHtml(pagina.id)}">Inscritos por UTM e por dia</h4>
-        <p>De onde vieram as pessoas do formulário e quantas delas compraram. Só quem se inscreveu tem UTM completa; a venda sem inscrição aparece acima, pelo sck.</p>
+        <p>${
+          captacao
+            ? "De onde vieram as pessoas do formulário: a origem, a mídia, a campanha, o criativo e o público de cada inscrição, e quantas entraram em cada dia."
+            : "De onde vieram as pessoas do formulário e quantas delas compraram. Só quem se inscreveu tem UTM completa; a venda sem inscrição aparece acima, pelo sck."
+        }</p>
       </div>
       <div class="ins-divisoes">
         ${divisoes}
@@ -3418,20 +3497,23 @@
   function cartaoInscricaoHtml(pagina, linha, t) {
     const id = escapeHtml(pagina.id);
     const sck = sckDe(pagina);
+    const captacao = semCheckout(pagina);
     const vazia = !t.inscritos && !t.cliques && !(t.temHotmart && t.vendas);
     const corpo = vazia
       ? vazioHtml(
           state.periodo === "tudo" ? "Ninguém se inscreveu nesta página ainda." : "Ninguém se inscreveu nesta página neste período.",
           "Assim que a primeira pessoa enviar o formulário, os números aparecem aqui."
         )
-      : `${funilInscricaoHtml(t)}${t.temHotmart ? hotmartHtml(pagina, t) : ""}${divisoesInscricaoHtml(pagina, linha)}`;
+      : captacao
+        ? divisoesInscricaoHtml(pagina, linha)
+        : `${funilInscricaoHtml(t)}${t.temHotmart ? hotmartHtml(pagina, t) : ""}${divisoesInscricaoHtml(pagina, linha)}`;
     return `<article class="cartao ins-cartao" data-inscricao-pagina="${id}" aria-labelledby="ins-${id}">
       <header class="ins-cabeca">
         <div class="ins-titulo">
           <h3 id="ins-${id}">${escapeHtml(pagina.nome)}</h3>
           <p class="ins-meta"><span class="ins-rota" title="${escapeHtml(rotaDaInscricao(pagina))}">${rotaHtml(hostDaInscricao(pagina), pagina.rota)}</span><span class="ins-produto">${escapeHtml(
             pagina.produto || ""
-          )}</span><span class="ins-sck-da-pagina" data-sck-da-pagina="${escapeHtml(sck)}">sck = ${escapeHtml(sck)}</span></p>
+          )}</span>${captacao ? "" : `<span class="ins-sck-da-pagina" data-sck-da-pagina="${escapeHtml(sck)}">sck = ${escapeHtml(sck)}</span>`}</p>
         </div>
       </header>
       ${corpo}
@@ -3511,7 +3593,7 @@
     </article>`;
   }
 
-  function inscritoHtml(item, sck) {
+  function inscritoHtml(item, sck, captacao = false) {
     const link = whatsappLink(item.whatsapp_digits);
     const telefone = item.whatsapp
       ? link
@@ -3530,15 +3612,19 @@
         }</span>`;
     const cliques = num(item.cliques);
     // O valor que foi para a Hotmart como sck (a UTM da página): é o que o relatório de lá mostra.
-    const valorSck = typeof item[sck] === "string" && item[sck].trim() ? item[sck].trim() : "";
+    // Captação gratuita não tem sck, compra nem checkout: fica a data, e quantas vezes enviou.
+    const valorSck = !captacao && typeof item[sck] === "string" && item[sck].trim() ? item[sck].trim() : "";
+    const meta = captacao
+      ? `${dataHora(item.criado_em)}${cliques > 1 ? ` · enviou ${n(cliques)} vezes` : ""}`
+      : `${dataHora(item.criado_em)} · ${plural(cliques, "clique no checkout", "cliques no checkout")}`;
     return `<article class="pessoa ins-pessoa" data-inscrito="${escapeHtml(item.id)}">
       <div class="pessoa-cabeca">
         <div class="pessoa-quem">
           <span class="pessoa-nome">${escapeHtml(item.nome || "Sem nome")}</span>
-          <span class="pessoa-meta">${escapeHtml(`${dataHora(item.criado_em)} · ${plural(cliques, "clique no checkout", "cliques no checkout")}`)}</span>
+          <span class="pessoa-meta">${escapeHtml(meta)}</span>
         </div>
         <div class="pessoa-contato">${telefone}<span>${escapeHtml(item.email || "sem e-mail")}</span></div>
-        <div class="pessoa-selos">${selo}</div>
+        ${captacao ? "" : `<div class="pessoa-selos">${selo}</div>`}
         <div class="pessoa-acoes">
           <span class="pessoa-origem">${escapeHtml(origemTexto(item))}${valorSck ? ` · <span class="ins-sck-valor" title="${escapeHtml(`${sck}, que foi para a Hotmart como sck`)}">sck ${escapeHtml(valorSck)}</span>` : ""}</span>
         </div>
@@ -3548,8 +3634,9 @@
 
   function listaInscritosHtml(pagina) {
     const sck = sckDe(pagina);
+    const captacao = semCheckout(pagina);
     const corpo = ins.itens.length
-      ? `${ins.itens.map((item) => inscritoHtml(item, sck)).join("")}${
+      ? `${ins.itens.map((item) => inscritoHtml(item, sck, captacao)).join("")}${
           ins.itens.length < ins.total
             ? `<button type="button" class="botao botao-leve ins-mais" data-ins-mais data-foco="ins-mais"${ins.carregando ? " disabled" : ""}>${
                 ins.carregando ? "Carregando..." : `Carregar mais ${n(Math.min(LIMITE_INSCRITOS, ins.total - ins.itens.length))}`
@@ -3660,12 +3747,14 @@
     $("[data-inscricoes-periodo]").textContent =
       ins.geradoEm && ins.resumo ? `${rotuloPeriodo()} · atualizado às ${hora(ins.geradoEm)}` : rotuloPeriodo();
     pintarAtualizado();
+    pintarCabecaInscricoes();
     if (!ins.resumo || !ins.pagina) {
       redesenhar(alvo, erroHtml(ins.erro, "inscricoes", "repetir-inscricoes"));
       return;
     }
 
     const pagina = ins.pagina;
+    const captacao = semCheckout(pagina);
     const linha = linhaDaPagina();
     const t = numerosDaPagina(linha, ins.resumo);
     const semNada = !t.inscritos && !t.cliques && !(t.temHotmart && t.vendas);
@@ -3675,17 +3764,23 @@
           <h3>${state.periodo === "tudo" ? "Ninguém se inscreveu ainda" : "Ninguém se inscreveu neste período"}</h3>
           <p>${
             state.periodo === "tudo"
-              ? "Quem enviar o formulário da página de inscrição aparece aqui, com o clique no checkout e a compra."
+              ? captacao
+                ? "Quem enviar o formulário da página aparece aqui, com o WhatsApp e as UTMs."
+                : "Quem enviar o formulário da página de inscrição aparece aqui, com o clique no checkout e a compra."
               : "Tente um período maior, ou “Tudo”."
           }</p>
         </div>`
-      : placarInscricaoHtml(t);
+      : captacao
+        ? placarCaptacaoHtml(t, linha)
+        : placarInscricaoHtml(t);
 
     redesenhar(
       alvo,
-      `${topo}<div class="ins-lista">${cartaoInscricaoHtml(pagina, linha, t)}</div>${comprasRecentesHtml(t)}${listaInscritosHtml(
+      // Captação gratuita: sem avisos da Hotmart, e o cartão de rascunhos só se alguém tiver parado
+      // no meio (a página da Black Friday não grava rascunho).
+      `${topo}<div class="ins-lista">${cartaoInscricaoHtml(pagina, linha, t)}</div>${captacao ? "" : comprasRecentesHtml(t)}${listaInscritosHtml(
         pagina
-      )}${listaParciaisHtml()}`
+      )}${captacao && !ins.parciais.total ? "" : listaParciaisHtml()}`
     );
   }
 

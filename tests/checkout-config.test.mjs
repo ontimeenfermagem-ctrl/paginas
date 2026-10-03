@@ -60,9 +60,12 @@ test("a lista de páginas é o contrato do servidor e do painel", () => {
   assert.ok(C.LISTA.length >= 2);
   for (const pagina of C.LISTA) {
     // "_" entra: a rota da venda da Imersão GPS (/igps_set_lp_26-ingresso) é o endereço que já está
-    // no ar no outro site e nos anúncios; não dá para trocar por hífen.
-    assert.match(pagina.rota, /^\/[a-z0-9_-]+$/, `rota de ${pagina.id}`);
-    assert.match(pagina.checkout, /^https:\/\/pay\.hotmart\.com\//, `checkout de ${pagina.id}`);
+    // no ar no outro site e nos anúncios; não dá para trocar por hífen. Maiúscula só em página de
+    // outro site (a Black Friday, /BF_out_LS_26-inscricao-a): rota daqui é sempre minúscula.
+    assert.match(pagina.rota, pagina.origem ? /^\/[A-Za-z0-9_-]+$/ : /^\/[a-z0-9_-]+$/, `rota de ${pagina.id}`);
+    // Ou leva a um checkout da Hotmart, ou é captação gratuita (checkout null).
+    if (pagina.checkout === null) assert.equal(C.temCheckout(pagina), false, `${pagina.id} sem checkout`);
+    else assert.match(pagina.checkout, /^https:\/\/pay\.hotmart\.com\//, `checkout de ${pagina.id}`);
     assert.equal(C.paginaDaRota(pagina.rota), pagina);
     assert.equal(C.paginaDaRota(`${pagina.rota}/`), pagina);
     assert.equal(C.paginaPorId(pagina.id), pagina);
@@ -91,8 +94,13 @@ test("cada página diz de qual UTM sai o sck, qual régua de e-mail usa e como a
     assert.equal(typeof pagina.emailSomenteComBr, "boolean", `emailSomenteComBr de ${pagina.id}`);
     assert.ok(Array.isArray(pagina.hotmart.ofertas) && Array.isArray(pagina.hotmart.produtos), `hotmart de ${pagina.id}`);
     // A oferta do link do config é reconhecida no aviso de venda: sem isso a venda chegaria sem página.
-    assert.ok(pagina.hotmart.ofertas.includes(C.ofertaDoLink(pagina.checkout)), `oferta do checkout de ${pagina.id}`);
-    assert.equal(C.paginaDaVenda({ oferta: C.ofertaDoLink(pagina.checkout) }), pagina, `venda da oferta de ${pagina.id}`);
+    // Captação gratuita não vende nada: nenhuma oferta nem produto aponta para ela.
+    if (C.temCheckout(pagina)) {
+      assert.ok(pagina.hotmart.ofertas.includes(C.ofertaDoLink(pagina.checkout)), `oferta do checkout de ${pagina.id}`);
+      assert.equal(C.paginaDaVenda({ oferta: C.ofertaDoLink(pagina.checkout) }), pagina, `venda da oferta de ${pagina.id}`);
+    } else {
+      assert.equal(pagina.hotmart.ofertas.length + pagina.hotmart.produtos.length, 0, `venda reconhecida na captação ${pagina.id}`);
+    }
     // Os campos antigos (um só código de oferta/produto) saíram: quem ler deles leria undefined.
     assert.equal(pagina.oferta, undefined, `oferta solta em ${pagina.id}`);
     assert.equal(pagina.hotmart_produto, undefined, `hotmart_produto em ${pagina.id}`);
@@ -121,6 +129,31 @@ test("imersao-gps: mora no outro site, sck = utm_content, e-mail só .com/.com.b
   assert.deepEqual(Array.from(gps.hotmart.produtos), []);
   assert.equal(typeof gps.nome, "string");
   assert.equal(typeof gps.produto, "string");
+});
+
+test("bf-out-ls-26: a lista VIP da Black Friday mora no outro site, é captação gratuita e aceita qualquer domínio", () => {
+  const bf = C.paginaPorId("bf-out-ls-26");
+  assert.ok(bf);
+  assert.equal(bf.rota, "/BF_out_LS_26-inscricao-a");
+  assert.equal(bf.origem, "https://io.escolaenfermagemdevalor.com.br");
+  assert.ok(C.ORIGENS.includes(bf.origem));
+  assert.equal(bf.checkout, null);
+  assert.equal(C.temCheckout(bf), false);
+  assert.equal(bf.emailSomenteComBr, false);
+  assert.equal(typeof bf.nome, "string");
+  assert.equal(typeof bf.produto, "string");
+  // É a última: página nova entra no fim, e a ordem da lista é a ordem das abas do painel.
+  assert.equal(C.LISTA[C.LISTA.length - 1], bf);
+  // Nenhum aviso de venda cai nela.
+  assert.equal(C.paginaDaVenda({ oferta: "", produto_id: "" }), null);
+  for (const pagina of C.LISTA) if (pagina !== bf) assert.notEqual(C.paginaDaVenda({ oferta: C.ofertaDoLink(pagina.checkout) }), bf);
+});
+
+test("temCheckout: só página com link de checkout", () => {
+  for (const id of ["viver-de-furo", "imersao-gps", "aplicacao-afericao"]) assert.equal(C.temCheckout(C.paginaPorId(id)), true, id);
+  for (const vazio of [null, undefined, {}, { checkout: null }, { checkout: "" }, { checkout: 42 }]) {
+    assert.equal(C.temCheckout(vazio), false, JSON.stringify(vazio));
+  }
 });
 
 test("viver-de-furo: continua no utm_term, aceita qualquer domínio e reconhece o produto 2332962", () => {
@@ -587,7 +620,7 @@ const UTMS_DE_TESTE = Object.freeze({
   utm_content: "video-a"
 });
 
-for (const pagina of C.LISTA) {
+for (const pagina of C.LISTA.filter((item) => C.temCheckout(item))) {
   test(`${pagina.nome}: o link do checkout preserva a oferta, leva as UTMs, o sck e o contato`, () => {
     const url = C.montarUrlCheckout(pagina.checkout, {
       sck: C.sckDaPagina(pagina),

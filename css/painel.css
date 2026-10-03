@@ -2871,6 +2871,13 @@ tr.fora-da-pagina td {
   padding: 0.75rem 0.8rem;
 }
 
+/* Captação gratuita: o melhor dia, a origem e o criativo são texto, e uma UTM longa não pode
+   estourar o cartão no celular (o valor inteiro fica no title). */
+.ins-placar-captacao .valor.valor-texto {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .ins-vazio {
   margin-top: 0;
 }
