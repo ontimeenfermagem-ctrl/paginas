@@ -153,8 +153,9 @@ function acessoEm(quando) {
 /*
  * O YouTube falso: a mesma API (YT.Player sobre o iframe que já existe), com 90 s de vídeo. Toca
  * sozinho, a não ser que window.__autoplayBloqueado; o playVideo() não toca se
- * window.__playBloqueado; window.__minutoDoVideo manda no tempo; o último seekTo fica em
- * window.__yt.seek.
+ * window.__playBloqueado; com window.__bufferMs, o play passa antes por "carregando" (3), como o
+ * de verdade numa rede lenta; window.__onReadyMs atrasa o player ficar pronto;
+ * window.__minutoDoVideo manda no tempo; o último seekTo fica em window.__yt.seek.
  */
 const YOUTUBE_FALSO = `
 window.__yt = { seek: null, players: [] };
@@ -165,17 +166,23 @@ window.YT = { Player: function (el, opcoes) {
   self.getCurrentTime = function () { return typeof window.__minutoDoVideo === "number" ? window.__minutoDoVideo : tempo; };
   self.getDuration = function () { return 90; };
   self.getPlayerState = function () { return estado; };
-  self.playVideo = function () { if (!window.__playBloqueado) mudar(1); };
+  self.playVideo = function () {
+    if (window.__playBloqueado) return;
+    if (window.__bufferMs) { mudar(3); setTimeout(function () { if (estado === 3) mudar(1); }, window.__bufferMs); }
+    else mudar(1);
+  };
   self.pauseVideo = function () { mudar(2); };
   self.seekTo = function (s) { tempo = s; window.__yt.seek = s; };
   self.mute = function () { mudo = true; };
   self.unMute = function () { mudo = false; };
   self.isMuted = function () { return mudo; };
   self.destroy = function () {};
+  // Para o teste mandar um estado como o YouTube manda (0 = fim).
+  self.__mudar = mudar;
   setTimeout(function () {
     if (eventos.onReady) eventos.onReady({ target: self });
     if (!window.__autoplayBloqueado) setTimeout(function () { mudar(3); setTimeout(function () { mudar(1); }, 40); }, 20);
-  }, 0);
+  }, window.__onReadyMs || 0);
 } };
 if (typeof window.onYouTubeIframeAPIReady === "function") window.onYouTubeIframeAPIReady();`;
 
@@ -423,9 +430,11 @@ test("a mini aula toca no quadro do topo, e 'Voltar para a aula principal' devol
   assert.equal(await card(page, 1).locator("button").getAttribute("aria-current"), "true");
   assert.match(await card(page, 1).textContent(), /No quadro lá em cima/);
 
+  assert.equal(await page.evaluate(() => document.body.classList.contains("assistindo")), true, "tocando, a decoração sai da frente");
   await page.click(".abertura-voltar");
   assert.equal(await page.locator(".abertura-quadro.agendada").count(), 1, "a live de volta no topo");
   assert.equal(await page.locator("#aula iframe").count(), 0, "o Short saiu do quadro");
+  assert.equal(await page.evaluate(() => document.body.classList.contains("assistindo")), false, "sem vídeo, o topo volta ao normal");
   assert.equal(await page.locator(".abertura-voltar").count(), 0);
   assert.equal(await page.locator('#conteudos-lista [aria-current="true"]').count(), 0);
   assert.deepEqual(erros, []);
@@ -445,10 +454,13 @@ test("na hora da live, com a página aberta: o selo conta o tempo e o quadro abr
   assert.equal((await page.textContent(".abertura-agenda-texto")).trim(), "Ao vivo · em 2min");
   await page.clock.runFor(61000);
   assert.equal((await page.textContent(".abertura-agenda-texto")).trim(), "Ao vivo · em instantes");
+  assert.match(await page.getAttribute("#quadro", "aria-label"), /abre em instantes$/, "o leitor de tela ouve a mesma contagem do selo");
+  await page.focus("#quadro");
 
   await page.clock.runFor(30000);
   await page.waitForFunction(() => !document.querySelector(".abertura-quadro.agendada"));
   assert.match(await page.textContent(".abertura-quadro"), /Assistir a aula/);
+  assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.id), "quadro", "quem estava no quadro continua nele");
   await page.click("#quadro");
   assert.match(await page.getAttribute("#aula iframe", "src"), /\/embed\/cccccccccc7\?/);
   assert.deepEqual(erros, []);
@@ -578,6 +590,112 @@ test("player limpo: sem a API do YouTube, volta o player do YouTube com os contr
   assert.ok(!src.includes("controls=0"), "com os controles do YouTube, a aula toca");
   assert.equal(await page.isHidden(".player-camada"), true);
   assert.equal(await page.isHidden(".player-controles"), true);
+  await ctx.close();
+});
+
+test("player limpo: com o YouTube só demorando para ficar pronto (rede fraca), nada de trocar de player", async () => {
+  const { page, ctx } = await abrir({
+    config: COM_VIDEOS,
+    acesso: acessoEm(new Date(SABADO.getTime() - 60000)),
+    agora: new Date(SABADO.getTime() - 60000),
+    relogio: "instalado"
+  });
+  await page.evaluate(() => (window.__onReadyMs = 9000));
+  await page.clock.pauseAt(SABADO);
+  await page.waitForSelector("#conteudos:not([hidden])");
+  await card(page, 1).locator("button").click();
+  // A API chegou na hora; o player é que demora 9 s. Aos 6,5 s, nada de 'sem-api'.
+  await page.clock.runFor(6500);
+  assert.equal(await estadoDoPlayer(page), "carregando");
+  assert.ok((await page.getAttribute("#aula iframe", "src")).includes("controls=0"), "o player limpo continua");
+  await page.clock.runFor(3000);
+  assert.equal(await estadoDoPlayer(page), "tocando");
+  assert.equal(await page.$eval(".player-limpo", (el) => el.classList.contains("sem-api")), false);
+  await ctx.close();
+});
+
+test("player limpo: continuar com o YouTube baixando (rede lenta) não pede o toque nem fura a camada", async () => {
+  const { page, ctx } = await abrir({ config: COM_VIDEOS, acesso: acessoEm(SABADO) });
+  await page.waitForSelector("#conteudos:not([hidden])");
+  await card(page, 1).locator("button").click();
+  await page.waitForFunction(() => document.querySelector(".player-limpo")?.dataset.estado === "tocando");
+  await page.click(".player-camada");
+  assert.equal(await estadoDoPlayer(page), "pausado");
+  // O play volta passando 2,5 s em "carregando" (3): o relógio do 'aguardando' não pode disparar.
+  await page.evaluate(() => (window.__bufferMs = 2500));
+  await page.click(".player-botao-tocar");
+  const vistos = new Set();
+  for (let i = 0; i < 14; i++) {
+    vistos.add(await estadoDoPlayer(page));
+    await page.waitForTimeout(200);
+  }
+  assert.ok(!vistos.has("aguardando"), `estados vistos: ${[...vistos]}`);
+  assert.equal(await estadoDoPlayer(page), "tocando");
+  assert.equal(await noMeioDoPlayer(page), "player-camada");
+  await ctx.close();
+});
+
+test("player limpo no celular deitado: o player em pé é estreito, e todos os controles cabem nele", async () => {
+  const { page, ctx } = await abrir({ largura: 844, altura: 390, config: COM_VIDEOS, acesso: acessoEm(SABADO) });
+  await page.waitForSelector("#conteudos:not([hidden])");
+  await card(page, 1).locator("button").click();
+  await page.waitForFunction(() => document.querySelector(".player-limpo")?.dataset.estado === "tocando");
+  await page.click(".player-camada");
+  const fora = await page.evaluate(() => {
+    const caixa = document.querySelector(".player-limpo").getBoundingClientRect();
+    return Array.from(document.querySelectorAll(".player-controles button, .player-barra"))
+      .filter((el) => getComputedStyle(el).display !== "none")
+      .filter((el) => {
+        const r = el.getBoundingClientRect();
+        return r.left < caixa.left - 0.5 || r.right > caixa.right + 0.5;
+      })
+      .map((el) => el.className);
+  });
+  assert.deepEqual(fora, [], "nenhum controle cortado");
+  await ctx.close();
+});
+
+test("no fim do vídeo: a capa volta, a dica 'Assistir de novo' tem fundo próprio e o toque recomeça", async () => {
+  const { page, ctx } = await abrir({ config: COM_VIDEOS, acesso: acessoEm(SABADO) });
+  await page.waitForSelector("#conteudos:not([hidden])");
+  await card(page, 1).locator("button").click();
+  await page.waitForFunction(() => document.querySelector(".player-limpo")?.dataset.estado === "tocando");
+  // O YouTube avisa o fim (0).
+  await page.evaluate(() => window.__yt.players.at(-1).__mudar(0));
+  assert.equal(await estadoDoPlayer(page), "fim");
+  assert.equal(await page.textContent(".player-dica"), "Assistir de novo");
+  // A dica tem a tarja escura: lê bem em cima da thumb clara do Short.
+  const fundo = await page.$eval(".player-dica", (el) => getComputedStyle(el).backgroundColor);
+  assert.notEqual(fundo, "rgba(0, 0, 0, 0)", `fundo da dica: ${fundo}`);
+  assert.equal(await page.$eval(".player-capa", (el) => getComputedStyle(el).visibility), "visible", "a capa cobre as sugestões do fim");
+  // Tocar de novo volta ao começo.
+  await page.click(".player-camada");
+  assert.equal(await page.evaluate(() => window.__yt.seek), 0);
+  assert.equal(await estadoDoPlayer(page), "tocando");
+  await ctx.close();
+});
+
+test("a gravação que entra no config depois da live chega a quem está com a página aberta", async () => {
+  const LIVE_JA_FOI = "2026-10-03T08:00:00-03:00";
+  const versao = { comGravacao: false };
+  // O config servido muda no meio do teste, como num deploy com o link da gravação.
+  const config = (texto) =>
+    configDoTeste({ aulaLiberaEm: LIVE_JA_FOI, ...(versao.comGravacao ? { aulaVideo: "dddddddddd8" } : {}) })(texto);
+  const { page, ctx, erros } = await abrir({ config, acesso: acessoEm(SABADO) });
+  await page.waitForSelector("#conteudos:not([hidden])");
+  assert.equal((await page.textContent(".abertura-quadro")).trim(), GPS.aulas[0].aviso, "sem a gravação, o aviso");
+  // A tarja do aviso: legível em cima das letras da thumb.
+  assert.notEqual(await page.$eval(".abertura-texto", (el) => getComputedStyle(el).backgroundColor), "rgba(0, 0, 0, 0)");
+
+  // O link entra no config; a pessoa volta para a aba: a página percebe e recarrega sozinha.
+  versao.comGravacao = true;
+  await page.waitForTimeout(300);
+  await Promise.all([page.waitForEvent("load"), page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")))]);
+  await page.waitForSelector("#conteudos:not([hidden])");
+  assert.match(await page.textContent(".abertura-quadro"), /Assistir a aula/, "a gravação apareceu sem ninguém atualizar");
+  await page.click("#quadro");
+  assert.match(await page.getAttribute("#aula iframe", "src"), /\/embed\/dddddddddd8\?/);
+  assert.deepEqual(erros, []);
   await ctx.close();
 });
 

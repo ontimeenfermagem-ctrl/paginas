@@ -536,6 +536,19 @@ body.sala {
   opacity: 1;
 }
 
+/* A thumb opaca cobriria o anel de foco do botão: o anel vai na própria thumb. */
+.abertura-quadro.agendada:focus-visible .abertura-capa {
+  outline: 3px solid var(--gold-soft);
+  outline-offset: -5px;
+}
+
+/* A aula aberta sem vídeo (a live antes da gravação): o aviso numa tarja, sobre as letras da thumb. */
+.abertura-quadro[aria-disabled="true"]:not(.agendada) .abertura-texto {
+  padding: 8px 14px;
+  border-radius: 12px;
+  background: rgba(22, 15, 24, 0.82);
+}
+
 .abertura-agenda {
   display: flex;
   align-items: center;
@@ -612,6 +625,25 @@ body.sala {
   overflow: hidden;
   isolation: isolate;
   cursor: default;
+  container-type: inline-size;
+}
+
+/* Player estreito (o Short num celular deitado): os controles se apertam e todos cabem. (Com o
+   .player-limpo na frente: as regras de sempre dos botões vêm depois e ganhariam.) */
+@container (max-width: 259px) {
+  .player-limpo .player-controles {
+    gap: 0;
+    padding-inline: 4px;
+  }
+  .player-limpo .player-tempo {
+    display: none;
+  }
+  .player-limpo .player-botao {
+    width: 34px;
+  }
+  .player-limpo .player-barra {
+    min-width: 24px;
+  }
 }
 
 .player-limpo iframe {
@@ -748,6 +780,9 @@ body.sala {
 .player-dica {
   max-width: 26ch;
   margin: 0;
+  padding: 6px 12px;
+  border-radius: 12px;
+  background: rgba(22, 15, 24, 0.78);
   color: #fff;
   font-size: 13px;
   font-weight: 700;
@@ -783,7 +818,7 @@ body.sala {
   pointer-events: none;
 }
 
-.player-limpo .player-controles:focus-within {
+.player-limpo .player-controles:has(:focus-visible) {
   opacity: 1;
   pointer-events: auto;
 }
@@ -1440,7 +1475,8 @@ body.sala {
   width: 7px;
   height: 7px;
   border-radius: 999px;
-  background: color-mix(in oklab, var(--ember) 26%, transparent);
+  /* 72% de ameixa: o pontinho apagado ainda passa de 3:1 sobre o papel (WCAG 1.4.11). */
+  background: color-mix(in oklab, var(--ember) 72%, transparent);
   transition:
     width 180ms ease,
     background 180ms ease;

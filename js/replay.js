@@ -363,8 +363,12 @@
       playerAtual.destruir();
       playerAtual = null;
     }
+    // Quem estava com o foco no quadro continua nele depois do redesenho (na hora da live, por ex.).
+    const tinhaFoco = alvo.contains(document.activeElement);
     alvo.textContent = "";
     tocando = false;
+    // Nada tocando no quadro: o topo e o rodapé voltam ao normal (o tocar() apaga de novo).
+    document.body.classList.remove("assistindo");
     window.clearTimeout(relogioOferta);
     window.clearInterval(vigiaOferta);
 
@@ -445,6 +449,7 @@
     quadro.append(centro);
     alvo.append(quadro);
     if (seloDaAgenda) alvo.append(seloDaAgenda);
+    if (tinhaFoco) quadro.focus({ preventScroll: true });
 
     // Um conteúdo tomou o quadro, mas a aula tem vídeo: o caminho de volta fica sempre à mão (o
     // tocar() troca só o quadro, então este botão continua embaixo do player).
@@ -814,11 +819,16 @@
       }
       if (agora === "fim") chamar(() => player.seekTo(0, true));
       chamar(() => player.playVideo());
-      // Se o navegador não deixar (o play não vem), o próximo toque vai direto para o vídeo.
+      // Se o navegador não deixar (o play não vem), o próximo toque vai direto para o vídeo. Se o
+      // YouTube está baixando (3), o play foi aceito: espera mais, sem pedir o toque — o toque
+      // nessa hora cairia no YouTube e pausaria o vídeo que está começando.
       window.clearTimeout(relogioEspera);
-      relogioEspera = window.setTimeout(() => {
-        if (!destruido && caixa.dataset.estado !== "tocando") estado("aguardando");
-      }, 1500);
+      const conferir = () => {
+        if (destruido || caixa.dataset.estado === "tocando") return;
+        if (ultimoCodigo === 3) relogioEspera = window.setTimeout(conferir, 1500);
+        else estado("aguardando");
+      };
+      relogioEspera = window.setTimeout(conferir, 1500);
     }
 
     camada.addEventListener("pointerdown", (evento) => {
@@ -926,14 +936,21 @@
 
     // Sem a API, os nossos botões não mandam em nada: volta o player do YouTube, com os controles dele.
     function semApi() {
-      if (destruido || pronto) return;
+      if (destruido || pronto || caixa.classList.contains("sem-api")) return;
+      window.clearTimeout(relogioApi);
+      const focoDentro = caixa.contains(document.activeElement);
       caixa.classList.add("sem-api");
       caixa.dataset.estado = "sem-api";
       frame.tabIndex = 0;
       frame.setAttribute("allowfullscreen", "");
       frame.src = R.urlDoVideo(atual.video);
+      if (focoDentro) frame.focus({ preventScroll: true });
     }
 
+    estado("carregando");
+    // 6 s para a API do YouTube chegar. Chegou: o prazo passa a ser o do player ficar pronto, bem
+    // mais longo — em rede fraca o vídeo demora, e trocar de player no meio jogaria fora o que já
+    // baixou (e mostraria tudo o que o player limpo esconde).
     relogioApi = window.setTimeout(semApi, 6000);
     try {
       carregarApiDoYoutube(() => {
@@ -942,6 +959,8 @@
           player = new window.YT.Player(frame, {
             events: { onReady: aoFicarPronto, onStateChange: aoMudarEstado, onError: () => estado("erro") }
           });
+          window.clearTimeout(relogioApi);
+          if (!pronto) relogioApi = window.setTimeout(semApi, 25000);
         } catch {
           semApi();
         }
@@ -949,7 +968,6 @@
     } catch {
       semApi();
     }
-    estado("carregando");
 
     return {
       frame,
@@ -1071,7 +1089,7 @@
       // pelo conteúdo do dia.
       desenharConteudos({ forcar: true });
     }
-    if (secao) secao.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (secao) secao.scrollIntoView({ behavior: semMovimento() ? "auto" : "smooth", block: "center" });
     focarPlayer();
   }
 
@@ -1307,6 +1325,9 @@
       const quando = R.rotuloDaLiberacao(Number(selo.dataset.libera), agora);
       const texto = selo.querySelector(".abertura-agenda-texto");
       if (texto && quando && texto.textContent !== `Ao vivo · ${quando}`) texto.textContent = `Ao vivo · ${quando}`;
+      // O leitor de tela lê o quadro: o nome dele acompanha o selo.
+      const quadro = $("quadro");
+      if (quadro && quadro.classList.contains("agendada") && aula && quando) quadro.setAttribute("aria-label", `${aula.titulo}: abre ${quando}`);
     }
     for (const li of document.querySelectorAll('#conteudos-lista > li[data-estado="trancado"], #conteudos-destaque > li[data-estado="trancado"]')) {
       const quando = R.rotuloDaLiberacao(Number(li.dataset.libera), agora);
@@ -1353,6 +1374,7 @@
     // Chegou a hora da aula principal com o quadro parado nela: o quadro troca a capa pelo play.
     if (liberada && !tocando && emCartaz === aula && aula && R.aulaAberta(aula, Date.now()) !== quadroDaAulaAberto) {
       desenharQuadro();
+      if (quadroDaAulaAberto) anunciar(`${aula.titulo}: começou.`);
     }
 
     if (!itens.length) {
@@ -1427,8 +1449,57 @@
 
   // Quem deixa a aba aberta e volta no dia seguinte encontra o card do dia já destravado.
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) desenharConteudos();
+    if (!document.hidden) {
+      desenharConteudos();
+      conferirGravacao();
+    }
   });
+
+  /*
+   * A GRAVAÇÃO QUE CHEGA DEPOIS: a live abriu sem vídeo (o link vem depois do evento) e a pessoa
+   * ficou com a página aberta. O config que ela tem na memória nunca vai ter o vídeo — então, de
+   * tempos em tempos (e ao voltar para a aba), a página pede o js/replay-config.js de novo e, se ele
+   * mudou desde que ela abriu, recarrega para a gravação aparecer. Nunca com vídeo tocando nem com
+   * comentário escrito pela metade, e no máximo uma vez por visita.
+   */
+  const URL_DO_CONFIG = "/js/replay-config.js";
+  const CHAVE_RECARGA = `ev_replay_recarga_${pagina.id}`;
+  let configDaAbertura = null;
+  let relogioGravacao = 0;
+
+  const esperandoGravacao = () => Boolean(liberada && aula && R.aulaAberta(aula, Date.now()) && !R.videoValido(aula.video));
+
+  async function lerConfig() {
+    try {
+      const resposta = await fetch(URL_DO_CONFIG, { cache: "no-store" });
+      return resposta.ok ? await resposta.text() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function conferirGravacao() {
+    if (!esperandoGravacao() || configDaAbertura === null) return;
+    const agora = await lerConfig();
+    if (!agora || agora === configDaAbertura) return;
+    const rascunho = $("mural-texto");
+    if (tocando || (rascunho && rascunho.value.trim())) return;
+    try {
+      if (window.sessionStorage.getItem(CHAVE_RECARGA) === "1") return;
+      window.sessionStorage.setItem(CHAVE_RECARGA, "1");
+    } catch {
+      return;
+    }
+    window.location.reload();
+  }
+
+  // Só nas salas com aula marcada e ainda sem vídeo: guarda o config como estava ao abrir a página.
+  if (aula && aula.liberaEm && !R.videoValido(aula.video)) {
+    lerConfig().then((texto) => {
+      configDaAbertura = texto;
+    });
+    relogioGravacao = window.setInterval(conferirGravacao, 3 * 60 * 1000);
+  }
 
   /* ================================================================== */
   /* Desenho: a matéria, o material                                      */
